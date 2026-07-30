@@ -1,0 +1,43 @@
+name: Document export matrix
+
+on:
+  push:
+    paths:
+      - "services/researcher/app/exporter.py"
+      - "services/researcher/test/test_exporter.py"
+      - "services/researcher/requirements.txt"
+      - ".github/workflows/document-export-matrix.yml"
+  pull_request:
+    paths:
+      - "services/researcher/app/exporter.py"
+      - "services/researcher/test/test_exporter.py"
+      - "services/researcher/requirements.txt"
+      - ".github/workflows/document-export-matrix.yml"
+
+jobs:
+  export:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install export test dependencies
+        run: >-
+          python -m pip install
+          fastapi==0.116.1
+          httpx==0.28.1
+          mistune==3.3.4
+          pydantic==2.11.7
+          pypdf==6.14.2
+          pytest==8.4.1
+          python-docx==1.2.0
+          reportlab==5.0.0
+      - name: Generate and reopen DOCX/PDF
+        working-directory: services/researcher
+        run: python -m pytest test/test_exporter.py -q

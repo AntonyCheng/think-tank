@@ -1,0 +1,20 @@
+{
+  "name": "think-tank",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @think-tank/orchestrator",
+    "test": "npm run test --workspace @think-tank/orchestrator",
+    "typecheck": "npm run typecheck --workspace @think-tank/orchestrator",
+    "test:acceptance": "node scripts/acceptance.mjs",
+    "spike": "node --env-file-if-exists=.env --import tsx apps/orchestrator/src/spike.ts",
+    "api": "node --env-file-if-exists=.env --import tsx apps/orchestrator/src/api-server.ts"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

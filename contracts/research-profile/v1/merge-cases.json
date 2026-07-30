@@ -1,0 +1,252 @@
+{
+  "environments": {
+    "current": {
+      "defaults": {
+        "defaultRetriever": "duckduckgo"
+      },
+      "capabilities": {
+        "modes": ["standard"],
+        "sourceModes": ["web"],
+        "retrievers": ["duckduckgo"],
+        "maxRetrievers": 1,
+        "sourceCuration": false,
+        "domainFilters": false
+      }
+    },
+    "expanded": {
+      "defaults": {
+        "defaultRetriever": "duckduckgo"
+      },
+      "capabilities": {
+        "modes": ["standard", "deep", "synthesis"],
+        "sourceModes": ["web", "urls", "local", "hybrid", "mcp"],
+        "retrievers": ["duckduckgo", "tavily"],
+        "maxRetrievers": 5,
+        "sourceCuration": true,
+        "domainFilters": true
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "missing step override inherits the task profile",
+      "environment": "current",
+      "taskInput": {
+        "limits": {
+          "maxIterations": 4
+        }
+      },
+      "expected": {
+        "schemaVersion": 1,
+        "mode": "standard",
+        "source": {
+          "mode": "web",
+          "retrievers": ["duckduckgo"]
+        },
+        "quality": {
+          "curateSources": false
+        },
+        "limits": {
+          "maxSearchResultsPerQuery": 5,
+          "maxIterations": 4,
+          "maxSubtopics": 3
+        }
+      }
+    },
+    {
+      "name": "step limits merge field by field",
+      "environment": "current",
+      "taskInput": {
+        "limits": {
+          "maxIterations": 5,
+          "maxSubtopics": 6
+        }
+      },
+      "stepOverride": {
+        "limits": {
+          "maxSearchResultsPerQuery": 8
+        }
+      },
+      "expected": {
+        "schemaVersion": 1,
+        "mode": "standard",
+        "source": {
+          "mode": "web",
+          "retrievers": ["duckduckgo"]
+        },
+        "quality": {
+          "curateSources": false
+        },
+        "limits": {
+          "maxSearchResultsPerQuery": 8,
+          "maxIterations": 5,
+          "maxSubtopics": 6
+        }
+      }
+    },
+    {
+      "name": "step cannot replace the task domain allowlist",
+      "environment": "expanded",
+      "taskInput": {
+        "source": {
+          "mode": "web",
+          "retrievers": ["duckduckgo"],
+          "includeDomains": ["official.example"],
+          "excludeDomains": ["blocked.example"]
+        }
+      },
+      "stepOverride": {
+        "source": {
+          "mode": "web",
+          "retrievers": ["tavily"],
+          "includeDomains": ["step.example"]
+        }
+      },
+      "error": {
+        "code": "profile_capability_disabled",
+        "path": "$.steps[\"research_market\"].llm.params.think_tank.source.retrievers"
+      }
+    },
+    {
+      "name": "step cannot invent URL sources for a Web task",
+      "environment": "expanded",
+      "taskInput": {
+        "source": {
+          "mode": "web",
+          "retrievers": ["tavily"],
+          "includeDomains": ["official.example"]
+        }
+      },
+      "stepOverride": {
+        "source": {
+          "mode": "urls",
+          "urls": ["https://example.com/report"]
+        }
+      },
+      "error": {
+        "code": "profile_capability_disabled",
+        "path": "$.steps[\"research_market\"].llm.params.think_tank.source.mode"
+      }
+    },
+    {
+      "name": "switching away from deep drops inherited deep parameters",
+      "environment": "expanded",
+      "taskInput": {
+        "mode": "deep",
+        "deep": {
+          "breadth": 4,
+          "depth": 3,
+          "concurrency": 2
+        }
+      },
+      "stepOverride": {
+        "mode": "standard"
+      },
+      "expected": {
+        "schemaVersion": 1,
+        "mode": "standard",
+        "source": {
+          "mode": "web",
+          "retrievers": ["duckduckgo"]
+        },
+        "quality": {
+          "curateSources": true
+        },
+        "limits": {
+          "maxSearchResultsPerQuery": 5,
+          "maxIterations": 3,
+          "maxSubtopics": 3
+        }
+      }
+    },
+    {
+      "name": "deep step can inherit deep parameters from a deep task",
+      "environment": "expanded",
+      "taskInput": {
+        "mode": "deep",
+        "deep": {
+          "breadth": 4,
+          "depth": 3,
+          "concurrency": 2
+        }
+      },
+      "stepOverride": {
+        "limits": {
+          "maxIterations": 7
+        }
+      },
+      "expected": {
+        "schemaVersion": 1,
+        "mode": "deep",
+        "source": {
+          "mode": "web",
+          "retrievers": ["duckduckgo"]
+        },
+        "quality": {
+          "curateSources": true
+        },
+        "limits": {
+          "maxSearchResultsPerQuery": 5,
+          "maxIterations": 7,
+          "maxSubtopics": 3
+        },
+        "deep": {
+          "breadth": 4,
+          "depth": 3,
+          "concurrency": 2
+        }
+      }
+    },
+    {
+      "name": "deep step from a standard task requires full deep parameters",
+      "environment": "expanded",
+      "taskInput": null,
+      "stepOverride": {
+        "mode": "deep"
+      },
+      "error": {
+        "code": "profile_invariant_violation",
+        "path": "$.steps[\"research_market\"].llm.params.think_tank.deep"
+      }
+    },
+    {
+      "name": "unknown step fields retain a step-specific path",
+      "environment": "current",
+      "taskInput": null,
+      "stepOverride": {
+        "apiKey": "not-allowed"
+      },
+      "error": {
+        "code": "profile_unknown_field",
+        "path": "$.steps[\"research_market\"].llm.params.think_tank.apiKey"
+      }
+    },
+    {
+      "name": "disabled step capabilities retain a step-specific path",
+      "environment": "current",
+      "taskInput": null,
+      "stepOverride": {
+        "mode": "deep",
+        "deep": {
+          "breadth": 2,
+          "depth": 2,
+          "concurrency": 2
+        }
+      },
+      "error": {
+        "code": "profile_capability_disabled",
+        "path": "$.steps[\"research_market\"].llm.params.think_tank.mode"
+      }
+    },
+    {
+      "name": "explicit null step profile is invalid",
+      "environment": "current",
+      "taskInput": null,
+      "stepOverride": null,
+      "error": {
+        "code": "profile_invalid_type",
+        "path": "$.steps[\"research_market\"].llm.params.think_tank"
+      }
+    }
+  ]
+}

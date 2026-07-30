@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from .research_profile import ResearchRetriever
+
+
+class TaskTemporalContext(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    started_at: str = Field(alias="startedAt", min_length=1)
+    time_zone: str = Field(alias="timeZone", min_length=1)
+    local_date: str = Field(alias="localDate", min_length=1)
+    local_time: str = Field(alias="localTime", min_length=1)
+    weekday: str = Field(min_length=1)
+
+
+class ResearchRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    system_prompt: str = Field(alias="systemPrompt", min_length=1)
+    task: str = Field(min_length=1)
+    report_source: Literal["web"] = Field(alias="reportSource", default="web")
+    retriever: ResearchRetriever = "duckduckgo"
+    research_profile: dict[str, Any] | None = Field(
+        alias="researchProfile",
+        default=None,
+    )
+    upstream_evidence: list[dict[str, Any]] | None = Field(
+        alias="upstreamEvidence",
+        default=None,
+    )
+    runtime_context: TaskTemporalContext | None = Field(
+        alias="runtimeContext",
+        default=None,
+    )
+    base_url: str | None = Field(alias="baseUrl", default=None)
+    api_key: str | None = Field(alias="apiKey", default=None)
+    fast_llm: str | None = Field(alias="fastLlm", default=None)
+    smart_llm: str | None = Field(alias="smartLlm", default=None)
+    embedding: str | None = None
+    embedding_base_url: str | None = Field(
+        alias="embeddingBaseUrl",
+        default=None,
+    )
+
+
+class ResearchEvent(BaseModel):
+    timestamp: str
+    type: str
+    data: dict[str, Any]
+
+
+class EvidenceQueryCapture(BaseModel):
+    kind: Literal["subquery", "deep"]
+    text: str = Field(min_length=1)
+
+
+class PublicEvidenceSourceCapture(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    visibility: Literal["public"] = "public"
+    url: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    source_type: Literal["web", "specified_url"] = Field(
+        alias="sourceType",
+        default="web",
+    )
+    summary: str | None = None
+
+
+class ResearchEvidenceContext(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    content: str
+    original_characters: int = Field(
+        alias="originalCharacters",
+        ge=0,
+    )
+    truncated: bool
+
+
+class ResearchEvidenceCapture(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    queries: list[EvidenceQueryCapture]
+    sources: list[PublicEvidenceSourceCapture]
+    research_context: ResearchEvidenceContext = Field(
+        alias="researchContext",
+    )
+    scraper: str | None = None
+
+
+class ResearchResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    report: str
+    source_urls: list[str] = Field(alias="sourceUrls")
+    sources: list[Any]
+    research_evidence: ResearchEvidenceCapture | None = Field(
+        alias="researchEvidence",
+        default=None,
+    )
+    cost: float | dict[str, Any] | None
+    events: list[ResearchEvent]

@@ -1,0 +1,23 @@
+name: runtime-contract
+agents_dir: ./agents
+llm:
+  provider: openai
+  model: planner-model
+inputs:
+  - name: topic
+    required: true
+steps:
+  - id: evidence
+    role: research/analyst
+    task: Gather evidence about {{topic}}.
+    output: evidence
+  - id: final
+    role: research/writer
+    task: |
+      Produce the final report for {{topic}}.
+      Evidence:
+      {{evidence}}
+    acceptance: |
+      1. The output contains a final report.
+    output: final_report
+    depends_on: [evidence]
