@@ -24,6 +24,7 @@ import {
   type ResearchCapabilityProvider,
   type RetrieverCatalog,
 } from "./gptr-capabilities.js";
+import { replaceEnvironmentValue } from "./environment-file.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const require = createRequire(import.meta.url);
@@ -121,6 +122,7 @@ export function createApiServer(
     new CachedResearchCapabilityProvider(
       new HttpResearchCapabilityProvider(),
     ),
+  environmentFilePath = resolve(moduleDirectory, "../../../.env"),
 ) {
   return createServer(async (request, response) => {
     try {
@@ -183,6 +185,15 @@ export function createApiServer(
           capabilityProvider,
         );
         try {
+          const apiKey = optionalApiKey(body.apiKey);
+          if (apiKey) {
+            await replaceEnvironmentValue(
+              environmentFilePath,
+              "OPENAI_API_KEY",
+              apiKey,
+            );
+            settings.setApiKey(apiKey);
+          }
           return sendJson(response, 200, {
             ...settings.update(body, {
               retrievers: catalog.retrievers.map((item) => item.id),
@@ -560,6 +571,17 @@ async function readJsonBody(
   }
   const text = Buffer.concat(chunks).toString("utf8");
   return JSON.parse(text || "{}") as Record<string, unknown>;
+}
+
+function optionalApiKey(value: unknown): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string") {
+    throw new Error("API Key must be a string.");
+  }
+  if (value.length > 8_192) {
+    throw new Error("API Key is too long.");
+  }
+  return value;
 }
 
 function sendJson(

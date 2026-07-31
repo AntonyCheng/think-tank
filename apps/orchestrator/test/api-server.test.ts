@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { createApiServer } from "../src/api-server.js";
@@ -665,7 +668,7 @@ test("reports readiness only when the researcher adapter is ready", async (t) =>
   });
 });
 
-test("reads and updates non-secret runtime settings", async (t) => {
+test("updates an API Key without exposing it through settings reads", async (t) => {
   const manager = new ResearchTaskManager(async () => {
     throw new Error("runner should not be called");
   });
@@ -679,11 +682,15 @@ test("reads and updates non-secret runtime settings", async (t) => {
     RETRIEVER: "duckduckgo",
     AO_CONCURRENCY: "2",
   });
+  const directory = await mkdtemp(join(tmpdir(), "think-tank-settings-"));
+  const environmentFilePath = join(directory, ".env");
+  t.after(() => rm(directory, { recursive: true, force: true }));
   const server = createApiServer(
     manager,
     settings,
     undefined,
     readyCapabilityProvider,
+    environmentFilePath,
   );
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -719,6 +726,7 @@ test("reads and updates non-secret runtime settings", async (t) => {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      apiKey: "replacement-secret",
       retrievers: ["duckduckgo", "openalex"],
       concurrency: 4,
     }),
@@ -732,6 +740,15 @@ test("reads and updates non-secret runtime settings", async (t) => {
   assert.equal(updated.retriever, "duckduckgo");
   assert.deepEqual(updated.retrievers, ["duckduckgo", "openalex"]);
   assert.equal(updated.concurrency, 4);
+  assert.equal("apiKey" in updated, false);
+  assert.equal(
+    settings.getRuntimeSettings().planner.api_key,
+    "replacement-secret",
+  );
+  assert.equal(
+    await readFile(environmentFilePath, "utf8"),
+    'OPENAI_API_KEY="replacement-secret"\n',
+  );
 });
 
 async function waitFor(predicate: () => Promise<boolean>): Promise<void> {

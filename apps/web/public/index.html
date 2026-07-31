@@ -289,6 +289,15 @@
             <input name="openaiBaseUrl" type="url" required />
           </label>
           <label>
+            API Key
+            <input
+              name="apiKey"
+              type="password"
+              autocomplete="new-password"
+              placeholder="已配置时留空即可保持不变"
+            />
+          </label>
+          <label>
             组队规划模型
             <input name="aoPlannerModel" required />
           </label>
@@ -328,7 +337,7 @@
           </label>
         </div>
         <p class="settings-note">
-          API Key 仍由服务器的 .env 管理，不会发送到浏览器。保存后的设置从下一个任务开始生效。
+          已有 API Key 不会返回浏览器。填写新 Key 后将安全写入服务器 .env；留空则保持不变。保存后的设置从下一个任务开始生效。
         </p>
         <p id="settings-error" class="form-error" role="alert" hidden></p>
         <div class="settings-actions">
@@ -339,6 +348,6 @@
     </dialog>
 
     <script src="/vendor/markdown-it.min.js"></script>
-    <script type="module" src="/app.js?v=20260730-tt009"></script>
+    <script type="module" src="/app.js?v=20260731-api-key-settings"></script>
   </body>
 </html>

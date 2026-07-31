@@ -74,6 +74,13 @@ export class RuntimeSettingsStore {
     };
   }
 
+  setApiKey(apiKey: string): void {
+    if (!apiKey.trim()) {
+      throw new Error("API Key must not be empty.");
+    }
+    this.#baseEnv.OPENAI_API_KEY = apiKey.trim();
+  }
+
   update(
     input: Record<string, unknown>,
     constraints?: RetrieverSelectionConstraints,

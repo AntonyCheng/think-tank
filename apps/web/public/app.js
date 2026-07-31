@@ -361,6 +361,7 @@ settingsForm.addEventListener("submit", async (event) => {
   settingsError.hidden = true;
   settingsSaved.hidden = true;
   const values = Object.fromEntries(new FormData(settingsForm));
+  if (!values.apiKey) delete values.apiKey;
   values.concurrency = Number(values.concurrency);
   values.retrievers = selectedRetrievers(settingsRetrievers);
   if (values.retrievers.length === 0) {
@@ -387,6 +388,11 @@ settingsForm.addEventListener("submit", async (event) => {
       throw new Error(settings.error || "设置保存失败");
     }
     applyResearchSettings(settings);
+    const apiKeyField = settingsForm.elements.namedItem("apiKey");
+    if (apiKeyField && "value" in apiKeyField) apiKeyField.value = "";
+    apiKeyState.textContent = settings.apiKeyConfigured
+      ? "服务器 API Key：已配置"
+      : "服务器 API Key：未配置，请填写后保存";
     settingsSaved.hidden = false;
   } catch (error) {
     settingsError.textContent =
