@@ -20,6 +20,7 @@ import {
   defaultResearchProfile,
 } from "./research-profile-runtime.js";
 import { WeightedConcurrencyBudget } from "./research-concurrency-budget.js";
+import { resolveResearchDeadline } from "./research-deadline.js";
 import {
   type EvidenceBundle,
   EvidenceLedger,
@@ -42,12 +43,14 @@ export interface GptrConnectorOptions {
   embeddingBaseUrl?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  cleanupGraceMs?: number;
   taskConcurrencyBudget?: number;
   evidenceLedger?: EvidenceLedger;
   onResearchEvent?: (
     event: ResearchResponse["events"][number],
     invocation: ResearchInvocation,
   ) => void;
+  onResearchHeartbeat?: (invocation: ResearchInvocation) => void;
   onResearchComplete?: (
     response: ResearchResponse,
     invocation: ResearchInvocation,
@@ -161,9 +164,21 @@ export class GptrConnector implements LLMConnector {
         effectiveWeight: lease.effectiveWeight,
       }, invocation);
     }
+    const deadline = resolveResearchDeadline({
+      configuredResearchTimeoutMs: this.#options.timeoutMs ?? 30 * 60 * 1_000,
+      aoAttemptTimeoutMs: config.timeout,
+      cleanupGraceMs: this.#options.cleanupGraceMs ?? 20_000,
+    });
     const request: ResearchRequest = {
+      researchRunId: invocation.id,
+      executionTimeoutMs: deadline.executionTimeoutMs,
       systemPrompt,
-      task: userMessage,
+      // AO renders dependency outputs into userMessage. Synthesis already
+      // receives the authoritative upstream bundles below, so sending that
+      // rendered text again needlessly doubles the prompt size.
+      task: researchProfile.mode === "synthesis"
+        ? runtime?.taskTemplate ?? userMessage
+        : userMessage,
       reportSource: "web",
       retriever: profileRetriever(
         researchProfile,
@@ -188,6 +203,7 @@ export class GptrConnector implements LLMConnector {
       embeddingBaseUrl: this.#options.embeddingBaseUrl,
     };
 
+    let heartbeat: NodeJS.Timeout | undefined;
     try {
       if (this.#options.signal?.aborted) {
         throw researchRequestError(
@@ -195,9 +211,11 @@ export class GptrConnector implements LLMConnector {
           this.#options.signal,
         );
       }
-      const timeoutSignal = this.#options.timeoutMs
-        ? AbortSignal.timeout(this.#options.timeoutMs)
-        : undefined;
+      const timeoutSignal = AbortSignal.timeout(deadline.connectorTimeoutMs);
+      heartbeat = setInterval(
+        () => this.#options.onResearchHeartbeat?.(invocation),
+        20_000,
+      );
       const signal = combinedSignal(this.#options.signal, timeoutSignal);
       let response: Response;
       try {
@@ -283,6 +301,7 @@ export class GptrConnector implements LLMConnector {
       }, invocation);
       throw normalized;
     } finally {
+      if (heartbeat) clearInterval(heartbeat);
       lease.release();
     }
   }
@@ -303,6 +322,7 @@ export class GptrConnector implements LLMConnector {
 function researchStepRuntime(config: LLMConfig): {
   aoStepId: string;
   dependsOn: string[];
+  taskTemplate?: string;
 } | undefined {
   const value = config.params?.think_tank_runtime;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -324,6 +344,10 @@ function researchStepRuntime(config: LLMConfig): {
             : []
         ))]
       : [],
+    taskTemplate: typeof record.taskTemplate === "string" &&
+        record.taskTemplate.trim()
+      ? record.taskTemplate
+      : undefined,
   };
 }
 

@@ -654,7 +654,7 @@ def test_synthesis_mode_skips_research_and_writes_from_dependency_context(
     assert "market_analysis" in synthesis_context
     assert "# Market analysis\n\nVerified finding." in synthesis_context
     assert "[Market evidence](https://example.com/market)" in synthesis_context
-    assert "Bounded research context." in synthesis_context
+    assert "Bounded research context." not in synthesis_context
     assert response.json()["sourceUrls"] == []
     assert [
         event["type"]

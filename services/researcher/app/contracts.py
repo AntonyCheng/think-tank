@@ -20,6 +20,12 @@ class TaskTemporalContext(BaseModel):
 class ResearchRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    research_run_id: str | None = Field(alias="researchRunId", default=None)
+    execution_timeout_ms: int | None = Field(
+        alias="executionTimeoutMs",
+        default=None,
+        ge=1,
+    )
     system_prompt: str = Field(alias="systemPrompt", min_length=1)
     task: str = Field(min_length=1)
     report_source: Literal["web"] = Field(alias="reportSource", default="web")

@@ -1120,6 +1120,16 @@ function updateResearchActivityFreshness(run) {
     run.freshness.textContent = `已停止 · ${count} 条事件`;
     return;
   }
+  if (run.progress?.state === "running") {
+    const elapsed = Math.max(
+      0,
+      Date.now() - Date.parse(run.progress.startedAt || run.latestActivityAt),
+    );
+    run.freshness.textContent = `${
+      humanizeResearchPhase(run.progress.phase)
+    }中 · 已运行 ${formatDuration(elapsed)}`;
+    return;
+  }
   if (!run.latestActivityAt) {
     run.freshness.textContent = "等待实时事件";
     return;

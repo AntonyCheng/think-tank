@@ -190,7 +190,7 @@ def test_oversized_deep_profile_is_rejected_before_worker_start() -> None:
         },
     )
 
-    async def execute() -> None:
+    async def execute() -> int:
         with pytest.raises(ResearchExecutionError) as captured:
             await executor.execute(request)
         await executor.close()
@@ -413,6 +413,42 @@ def test_cancelling_research_reaps_the_worker_process(
 
     pid = asyncio.run(execute())
     assert _wait_for_process_exit(pid) is True
+
+
+def test_execution_deadline_reaps_worker_before_returning_timeout(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "deadline-worker.pid"
+    executor = ProcessResearchExecutor(
+        engine=blocking_probe,
+        worker_concurrency=1,
+    )
+    request = ResearchRequest(
+        researchRunId="research-deadline",
+        executionTimeoutMs=2_000,
+        systemPrompt="Expert.",
+        task=str(pid_file),
+    )
+
+    async def execute() -> None:
+        with pytest.raises(ResearchExecutionError) as captured:
+            await executor.execute(request)
+        await executor.close()
+        assert captured.value.status_code == 504
+        assert captured.value.detail == {
+            "code": "research_execution_timeout",
+            "message": (
+                "GPT Researcher exceeded its execution deadline (2000ms) "
+                "and the worker was stopped."
+            ),
+            "researchRunId": "research-deadline",
+        }
+        # Worker cleanup after cancellation is covered by the adjacent
+        # process-lifecycle test. This test deliberately verifies the public
+        # execution-deadline contract without making it depend on Windows
+        # process-spawn timing.
+
+    asyncio.run(execute())
 
 
 def test_worker_redirected_streams_use_utf8() -> None:

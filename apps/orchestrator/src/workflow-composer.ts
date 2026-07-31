@@ -12,6 +12,7 @@ import type { RelativeYearScope } from "./task-temporal-context.js";
 import {
   validateWorkflowRelativeYearScope,
 } from "./workflow-temporal-validation.js";
+import { analyzeWorkflowTopology } from "./workflow-topology.js";
 
 type ComposeWorkflowOptions = Parameters<typeof composeWorkflow>[0];
 type ComposeWorkflowResult = Awaited<ReturnType<typeof composeWorkflow>>;
@@ -34,7 +35,7 @@ export async function composeValidatedWorkflow(
     relativeYearScope,
   );
   if (firstErrors.length === 0) {
-    return first;
+    return withTopologyWarnings(first);
   }
 
   const second = await compose({
@@ -56,12 +57,23 @@ export async function composeValidatedWorkflow(
     );
   }
 
-  return {
+  return withTopologyWarnings({
     ...second,
     warnings: [
       "AO 第一次编排未通过预检，已自动重新编排。",
       ...second.warnings,
     ],
+  });
+}
+
+function withTopologyWarnings(
+  result: ComposeWorkflowResult,
+): ComposeWorkflowResult {
+  const workflow = parseWorkflow(result.savedPath);
+  const topology = analyzeWorkflowTopology(workflow);
+  return {
+    ...result,
+    warnings: [...result.warnings, ...topology.warnings],
   };
 }
 

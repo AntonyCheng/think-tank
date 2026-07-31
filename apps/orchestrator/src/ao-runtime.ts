@@ -277,6 +277,7 @@ function injectResearchStepContext(
         think_tank_runtime: {
           aoStepId: step.id,
           dependsOn: [...(step.depends_on ?? [])],
+          taskTemplate: step.task,
         },
       },
     };

@@ -32,6 +32,7 @@ test("loads the deployment-global v1 settings and normalizes GPTR models", () =>
   assert.equal(settings.timeZone, "Asia/Shanghai");
   assert.equal(settings.gptrHealthTimeoutMs, 5_000);
   assert.equal(settings.gptrResearchTimeoutMs, 30 * 60 * 1_000);
+  assert.equal(settings.gptrCleanupGraceMs, 20_000);
   assert.equal(settings.taskExecutionTimeoutMs, 2 * 60 * 60 * 1_000);
   assert.equal(settings.gptrTaskConcurrencyBudget, 4);
   assert.deepEqual(settings.gptrDeepLimits, {
@@ -80,6 +81,19 @@ test("validates configured execution timeouts", () => {
       GPTR_RESEARCH_TIMEOUT_MS: "0",
     }),
     /GPTR_RESEARCH_TIMEOUT_MS must be a positive integer/u,
+  );
+
+  assert.throws(
+    () => settingsFromEnv({
+      OPENAI_API_KEY: "key",
+      AO_PLANNER_MODEL: "planner",
+      GPTR_FAST_LLM: "fast",
+      GPTR_SMART_LLM: "smart",
+      GPTR_EMBEDDING: "m3e",
+      GPTR_RESEARCH_TIMEOUT_MS: "20000",
+      GPTR_CLEANUP_GRACE_MS: "20000",
+    }),
+    /GPTR_CLEANUP_GRACE_MS must be smaller/u,
   );
 });
 

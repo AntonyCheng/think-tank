@@ -178,6 +178,7 @@ export async function runResearchTopic(
     agentsDirName: lang === "zh" ? "agency-agents-zh" : "agency-agents",
     llmConfig: settings.planner,
     autoRun: true,
+    timeoutMs: settings.gptrResearchTimeoutMs + settings.gptrCleanupGraceMs,
     lang,
     saveDir: resolve(".think-tank", "workflows"),
   }, undefined, { taskProfile, capabilities }, relativeYearScope);
@@ -260,6 +261,13 @@ export async function runResearchTopic(
           event,
           telemetryIdentity(invocation),
         ));
+      },
+      onResearchHeartbeat: (invocation) => {
+        const update = telemetry.heartbeat(
+          new Date().toISOString(),
+          telemetryIdentity(invocation),
+        );
+        if (update) publishTelemetry(update);
       },
       onResearchComplete: (response, invocation) => {
         publishTelemetry(telemetry.complete({

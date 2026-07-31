@@ -28,6 +28,8 @@ export function researchCompositionDescription(
     "- acceptance: 必须列出 2-5 条仅凭最终输出文本即可客观核对的条件。",
     "- 用户提出的内容、结构、篇幅、证据、来源和格式限制必须进入 acceptance:，不能只写在 task: 中。",
     "- 每个 depends_on 值必须逐字匹配同一 YAML 中已声明的 steps[].id，不能填写 output 名称或近似名称。",
+    "- depends_on 只能表示必须读取上游 output 的数据依赖，不能只为安排专家先后顺序而建立链。",
+    "- 可独立检索的事实、市场、技术、政策等研究应作为并列根步骤；最终 synthesis 步骤再汇总所需分支。",
     "- 所有事实、数据、日期、价格、基准和引语必须保留专家报告中的 Markdown 来源链接；最终综合不得删除或改写 URL。",
     "- 最终步骤的 acceptance: 必须检查数据结论是否带有可点击的句内来源链接。",
     "- 任何 AO 步骤都不得生成参考来源章节，也不得把该章节列为 acceptance 条件；平台会在 AO 验收后根据已验证链接统一生成。",

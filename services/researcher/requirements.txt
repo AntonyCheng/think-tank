@@ -11,6 +11,7 @@ litellm==1.91.4
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
 pydantic==2.11.7
+python-dotenv==1.2.2
 aiohttp==3.14.3
 PyMuPDF==1.28.0
 mistune==3.3.4

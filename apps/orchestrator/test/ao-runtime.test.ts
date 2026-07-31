@@ -350,6 +350,7 @@ test("injects each resolved profile into the AO runtime config", async () => {
     {
       aoStepId: "evidence",
       dependsOn: [],
+      taskTemplate: "Gather evidence about {{topic}}.",
     },
   );
   assert.deepEqual(
@@ -357,6 +358,7 @@ test("injects each resolved profile into the AO runtime config", async () => {
     {
       aoStepId: "final",
       dependsOn: ["evidence"],
+      taskTemplate: "Produce the final report for {{topic}}.\nEvidence:\n{{evidence}}\n",
     },
   );
 });

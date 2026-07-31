@@ -26,6 +26,7 @@ export interface RuntimeConnectorObservers {
     event: ResearchEvent,
     invocation: ResearchInvocation,
   ) => void;
+  onResearchHeartbeat?: (invocation: ResearchInvocation) => void;
   onResearchComplete?: (
     response: ResearchResponse,
     invocation: ResearchInvocation,
@@ -66,9 +67,11 @@ export function createRuntimeConnector(
     embeddingBaseUrl: settings.gptrEmbeddingBaseUrl,
     signal,
     timeoutMs: settings.gptrResearchTimeoutMs,
+    cleanupGraceMs: settings.gptrCleanupGraceMs,
     taskConcurrencyBudget: settings.gptrTaskConcurrencyBudget,
     evidenceLedger,
     onResearchEvent: observers.onResearchEvent,
+    onResearchHeartbeat: observers.onResearchHeartbeat,
     onResearchFailure: observers.onResearchFailure,
     onEvidenceBundle: observers.onEvidenceBundle,
     onResearchComplete: (response, invocation) => {

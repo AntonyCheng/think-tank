@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import os
 import sys
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, MutableMapping
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from dotenv import dotenv_values
 
 from .contracts import ResearchEvent, ResearchRequest, ResearchResponse
 from . import research_worker
@@ -32,6 +34,22 @@ from .research_worker import (
 from .gptr_compat import load_gpt_researcher
 from .retriever_runtime import build_retriever_catalog
 from .exporter import export_docx, export_markdown, export_pdf
+
+
+def load_project_environment(
+    environment: MutableMapping[str, str] | None = None,
+    *,
+    env_file: Path | None = None,
+) -> None:
+    """Load the project .env once without overriding deployment variables."""
+    target = environment if environment is not None else os.environ
+    source = env_file or Path(__file__).resolve().parents[3] / ".env"
+    for name, value in dotenv_values(source).items():
+        if value is not None:
+            target.setdefault(name, value)
+
+
+load_project_environment()
 
 
 class ExportRequest(BaseModel):
@@ -237,6 +255,8 @@ async def research_stream(request: ResearchRequest) -> StreamingResponse:
         finally:
             if not task.done():
                 task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
     return StreamingResponse(
         generate(),

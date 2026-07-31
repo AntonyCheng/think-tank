@@ -130,7 +130,26 @@ class ProcessResearchExecutor:
         async with semaphore:
             if self._closed:
                 raise RuntimeError("research executor is closed")
-            return await self._execute_in_process(request, publish)
+            timeout_ms = request.execution_timeout_ms
+            if timeout_ms is None:
+                return await self._execute_in_process(request, publish)
+            try:
+                return await asyncio.wait_for(
+                    self._execute_in_process(request, publish),
+                    timeout=timeout_ms / 1_000,
+                )
+            except TimeoutError as exc:
+                raise ResearchExecutionError(
+                    504,
+                    {
+                        "code": "research_execution_timeout",
+                        "message": (
+                            "GPT Researcher exceeded its execution deadline "
+                            f"({timeout_ms}ms) and the worker was stopped."
+                        ),
+                        "researchRunId": request.research_run_id,
+                    },
+                ) from exc
 
     async def close(self) -> None:
         self._closed = True

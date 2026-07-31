@@ -140,6 +140,8 @@ test("maps an AO chat call to a GPT Researcher request", async () => {
   });
 
   assert.deepEqual(receivedBody, {
+    researchRunId: "research-1",
+    executionTimeoutMs: 1_800_000,
     systemPrompt: "expert role",
     task: "research task",
     reportSource: "web",
@@ -343,17 +345,22 @@ test("sends only declared dependency evidence to a synthesis step", async () => 
     evidenceLedger,
   });
 
-  await connector.chat("writer", "combine evidence", {
+  await connector.chat("writer", "combine evidence\n\n# market", {
     provider: "openai",
     params: {
       think_tank_runtime: {
         aoStepId: "final",
         dependsOn: ["market"],
+        taskTemplate: "write a final report from the supplied evidence",
       },
     },
   });
 
   assert.equal(receivedBody.researchProfile.mode, "synthesis");
+  assert.equal(
+    receivedBody.task,
+    "write a final report from the supplied evidence",
+  );
   assert.deepEqual(
     receivedBody.upstreamEvidence.map(
       (bundle: { aoStepId: string }) => bundle.aoStepId,
@@ -364,6 +371,37 @@ test("sends only declared dependency evidence to a synthesis step", async () => 
     receivedBody.upstreamEvidence[0].sources[0].url,
     "https://example.com/market",
   );
+});
+
+test("sends an inner deadline before AO can time out and retry", async () => {
+  let receivedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    receivedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(`${JSON.stringify({
+      type: "result",
+      result: {
+        report: "# report",
+        sourceUrls: [],
+        sources: [],
+        cost: null,
+        events: [],
+      },
+    })}\n`);
+  };
+  const connector = new GptrConnector({
+    serviceUrl: "http://127.0.0.1:8010",
+    retriever: "duckduckgo",
+    timeoutMs: 1_800_000,
+    cleanupGraceMs: 20_000,
+  });
+
+  await connector.chat("expert", "task", {
+    provider: "openai",
+    timeout: 300_000,
+  });
+
+  assert.equal(receivedBody?.executionTimeoutMs, 280_000);
+  assert.equal(receivedBody?.researchRunId, "research-1");
 });
 
 test("aborts the GPTR stream when the task is canceled", async () => {

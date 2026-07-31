@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 import app.main as main
@@ -12,6 +14,27 @@ def test_health() -> None:
     response = TestClient(app).get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_loads_project_env_without_overriding_deployment_values(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "GPTR_ENABLED_RETRIEVERS=duckduckgo,tavily\n"
+        "TAVILY_API_KEY=from-dotenv\n"
+        "OPENAI_API_KEY=from-dotenv\n",
+        encoding="utf-8",
+    )
+    environment = {"OPENAI_API_KEY": "from-deployment"}
+
+    main.load_project_environment(environment, env_file=env_file)
+
+    assert environment == {
+        "GPTR_ENABLED_RETRIEVERS": "duckduckgo,tavily",
+        "TAVILY_API_KEY": "from-dotenv",
+        "OPENAI_API_KEY": "from-deployment",
+    }
 
 
 def test_ready_loads_gptr_adapter(monkeypatch) -> None:

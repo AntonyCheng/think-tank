@@ -16,6 +16,8 @@ export interface TaskTemporalContext {
 }
 
 export interface ResearchRequest {
+  researchRunId?: string;
+  executionTimeoutMs?: number;
   systemPrompt: string;
   task: string;
   reportSource: "web";

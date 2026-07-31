@@ -18,6 +18,7 @@ export interface RuntimeSettings {
   concurrency: number;
   gptrHealthTimeoutMs: number;
   gptrResearchTimeoutMs: number;
+  gptrCleanupGraceMs: number;
   taskExecutionTimeoutMs: number;
   gptrTaskConcurrencyBudget: number;
   gptrDeepLimits: {
@@ -55,6 +56,16 @@ export function settingsFromEnv(
     "GPTR_RESEARCH_TIMEOUT_MS",
     30 * 60 * 1_000,
   );
+  const gptrCleanupGraceMs = positiveInteger(
+    env,
+    "GPTR_CLEANUP_GRACE_MS",
+    20_000,
+  );
+  if (gptrCleanupGraceMs >= gptrResearchTimeoutMs) {
+    throw new Error(
+      "GPTR_CLEANUP_GRACE_MS must be smaller than GPTR_RESEARCH_TIMEOUT_MS.",
+    );
+  }
   const taskExecutionTimeoutMs = positiveInteger(
     env,
     "TASK_EXECUTION_TIMEOUT_MS",
@@ -97,6 +108,7 @@ export function settingsFromEnv(
     concurrency,
     gptrHealthTimeoutMs,
     gptrResearchTimeoutMs,
+    gptrCleanupGraceMs,
     taskExecutionTimeoutMs,
     gptrTaskConcurrencyBudget,
     gptrDeepLimits,

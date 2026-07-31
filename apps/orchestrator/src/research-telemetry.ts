@@ -166,6 +166,33 @@ export class ResearchTelemetryTracker {
     };
   }
 
+  heartbeat(
+    timestamp: string,
+    identity: ResearchRunIdentity,
+  ): ResearchTelemetryUpdate | undefined {
+    const existing = this.#runs.get(identity.researchRunId);
+    if (!existing || existing.state !== "running") return undefined;
+    const progress: ResearchRunProgress = {
+      ...existing,
+      updatedAt: timestamp,
+      elapsedMs: elapsedMilliseconds(identity.startedAt, timestamp),
+    };
+    this.#runs.set(identity.researchRunId, progress);
+    return {
+      publicEvent: structuredClone(progress),
+      diagnosticRecord: {
+        timestamp,
+        aoStepId: identity.aoStepId,
+        researchRunId: identity.researchRunId,
+        rawType: "research.heartbeat",
+        rawStage: "research.heartbeat",
+        data: {},
+        truncated: false,
+      },
+      snapshot: this.snapshot(),
+    };
+  }
+
   complete(
     completion: ResearchCompletion,
     identity: ResearchRunIdentity,

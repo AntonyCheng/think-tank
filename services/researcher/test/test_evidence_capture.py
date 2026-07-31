@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.contracts import ResearchEvent
-from app.evidence_capture import capture_research_evidence
+from app.evidence_capture import (
+    capture_research_evidence,
+    render_synthesis_context,
+)
 
 
 class FakeResearcher:
@@ -78,3 +81,24 @@ def test_captures_standard_gptr_evidence_through_public_methods() -> None:
         },
         "scraper": "beautiful_soup",
     }
+
+
+def test_synthesis_context_avoids_duplicate_raw_context_when_report_exists() -> None:
+    context = render_synthesis_context(
+        "Write a concise synthesis.",
+        [{
+            "aoStepId": "market",
+            "report": {"content": "# Market\n" + "evidence " * 50},
+            "sources": [{
+                "visibility": "public",
+                "url": "https://example.com/source",
+                "title": "Source",
+                "summary": "verified source",
+            }],
+            "researchContext": {"content": "RAW-CONTEXT-MUST-NOT-APPEAR"},
+        }],
+    )
+
+    assert "# Market" in context
+    assert "https://example.com/source" in context
+    assert "RAW-CONTEXT-MUST-NOT-APPEAR" not in context
