@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "local documents are private bounded",
+      "profile": {
+        "mode": "standard",
+        "source": {
+          "mode": "local",
+          "documentIds": ["document-1"]
+        }
+      },
+      "expectedStrategy": "private_bounded"
+    },
+    {
+      "name": "Web is public verified",
+      "profile": {
+        "mode": "standard",
+        "source": {
+          "mode": "web",
+          "retrievers": ["duckduckgo"]
+        }
+      },
+      "expectedStrategy": "public_verified"
+    },
+    {
+      "name": "synthesis with private upstream evidence is private bounded",
+      "profile": {
+        "mode": "synthesis",
+        "source": {
+          "mode": "web",
+          "retrievers": ["duckduckgo"]
+        }
+      },
+      "upstreamEvidence": [
+        {
+          "sources": [{ "visibility": "private" }]
+        }
+      ],
+      "expectedStrategy": "private_bounded"
+    }
+  ]
+}

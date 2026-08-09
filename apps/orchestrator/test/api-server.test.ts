@@ -8,12 +8,17 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createApiServer } from "../src/api-server.js";
-import { ResearchTaskManager } from "../src/research-tasks.js";
+import {
+  ResearchTaskManager,
+  type ResearchTaskSnapshot,
+} from "../src/research-tasks.js";
+import { InMemoryResearchTaskStore } from "../src/research-task-store.js";
 import { RuntimeSettingsStore } from "../src/settings-store.js";
 import type {
   ResearchCapabilityProvider,
   RetrieverCatalog,
 } from "../src/gptr-capabilities.js";
+import type { WorkflowCheckpoint } from "../src/workflow-checkpoint.js";
 
 const readyRetrieverCatalog: RetrieverCatalog = Object.freeze({
   schemaVersion: 1,
@@ -109,6 +114,194 @@ test("submits, observes, and retrieves a completed research task", async (t) => 
   };
   assert.equal(task.status, "completed");
   assert.equal(task.output, "# report");
+});
+
+test("lists paginated task history without returning report contents", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const tasks: ResearchTaskSnapshot[] = [
+    {
+      id: "history-completed",
+      topic: "China economy",
+      status: "completed",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+      output: "# private report content",
+      workflowPlan: { schemaVersion: 1, workflowName: "China", steps: [] },
+    },
+    {
+      id: "history-warning",
+      topic: "Russia economy",
+      status: "completed_with_warnings",
+      createdAt: "2026-08-02T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+      output: "# warning report content",
+      warnings: ["citation warning"],
+    },
+  ];
+  for (const task of tasks) {
+    store.create(task, { type: "task.queued", data: { topic: task.topic } });
+  }
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: {
+      name: "test",
+      success: true,
+      steps: [],
+      totalDuration: 1,
+      totalTokens: { input: 0, output: 0 },
+    },
+  }), store);
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const firstResponse = await fetch(`${baseUrl}/api/tasks?limit=1`);
+  assert.equal(firstResponse.status, 200);
+  const first = await firstResponse.json() as {
+    items: Array<{ id: string; topic: string; output?: string }>;
+    nextCursor?: string;
+  };
+  assert.deepEqual(first.items, [{
+    id: "history-warning",
+    topic: "Russia economy",
+    status: "completed_with_warnings",
+    createdAt: "2026-08-02T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
+    expertCount: 0,
+    sourceCount: 0,
+    warningCount: 1,
+    hasReport: true,
+  }]);
+  assert.equal("output" in first.items[0]!, false);
+  assert.ok(first.nextCursor);
+
+  const secondResponse = await fetch(
+    `${baseUrl}/api/tasks?filter=completed&cursor=${encodeURIComponent(first.nextCursor!)}`,
+  );
+  assert.equal(secondResponse.status, 200);
+  const second = await secondResponse.json() as { items: Array<{ id: string }> };
+  assert.deepEqual(second.items.map((item) => item.id), ["history-completed"]);
+
+  const warningResponse = await fetch(`${baseUrl}/api/tasks?filter=warnings&q=Russia`);
+  assert.equal(warningResponse.status, 200);
+  const warnings = await warningResponse.json() as { items: Array<{ id: string }> };
+  assert.deepEqual(warnings.items.map((item) => item.id), ["history-warning"]);
+});
+
+test("deletes a completed history task and rejects active tasks", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const completed: ResearchTaskSnapshot = {
+    id: "history-delete-completed",
+    topic: "completed history",
+    status: "completed",
+    createdAt: "2026-08-02T00:00:00.000Z",
+    updatedAt: "2026-08-02T00:00:00.000Z",
+    output: "# report",
+  };
+  const running: ResearchTaskSnapshot = {
+    id: "history-delete-running",
+    topic: "running history",
+    status: "running",
+    createdAt: "2026-08-03T00:00:00.000Z",
+    updatedAt: "2026-08-03T00:00:00.000Z",
+  };
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }), store);
+  store.create(completed, { type: "task.completed", data: {} });
+  store.create(running, { type: "task.running", data: {} });
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const deleted = await fetch(`${baseUrl}/api/tasks/${completed.id}`, {
+    method: "DELETE",
+  });
+  assert.equal(deleted.status, 204);
+  assert.equal(manager.get(completed.id), undefined);
+
+  const rejected = await fetch(`${baseUrl}/api/tasks/${running.id}`, {
+    method: "DELETE",
+  });
+  assert.equal(rejected.status, 409);
+  assert.equal(manager.get(running.id)?.status, "running");
+});
+
+test("recovers and revises a checkpointed task through explicit API actions", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot: ResearchTaskSnapshot = {
+    id: "checkpoint-api-task",
+    topic: "checkpoint topic",
+    status: "running",
+    createdAt: "2026-08-03T00:00:00.000Z",
+    updatedAt: "2026-08-03T00:00:00.000Z",
+  };
+  store.create(snapshot, { type: "task.queued", data: {} });
+  store.record(snapshot.id, { status: "running" }, {
+    type: "task.running",
+    data: {},
+  });
+  const checkpoint = apiCheckpoint(snapshot.id);
+  store.saveCheckpoint(checkpoint);
+  const executions: Array<{ fromStep?: string }> = [];
+  const manager = new ResearchTaskManager(
+    async (_topic, _onEvent, controls) => {
+      const execution: { fromStep?: string } = {};
+      if (controls.execution?.fromStep) {
+        execution.fromStep = controls.execution.fromStep;
+      }
+      executions.push(execution);
+      return {
+        workflowPath: "workflow.yaml",
+        output: "# recovered",
+        workflow: {
+          name: "test",
+          success: true,
+          steps: [{
+            id: "final",
+            role: "research/writer",
+            status: "completed",
+            output: "# report",
+            duration: 1,
+            tokens: { input: 0, output: 0 },
+          }],
+          totalDuration: 1,
+          totalTokens: { input: 0, output: 0 },
+        },
+      };
+    },
+    store,
+  );
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const resume = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/resume`, {
+    method: "POST",
+  });
+  assert.equal(resume.status, 202);
+  await waitFor(async () => manager.get(snapshot.id)?.status === "completed");
+  assert.deepEqual(executions, [{}]);
+
+  const retiredFeedback = await fetch(
+    `${baseUrl}/api/tasks/${snapshot.id}/feedback`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stepId: "final", feedback: "补充来源。" }),
+    },
+  );
+  assert.equal(retiredFeedback.status, 404);
+  assert.deepEqual(executions, [{}]);
 });
 
 test("validates and snapshots task research profiles at submission", async (t) => {
@@ -560,13 +753,20 @@ test("accepts user input for a paused AO task", async (t) => {
       .then((response) => response.json()) as { status: string };
     return task.status === "needs_input";
   });
+  const pending = await fetch(`${baseUrl}/api/tasks/${created.id}`)
+    .then((response) => response.json()) as {
+      pendingInput?: { requestId?: string };
+    };
 
   const inputResponse = await fetch(
     `${baseUrl}/api/tasks/${created.id}/input`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answer: "中国市场" }),
+      body: JSON.stringify({
+        answer: "中国市场",
+        requestId: pending.pendingInput?.requestId,
+      }),
     },
   );
   assert.equal(inputResponse.status, 202);
@@ -721,7 +921,6 @@ test("updates an API Key without exposing it through settings reads", async (t) 
     },
   ]);
   assert.equal(initial.maxRetrievers, 2);
-
   const response = await fetch(`${baseUrl}/api/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -759,4 +958,31 @@ async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("condition was not met");
+}
+
+function apiCheckpoint(taskId: string): WorkflowCheckpoint {
+  return {
+    schemaVersion: 1,
+    taskId,
+    runId: "run-initial",
+    reason: "initial",
+    sequence: 1,
+    createdAt: "2026-08-03T00:01:00.000Z",
+    workflow: { yaml: "name: test", sha256: "hash" },
+    inputs: { topic: "checkpoint topic" },
+    inputHash: "input-hash",
+    runtimeFingerprint: "runtime-hash",
+    policyFingerprint: "policy-hash",
+    completedSteps: [{
+      id: "final",
+      role: "research/writer",
+      status: "completed",
+      output: "# prior report",
+      output_var: "report",
+      duration: 1,
+      tokens: { input: 0, output: 0 },
+    }],
+    outputVariables: { report: "# prior report" },
+    evidenceBundles: [],
+  };
 }

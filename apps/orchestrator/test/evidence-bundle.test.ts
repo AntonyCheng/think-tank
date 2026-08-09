@@ -124,7 +124,7 @@ test("records one auditable evidence bundle for an AO research step", () => {
   assert.deepEqual(ledger.snapshot(), [bundle]);
 });
 
-test("bounds persisted source summaries and research context", () => {
+test("preserves complete source summaries and research context", () => {
   const ledger = new EvidenceLedger();
   const bundle = ledger.record({
     aoStepId: "bounded_evidence",
@@ -151,10 +151,10 @@ test("bounds persisted source summaries and research context", () => {
     },
   });
 
-  assert.equal(bundle.sources[0]?.summary?.length, 1_000);
-  assert.equal(bundle.researchContext.content.length, 20_000);
+  assert.equal(bundle.sources[0]?.summary?.length, 1_500);
+  assert.equal(bundle.researchContext.content.length, 25_000);
   assert.equal(bundle.researchContext.originalCharacters, 25_000);
-  assert.equal(bundle.researchContext.truncated, true);
+  assert.equal(bundle.researchContext.truncated, false);
 });
 
 test("keeps revision history but synthesizes only the latest dependency attempt", () => {
@@ -232,4 +232,40 @@ test("exposes only public evidence to final citation normalization", () => {
     title: "Public source",
     url: "https://example.com/public",
   }]);
+});
+
+test("tracks private document evidence without exposing locators", () => {
+  const ledger = new EvidenceLedger();
+  const bundle = ledger.record(record({
+    profile: {
+      schemaVersion: 1,
+      mode: "standard",
+      source: {
+        mode: "local",
+        documentIds: ["policy-library"],
+      },
+      quality: { curateSources: false },
+      limits: {
+        maxSearchResultsPerQuery: 5,
+        maxIterations: 2,
+        maxSubtopics: 3,
+      },
+    },
+    capture: {
+      queries: [],
+      sources: [{
+        visibility: "private",
+        locator: "document:policy-library/search_policy/call_01",
+        title: "本地文档",
+        sourceType: "document",
+      }],
+      researchContext: {
+        content: "bounded local document evidence",
+        originalCharacters: 20,
+        truncated: false,
+      },
+    },
+  }));
+
+  assert.deepEqual(ledger.publicSources(), []);
 });

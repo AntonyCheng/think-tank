@@ -7,6 +7,7 @@ import {
   renderRelativeYearScope,
   renderTaskTemporalContext,
 } from "./task-temporal-context.js";
+import { strategyForProfile } from "./report-evidence-policy.js";
 
 export function researchCompositionDescription(
   topic: string,
@@ -22,22 +23,52 @@ export function researchCompositionDescription(
     ...(taskProfile && capabilities
       ? ["", renderResearchProfileContract(taskProfile, capabilities)]
       : []),
+    ...(taskProfile
+      ? ["", renderReportEvidenceCompositionContract(taskProfile)]
+      : []),
     "",
     "编排契约（必须遵守）：",
     "- 唯一的最终交付步骤必须声明非空 acceptance: 字段。",
     "- acceptance: 必须列出 2-5 条仅凭最终输出文本即可客观核对的条件。",
     "- 用户提出的内容、结构、篇幅、证据、来源和格式限制必须进入 acceptance:，不能只写在 task: 中。",
+    "- Do not introduce any character, word, or token limit in task or acceptance, even when choosing a concise structure. Report depth must be defined by coverage, evidence, comparison, and uncertainty instead.",
     "- 每个 depends_on 值必须逐字匹配同一 YAML 中已声明的 steps[].id，不能填写 output 名称或近似名称。",
     "- depends_on 只能表示必须读取上游 output 的数据依赖，不能只为安排专家先后顺序而建立链。",
     "- 可独立检索的事实、市场、技术、政策等研究应作为并列根步骤；最终 synthesis 步骤再汇总所需分支。",
     "- 所有事实、数据、日期、价格、基准和引语必须保留专家报告中的 Markdown 来源链接；最终综合不得删除或改写 URL。",
     "- 最终步骤的 acceptance: 必须检查数据结论是否带有可点击的句内来源链接。",
+    "- The final acceptance must verify that every assigned expert dimension is represented in the final report, including evidence, implications, and material uncertainty where applicable.",
     "- 任何 AO 步骤都不得生成参考来源章节，也不得把该章节列为 acceptance 条件；平台会在 AO 验收后根据已验证链接统一生成。",
   ].join("\n");
 }
 
 function renderOptionalBlock(value: string): string[] {
   return value ? ["", value] : [];
+}
+
+function renderReportEvidenceCompositionContract(
+  profile: ResearchProfile,
+): string {
+  if (strategyForProfile(profile) === "private_bounded") {
+    return [
+      "Report evidence contract (mandatory):",
+      "- This task has restricted evidence only. The generic public-link instructions above do not apply.",
+      "- The final acceptance must not require clickable URLs, public citations, policy identifiers, dates, numbers, quotations, or a references section.",
+      "- Acceptance must instead verify that the deliverable either makes only bounded, restricted-material conclusions or explicitly states that the evidence is insufficient.",
+      "- Never expose a source locator, profile name, tool name, command, path, endpoint, or credential.",
+    ].join("\n");
+  }
+  if (strategyForProfile(profile) === "mixed_evidence") {
+    return [
+      "Report evidence contract (mandatory):",
+      "- Public factual claims require an observed public URL; restricted-material claims must be labeled and must not contain a URL or source identifier.",
+      "- Final acceptance must distinguish these two evidence classes and must not require a public citation for a restricted-only conclusion.",
+    ].join("\n");
+  }
+  return [
+    "Report evidence contract (mandatory):",
+    "- Final acceptance must require public factual claims to retain only observed, clickable source URLs.",
+  ].join("\n");
 }
 
 function renderResearchProfileContract(

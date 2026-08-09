@@ -118,6 +118,11 @@ test("computes deterministic evidence metrics without a model or network", () =>
         other: 0,
       },
     },
+    reportEvidencePolicy: {
+      strategy: "public_verified",
+      allowsPrivateAttribution: false,
+      forbidsExternalLinks: false,
+    },
     warnings: [],
   });
 });
@@ -176,4 +181,32 @@ test("uses null ratios when a metric has no denominator", () => {
   assert.equal(result.metrics.validLinkRate.ratio, null);
   assert.equal(result.metrics.sourceDeduplication.duplicateRatio, null);
   assert.equal(result.metrics.domainDiversity.ratio, null);
+});
+
+test("does not require public citations for private document evidence", () => {
+  const privateBundle = bundle("internal", []);
+  privateBundle.sources = [{
+    id: "source-1",
+    visibility: "private",
+    locator: "document:policy/search/call_01",
+    title: "Restricted policy material",
+    sourceType: "document",
+    observedAt: "2026-07-29T10:01:00.000Z",
+  }];
+  privateBundle.method = {
+    sourceMode: "local",
+    retrievers: [],
+  };
+
+  const result = assessEvidenceQuality({
+    citationNormalization: citationNormalization({
+      numericClaimParagraphs: 1,
+      citedNumericClaimParagraphs: 0,
+    }),
+    evidenceBundles: [privateBundle],
+  });
+
+  assert.equal(result.status, "passed");
+  assert.equal(result.reportEvidencePolicy.strategy, "private_bounded");
+  assert.equal(result.warnings.length, 0);
 });

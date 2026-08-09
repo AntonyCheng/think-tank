@@ -254,6 +254,71 @@ test("maps a URL-only profile without requiring a Web policy", async () => {
   assert.deepEqual(receivedBody?.researchProfile, profile);
 });
 
+/* test("sends only the frozen managed MCP execution grant", async () => {
+  let receivedBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    receivedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      type: "result",
+      result: {
+        report: "# MCP report",
+        sourceUrls: [],
+        sources: [],
+        cost: 0,
+        events: [],
+      },
+    }) + "\n", {
+      status: 200,
+      headers: { "content-type": "application/x-ndjson" },
+    });
+  };
+  const capabilities: ResearchCapabilities = {
+    modes: ["standard"],
+    sourceModes: ["web", "mcp"],
+    retrievers: ["duckduckgo"],
+    maxRetrievers: 1,
+    sourceCuration: false,
+    domainFilters: false,
+    mcpProfiles: [{
+      id: "policy-library",
+      label: "政策资料库",
+      revision: "sha256:test-revision",
+      tools: [{ name: "search_policy", label: "检索政策" }],
+    }],
+    maxMcpProfiles: 1,
+    mcpResearchModes: ["standard"],
+  };
+  const profile = resolveResearchProfile(
+    {
+      source: {
+        mode: "mcp",
+        mcpProfileIds: ["policy-library"],
+      },
+    },
+    { defaultRetriever: "duckduckgo" },
+    capabilities,
+  );
+  const connector = new GptrConnector({
+    serviceUrl: "http://127.0.0.1:8010",
+    retriever: "duckduckgo",
+    researchProfile: profile,
+    researchCapabilities: capabilities,
+  });
+
+  await connector.chat("expert role", "MCP task", { provider: "openai" });
+
+  assert.deepEqual(receivedBody?.mcpGrant, {
+    schemaVersion: 1,
+    profiles: [{
+      id: "policy-library",
+      revision: "sha256:test-revision",
+      tools: ["search_policy"],
+    }],
+  });
+  assert.doesNotMatch(JSON.stringify(receivedBody), /authorization|command|url/u);
+});
+
+*/
 test("sends only declared dependency evidence to a synthesis step", async () => {
   let receivedBody: any;
   globalThis.fetch = async (_input, init) => {
@@ -357,9 +422,13 @@ test("sends only declared dependency evidence to a synthesis step", async () => 
   });
 
   assert.equal(receivedBody.researchProfile.mode, "synthesis");
-  assert.equal(
+  assert.match(
     receivedBody.task,
-    "write a final report from the supplied evidence",
+    /Do not impose or optimize for a character, word, or token limit/u,
+  );
+  assert.match(
+    receivedBody.task,
+    /^write a final report from the supplied evidence\n\nFinal delivery contract:/u,
   );
   assert.deepEqual(
     receivedBody.upstreamEvidence.map(

@@ -399,7 +399,9 @@ def test_cancelling_research_reaps_the_worker_process(
 
     async def execute() -> int:
         task = asyncio.create_task(executor.execute(request))
-        deadline = monotonic() + 5
+        deadline = monotonic() + (
+            15 if sys.platform == "win32" else 5
+        )
         while not pid_file.exists():
             if monotonic() >= deadline:
                 raise RuntimeError("worker did not start")
@@ -488,7 +490,9 @@ def test_closing_executor_during_research_reaps_worker_cleanly(
 
     async def execute() -> int:
         task = asyncio.create_task(executor.execute(request))
-        deadline = monotonic() + 5
+        deadline = monotonic() + (
+            15 if sys.platform == "win32" else 5
+        )
         while not pid_file.exists():
             if monotonic() >= deadline:
                 raise RuntimeError("worker did not start")

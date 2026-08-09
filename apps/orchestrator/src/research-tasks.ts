@@ -20,10 +20,17 @@ import type {
 } from "./research-profile.js";
 import type { EvidenceBundle } from "./evidence-bundle.js";
 import type { EvidenceQualityAssessment } from "./evidence-quality.js";
+import type { ReportEvidencePolicy } from "./report-evidence-policy.js";
 import type { ResearchTelemetrySnapshot } from "./research-telemetry.js";
+import type {
+  WorkflowCheckpoint,
+  WorkflowRunRequest,
+} from "./workflow-checkpoint.js";
+import type { WorkflowPlan } from "./workflow-plan.js";
 
 export type ResearchTaskStatus =
   | "queued"
+  | "recoverable"
   | "running"
   | "needs_input"
   | "canceling"
@@ -32,6 +39,31 @@ export type ResearchTaskStatus =
   | "completed_with_warnings"
   | "failed";
 
+export type ResearchHistoryFilter =
+  | "all"
+  | "completed"
+  | "warnings"
+  | "unfinished";
+
+export interface ResearchTaskHistoryEntry {
+  id: string;
+  topic: string;
+  status: ResearchTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  expertCount: number;
+  sourceCount: number;
+  elapsedMs?: number;
+  costUsd?: number;
+  warningCount: number;
+  hasReport: boolean;
+}
+
+export interface ResearchTaskHistoryPage {
+  items: ResearchTaskHistoryEntry[];
+  nextCursor?: string;
+}
+
 export interface ResearchTaskSnapshot {
   id: string;
   topic: string;
@@ -39,6 +71,8 @@ export interface ResearchTaskSnapshot {
   createdAt: string;
   updatedAt: string;
   workflowPath?: string;
+  workflowPlan?: WorkflowPlan;
+  reportStepId?: string;
   output?: string;
   citations?: VerifiedCitation[];
   warnings?: string[];
@@ -49,7 +83,21 @@ export interface ResearchTaskSnapshot {
   evidenceBundles?: EvidenceBundle[];
   contentAcceptance?: ContentAcceptance;
   evidenceQuality?: EvidenceQualityAssessment;
+  reportEvidencePolicy?: ReportEvidencePolicy;
   researchTelemetry?: ResearchTelemetrySnapshot;
+  recovery?: {
+    latestRunId: string;
+    checkpointAt: string;
+    reason: "restart";
+  };
+  revisions?: ResearchTaskRevision[];
+}
+
+export interface ResearchTaskRevision {
+  runId: string;
+  createdAt: string;
+  reason: WorkflowCheckpoint["reason"];
+  output?: string;
 }
 
 export interface ContentAcceptance {
@@ -58,22 +106,30 @@ export interface ContentAcceptance {
 }
 
 export interface ResearchTaskPolicy {
+  taskId?: string;
   researchProfile?: ResearchProfile;
   researchCapabilities?: ResearchCapabilities;
+  deferredStart?: boolean;
 }
 
 export interface ResearchInputRequest {
+  requestId: string;
   stepId: string;
+  inputName?: string;
   kind: "workflow_input" | "human_input" | "approval";
   prompt: string;
 }
+
+export type ResearchInputRequestDraft = Omit<ResearchInputRequest, "requestId">;
 
 export interface ResearchTaskEvent {
   id: number;
   taskId: string;
   timestamp: string;
   type: "task.queued" | "task.running" | "task.completed"
-    | "task.needs_input" | "task.input_received"
+    | "task.needs_input" | "task.input_received" | "task.recoverable"
+    | "task.resumed" | "task.rerun_requested"
+    | "task.checkpoint_saved"
     | "task.canceling" | "task.canceled"
     | "task.completed_with_warnings" | "task.failed"
     | ResearchRunnerEvent["type"];
@@ -84,10 +140,13 @@ export type ResearchTaskRunner = (
   topic: string,
   onEvent: (event: ResearchRunnerEvent) => void,
   controls: {
-    requestInput: (request: ResearchInputRequest) => Promise<string>;
+    taskId: string;
+    requestInput: (request: ResearchInputRequestDraft) => Promise<string>;
     signal: AbortSignal;
     researchProfile?: ResearchProfile;
     researchCapabilities?: ResearchCapabilities;
+    execution?: WorkflowRunRequest;
+    saveCheckpoint: (checkpoint: WorkflowCheckpoint) => void;
   },
 ) => Promise<ResearchRunResult>;
 
@@ -142,7 +201,7 @@ export class ResearchTaskManager {
 
     const timestamp = new Date().toISOString();
     const snapshot: ResearchTaskSnapshot = {
-      id: randomUUID(),
+      id: policy.taskId ?? randomUUID(),
       topic: normalized,
       status: "queued",
       createdAt: timestamp,
@@ -174,22 +233,121 @@ export class ResearchTaskManager {
       },
     });
 
-    this.#queue = this.#queue
-      .then(() => this.#execute(snapshot.id))
-      .catch(() => undefined);
+    if (!policy.deferredStart) this.start(snapshot.id);
 
     return { ...snapshot };
   }
 
+  start(id: string): boolean {
+    const task = this.#store.load(id)?.snapshot;
+    if (!task || task.status !== "queued") return false;
+    this.#enqueue(id);
+    return true;
+  }
+
+  resume(id: string): boolean {
+    const task = this.#store.load(id)?.snapshot;
+    const checkpoint = this.#store.latestCheckpoint(id);
+    if (!task || task.status !== "recoverable" || !checkpoint) return false;
+    this.#record(
+      id,
+      { status: "queued", recovery: undefined, error: undefined },
+      "task.resumed",
+      { runId: checkpoint.runId },
+    );
+    this.#enqueue(id, { checkpoint });
+    return true;
+  }
+
+  rerun(id: string, fromStep: string): boolean {
+    const task = this.#store.load(id)?.snapshot;
+    const checkpoint = this.#store.latestCheckpoint(id);
+    if (
+      !task ||
+      !checkpoint ||
+      !["completed", "completed_with_warnings", "failed"].includes(task.status)
+    ) {
+      return false;
+    }
+    const target = checkpoint.completedSteps.find(
+      (step) => step.id === fromStep && step.status === "completed",
+    );
+    if (!target || !target.role.trim()) return false;
+    const revision: ResearchTaskRevision = {
+      runId: checkpoint.runId,
+      createdAt: new Date().toISOString(),
+      reason: checkpoint.reason,
+      output: task.output,
+    };
+    this.#record(
+      id,
+      {
+        status: "queued",
+        error: undefined,
+        recovery: undefined,
+        revisions: [...(task.revisions ?? []), revision],
+      },
+      "task.rerun_requested",
+      { fromStep },
+    );
+    this.#enqueue(id, {
+      checkpoint,
+      fromStep,
+    });
+    return true;
+  }
+
   get(id: string): ResearchTaskSnapshot | undefined {
     const snapshot = this.#store.load(id)?.snapshot;
-    if (!snapshot?.output || !snapshot.citations?.length) {
+    if (
+      !snapshot?.output ||
+      !snapshot.citations?.length ||
+      snapshot.reportEvidencePolicy?.strategy === "mixed_evidence"
+    ) {
       return snapshot;
     }
     return {
       ...snapshot,
       output: formatCitationReport(snapshot.output, snapshot.citations),
     };
+  }
+
+  listHistory(input: {
+    cursor?: string;
+    limit?: number;
+    query?: string;
+    filter?: ResearchHistoryFilter;
+  } = {}): ResearchTaskHistoryPage {
+    const limit = Math.min(Math.max(input.limit ?? 30, 1), 50);
+    const filter = input.filter ?? "all";
+    const query = input.query?.trim().toLocaleLowerCase() ?? "";
+    const cursor = parseHistoryCursor(input.cursor);
+    const entries = this.#store.list()
+      .filter((task) => matchesHistoryFilter(task, filter))
+      .filter((task) => !query || task.topic.toLocaleLowerCase().includes(query))
+      .sort(compareHistoryTasks)
+      .filter((task) => !cursor || isAfterHistoryCursor(task, cursor))
+      .map(historyEntry);
+    const items = entries.slice(0, limit);
+    const last = items.at(-1);
+    return {
+      items,
+      ...(entries.length > items.length && last
+        ? { nextCursor: historyCursor(last) }
+        : {}),
+    };
+  }
+
+  delete(id: string): "deleted" | "not_found" | "not_terminal" {
+    const task = this.#store.load(id)?.snapshot;
+    if (!task) return "not_found";
+    if (!isTerminalTaskStatus(task.status)) return "not_terminal";
+    this.#runtime.delete(id);
+    return this.#store.delete(id) ? "deleted" : "not_found";
+  }
+
+  checkpoint(id: string): WorkflowCheckpoint | undefined {
+    return this.#store.latestCheckpoint(id);
   }
 
   subscribe(
@@ -212,7 +370,7 @@ export class ResearchTaskManager {
     return () => runtime.listeners.delete(listener);
   }
 
-  answerInput(id: string, answer: string): boolean {
+  answerInput(id: string, answer: string, requestId?: string): boolean {
     const normalized = answer.trim();
     const task = this.#store.load(id)?.snapshot;
     const runtime = this.#runtime.get(id);
@@ -220,20 +378,44 @@ export class ResearchTaskManager {
       !task ||
       task.status !== "needs_input" ||
       !runtime?.inputResolver ||
-      !normalized
+      !normalized ||
+      (requestId !== undefined && task.pendingInput?.requestId !== requestId)
+    ) {
+      return false;
+    }
+
+    if (
+      task.pendingInput?.kind === "approval" &&
+      normalized !== "approved" &&
+      normalized !== "declined"
     ) {
       return false;
     }
 
     const resolver = runtime.inputResolver;
+    const rejecter = runtime.inputRejecter;
     runtime.inputResolver = undefined;
     runtime.inputRejecter = undefined;
-    const stepId = task.pendingInput?.stepId;
+    const pendingInput = task.pendingInput;
+    if (pendingInput?.kind === "approval" && normalized === "declined") {
+      const error = new Error("审批已被拒绝，研究任务未继续执行。");
+      this.#clearExecutionTimer(runtime);
+      this.#record(
+        id,
+        { status: "failed", pendingInput: undefined, error: error.message },
+        "task.failed",
+        { stepId: pendingInput.stepId, reason: "approval_declined", error: error.message },
+      );
+      runtime.controller?.abort(error);
+      rejecter?.(error);
+      return true;
+    }
+
     this.#record(
       id,
       { status: "running", pendingInput: undefined },
       "task.input_received",
-      { stepId },
+      { stepId: pendingInput?.stepId, requestId: pendingInput?.requestId },
     );
     this.#resumeExecutionTimer(id, runtime);
     resolver(normalized);
@@ -253,7 +435,11 @@ export class ResearchTaskManager {
 
     const runtime = this.#runtimeFor(id);
     const error = new Error("任务已由用户取消。");
-    if (snapshot.status === "queued" || snapshot.status === "needs_input") {
+    if (
+      snapshot.status === "queued" ||
+      snapshot.status === "needs_input" ||
+      snapshot.status === "recoverable"
+    ) {
       this.#clearExecutionTimer(runtime);
       this.#record(
         id,
@@ -282,7 +468,16 @@ export class ResearchTaskManager {
     return true;
   }
 
-  async #execute(id: string): Promise<void> {
+  #enqueue(id: string, execution?: WorkflowRunRequest): void {
+    this.#queue = this.#queue
+      .then(() => this.#execute(id, execution))
+      .catch(() => undefined);
+  }
+
+  async #execute(
+    id: string,
+    execution?: WorkflowRunRequest,
+  ): Promise<void> {
     const queued = this.#store.load(id)?.snapshot;
     if (!queued || queued.status !== "queued") return;
 
@@ -331,6 +526,7 @@ export class ResearchTaskManager {
           }
           if (event.type === "workflow.composed") {
             changes.workflowPath = event.workflowPath;
+            changes.workflowPlan = structuredClone(event.workflowPlan);
           }
           if (event.type === "evidence.bundle.recorded") {
             const existing = this.#store.load(id)?.snapshot
@@ -353,10 +549,19 @@ export class ResearchTaskManager {
           this.#record(id, changes, type, data);
         },
         {
+          taskId: id,
           requestInput: (request) => this.#requestInput(id, request),
           signal: controller.signal,
           researchProfile: queued.researchProfile,
           researchCapabilities: queued.researchCapabilities,
+          execution,
+          saveCheckpoint: (checkpoint) => {
+            this.#store.saveCheckpoint(checkpoint);
+            this.#record(id, {}, "task.checkpoint_saved", {
+              runId: checkpoint.runId,
+              sequence: checkpoint.sequence,
+            });
+          },
         },
       );
       if (controller.signal.aborted) {
@@ -383,6 +588,7 @@ export class ResearchTaskManager {
         {
           status,
           workflowPath: result.workflowPath,
+          reportStepId: result.workflow.steps.at(-1)?.id,
           output: result.output,
           citations: result.citations ?? [],
           contentAcceptance,
@@ -390,6 +596,13 @@ export class ResearchTaskManager {
             ? {}
             : {
                 evidenceQuality: structuredClone(result.evidenceQuality),
+              }),
+          ...(result.reportEvidencePolicy === undefined
+            ? {}
+            : {
+                reportEvidencePolicy: structuredClone(
+                  result.reportEvidencePolicy,
+                ),
               }),
           ...(result.evidenceBundles === undefined
             ? {}
@@ -419,7 +632,7 @@ export class ResearchTaskManager {
       );
     } catch (error) {
       const currentStatus = this.#store.load(id)?.snapshot.status;
-      if (currentStatus === "canceled") {
+      if (currentStatus && isTerminalTaskStatus(currentStatus)) {
         return;
       }
       if (runtime.timedOut) {
@@ -459,18 +672,22 @@ export class ResearchTaskManager {
 
   #requestInput(
     id: string,
-    request: ResearchInputRequest,
+    request: ResearchInputRequestDraft,
   ): Promise<string> {
     const runtime = this.#runtimeFor(id);
     if (runtime.inputResolver) {
       throw new Error("task already has a pending input request");
     }
+    const pendingInput: ResearchInputRequest = {
+      ...request,
+      requestId: randomUUID(),
+    };
     this.#pauseExecutionTimer(runtime);
     this.#record(
       id,
-      { status: "needs_input", pendingInput: request },
+      { status: "needs_input", pendingInput },
       "task.needs_input",
-      { ...request },
+      { ...pendingInput },
     );
     return new Promise((resolve, reject) => {
       runtime.inputResolver = resolve;
@@ -537,6 +754,87 @@ export class ResearchTaskManager {
     }
     runtime.activeSince = undefined;
   }
+}
+
+function historyEntry(task: ResearchTaskSnapshot): ResearchTaskHistoryEntry {
+  const telemetry = task.researchTelemetry?.summary;
+  const sourceCount = telemetry?.uniqueSourceCount ?? new Set(
+    (task.evidenceBundles ?? []).flatMap((bundle) =>
+      bundle.sources.flatMap((source) =>
+        source.visibility === "public" ? [source.url] : []
+      )
+    ),
+  ).size;
+  const warningCount = (task.warnings?.length ?? 0) +
+    (task.contentAcceptance?.warnings.length ?? 0) +
+    (task.evidenceQuality?.warnings.length ?? 0);
+  return {
+    id: task.id,
+    topic: task.topic,
+    status: task.status,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    expertCount: task.workflowPlan?.steps.length ?? 0,
+    sourceCount,
+    ...(telemetry?.totalElapsedMs === undefined
+      ? {}
+      : { elapsedMs: telemetry.totalElapsedMs }),
+    ...(telemetry?.reportedCostUsd === undefined
+      ? {}
+      : { costUsd: telemetry.reportedCostUsd }),
+    warningCount,
+    hasReport: Boolean(task.output),
+  };
+}
+
+function matchesHistoryFilter(
+  task: ResearchTaskSnapshot,
+  filter: ResearchHistoryFilter,
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "completed") {
+    return task.status === "completed" || task.status === "completed_with_warnings";
+  }
+  if (filter === "warnings") {
+    return task.status === "completed_with_warnings" ||
+      (task.contentAcceptance?.status === "warning") ||
+      (task.evidenceQuality?.status === "warning");
+  }
+  return !["completed", "completed_with_warnings"].includes(task.status);
+}
+
+function compareHistoryTasks(
+  left: ResearchTaskSnapshot,
+  right: ResearchTaskSnapshot,
+): number {
+  return right.updatedAt.localeCompare(left.updatedAt) ||
+    right.id.localeCompare(left.id);
+}
+
+function historyCursor(entry: Pick<ResearchTaskHistoryEntry, "updatedAt" | "id">): string {
+  return `${entry.updatedAt}|${entry.id}`;
+}
+
+function parseHistoryCursor(value: string | undefined):
+  | { updatedAt: string; id: string }
+  | undefined {
+  if (!value) return undefined;
+  const delimiter = value.lastIndexOf("|");
+  if (delimiter < 1 || delimiter === value.length - 1) {
+    throw new Error("history cursor is invalid");
+  }
+  return {
+    updatedAt: value.slice(0, delimiter),
+    id: value.slice(delimiter + 1),
+  };
+}
+
+function isAfterHistoryCursor(
+  task: ResearchTaskSnapshot,
+  cursor: { updatedAt: string; id: string },
+): boolean {
+  return task.updatedAt < cursor.updatedAt ||
+    (task.updatedAt === cursor.updatedAt && task.id < cursor.id);
 }
 
 function presentTaskEvent(event: ResearchTaskEvent): ResearchTaskEvent {

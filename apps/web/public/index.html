@@ -26,7 +26,7 @@
       sizes="180x180"
       href="/assets/apple-touch-icon.png?v=20260729"
     />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=tt015-expert-roster" />
   </head>
   <body>
     <div class="shell">
@@ -49,6 +49,9 @@
             <span class="pulse" aria-hidden="true"></span>
             <span id="service-label">正在连接后端</span>
           </div>
+          <button id="history-button" class="ghost-button" type="button">
+            历史研究
+          </button>
           <button id="settings-button" class="ghost-button" type="button">
             设置
           </button>
@@ -69,7 +72,6 @@
               id="topic"
               name="topic"
               rows="5"
-              maxlength="12000"
               placeholder="例如：研究 DuckDuckGo 的 !Bang 功能、主要优点和隐私局限，并附主要来源。"
               required
             ></textarea>
@@ -82,7 +84,13 @@
                     <option value="web">Web 搜索</option>
                     <option value="urls">仅指定 URL</option>
                     <option value="urls_web">指定 URL + Web 补充</option>
+                    <option value="local">本地文档</option>
+                    <option value="hybrid">本地文档 + Web</option>
                   </select>
+                </label>
+                <label id="source-documents-field" class="task-source-wide" hidden>
+                  <span>本地文档（PDF、TXT、Markdown、DOCX）</span>
+                  <input id="source-documents" name="sourceDocuments" type="file" multiple accept=".pdf,.txt,.md,.markdown,.docx" />
                 </label>
                 <fieldset
                   id="task-retrievers-field"
@@ -152,6 +160,14 @@
             </div>
             <div class="workspace-actions">
               <button
+                id="resume-button"
+                class="ghost-button"
+                type="button"
+                hidden
+              >
+                恢复任务
+              </button>
+              <button
                 id="cancel-button"
                 class="ghost-button cancel-button"
                 type="button"
@@ -173,7 +189,7 @@
               <strong id="source-count">0</strong>
             </div>
             <div class="metric">
-              <span>研究耗时（累计）</span>
+              <span>研究耗时</span>
               <strong id="research-elapsed">0秒</strong>
             </div>
             <div class="metric">
@@ -189,6 +205,17 @@
               <strong id="evidence-quality-state">等待中</strong>
             </div>
           </div>
+
+          <section id="expert-roster" class="expert-roster" hidden>
+            <div class="expert-roster-heading">
+              <div>
+                <span class="panel-kicker">编组方案</span>
+                <h3>专家编组</h3>
+              </div>
+              <span id="expert-roster-summary" class="counter"></span>
+            </div>
+            <ol id="expert-roster-list" class="expert-roster-list"></ol>
+          </section>
 
           <div class="workspace-grid">
             <section class="panel timeline-panel">
@@ -219,6 +246,7 @@
                   </button>
                 </div>
               </div>
+              <p id="report-evidence-policy" class="report-evidence-policy" hidden></p>
               <form id="input-form" class="input-card" hidden>
                 <span class="panel-kicker">需要补充信息</span>
                 <label id="input-prompt" for="input-answer">
@@ -227,10 +255,13 @@
                 <textarea
                   id="input-answer"
                   rows="4"
-                  maxlength="12000"
                   required
                 ></textarea>
-                <button type="submit">提交并继续研究</button>
+                <div id="input-actions" class="input-actions">
+                  <button id="input-submit" type="submit">提交并继续研究</button>
+                  <button id="approval-decline" class="ghost-button approval-decline" type="button" hidden>拒绝</button>
+                  <button id="approval-approve" type="button" hidden>批准并继续</button>
+                </div>
                 <p id="input-error" class="form-error" role="alert" hidden></p>
               </form>
               <div id="report-empty" class="report-empty">
@@ -347,7 +378,33 @@
       </form>
     </dialog>
 
+    <dialog id="history-dialog" class="history-dialog" aria-labelledby="history-title">
+      <section class="history-surface">
+        <div class="history-heading">
+          <div>
+            <span class="panel-kicker">研究档案</span>
+            <h2 id="history-title">历史研究</h2>
+          </div>
+          <button id="history-close" class="ghost-button" type="button">关闭</button>
+        </div>
+        <label class="history-search" for="history-query">
+          <span>搜索话题</span>
+          <input id="history-query" type="search" placeholder="输入研究话题关键词" autocomplete="off" />
+        </label>
+        <div id="history-filters" class="history-filters" role="group" aria-label="历史研究筛选">
+          <button type="button" data-history-filter="all" aria-pressed="true">全部</button>
+          <button type="button" data-history-filter="completed" aria-pressed="false">已完成</button>
+          <button type="button" data-history-filter="warnings" aria-pressed="false">有警告</button>
+          <button type="button" data-history-filter="unfinished" aria-pressed="false">未完成</button>
+        </div>
+        <p id="history-error" class="form-error" role="alert" hidden></p>
+        <ol id="history-list" class="history-list"></ol>
+        <p id="history-empty" class="history-empty" hidden>没有匹配的研究记录。</p>
+        <button id="history-more" class="ghost-button history-more" type="button" hidden>加载更多</button>
+      </section>
+    </dialog>
+
     <script src="/vendor/markdown-it.min.js"></script>
-    <script type="module" src="/app.js?v=20260731-api-key-settings"></script>
+    <script type="module" src="/app.js?v=tt015-expert-roster"></script>
   </body>
 </html>

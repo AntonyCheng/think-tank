@@ -19,7 +19,7 @@
       },
       "capabilities": {
         "modes": ["standard", "deep", "synthesis"],
-        "sourceModes": ["web", "urls", "local", "hybrid", "mcp"],
+        "sourceModes": ["web", "urls", "local", "hybrid"],
         "retrievers": ["duckduckgo", "tavily"],
         "maxRetrievers": 5,
         "sourceCuration": true,

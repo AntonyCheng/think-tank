@@ -6,9 +6,6 @@ import type {
   ResearchSourcePolicy,
 } from "./research-profile.js";
 
-const MAX_SOURCE_SUMMARY_CHARACTERS = 1_000;
-const MAX_RESEARCH_CONTEXT_CHARACTERS = 20_000;
-
 export type EvidenceQueryKind = "subquery" | "deep";
 
 export interface EvidenceQueryCapture {
@@ -28,6 +25,7 @@ export type EvidenceSourceCapture =
       visibility: "private";
       locator: string;
       title: string;
+      sourceType?: "document";
       summary?: string;
     };
 
@@ -63,6 +61,7 @@ export type EvidenceSource =
       visibility: "private";
       locator: string;
       title: string;
+      sourceType?: "document";
       summary?: string;
       observedAt: string;
     };
@@ -127,11 +126,16 @@ type NormalizedEvidenceSource =
       visibility: "private";
       locator: string;
       title: string;
+      sourceType?: "document";
       summary?: string;
     };
 
 export class EvidenceLedger {
-  readonly #bundles: EvidenceBundle[] = [];
+  readonly #bundles: EvidenceBundle[];
+
+  constructor(bundles: readonly EvidenceBundle[] = []) {
+    this.#bundles = bundles.map((bundle) => structuredClone(bundle));
+  }
 
   record(input: EvidenceRecord): EvidenceBundle {
     const previous = this.#bundles.filter(
@@ -139,10 +143,7 @@ export class EvidenceLedger {
     );
     const superseded = previous.at(-1);
     const attempt = previous.length + 1;
-    const contextContent = input.capture.researchContext.content.slice(
-      0,
-      MAX_RESEARCH_CONTEXT_CHARACTERS,
-    );
+    const contextContent = input.capture.researchContext.content;
     const originalContextCharacters = Math.max(
       input.capture.researchContext.content.length,
       input.capture.researchContext.originalCharacters,
@@ -164,8 +165,7 @@ export class EvidenceLedger {
       researchContext: {
         content: contextContent,
         originalCharacters: originalContextCharacters,
-        truncated: input.capture.researchContext.truncated ||
-          originalContextCharacters > contextContent.length,
+        truncated: input.capture.researchContext.truncated,
       },
       method: {
         sourceMode: input.profile.source.mode,
@@ -268,9 +268,7 @@ function normalizeSources(
 ): EvidenceSource[] {
   const normalized: NormalizedEvidenceSource[] = [];
   for (const capture of captures) {
-    const summary = capture.summary
-      ?.trim()
-      .slice(0, MAX_SOURCE_SUMMARY_CHARACTERS);
+    const summary = capture.summary?.trim();
     if (capture.visibility === "public") {
       const url = normalizedHttpUrl(capture.url);
       if (!url) continue;
@@ -292,6 +290,7 @@ function normalizeSources(
       visibility: "private" as const,
       locator,
       title,
+      ...(capture.sourceType ? { sourceType: capture.sourceType } : {}),
       ...(summary ? { summary } : {}),
     });
   }
@@ -329,8 +328,7 @@ function sourceRetrievers(
   if (source.mode === "web") return source.retrievers;
   if (
     (source.mode === "urls" ||
-      source.mode === "hybrid" ||
-      source.mode === "mcp") &&
+      source.mode === "hybrid") &&
     source.web
   ) {
     return source.web.retrievers;

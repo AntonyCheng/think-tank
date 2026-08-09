@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +12,7 @@ import type {
 } from "agency-orchestrator";
 
 import {
+  bundledAgentsDir,
   collectWorkflowInputRequests,
   preflightWorkflow,
   prepareWorkflowForExecution,
@@ -25,6 +27,12 @@ import { RoutingConnector } from "../src/routing-connector.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, "fixtures");
+
+test("resolves the bundled ESM agency agent directory", () => {
+  const agentsDir = bundledAgentsDir();
+  assert.equal(existsSync(agentsDir), true);
+  assert.match(agentsDir, /agency-orchestrator[\\/]agency-agents$/u);
+});
 
 class RecordingConnector implements LLMConnector {
   readonly calls: Array<{ systemPrompt: string; userMessage: string }> = [];
@@ -75,7 +83,7 @@ class VerifyingConnector extends RecordingConnector {
   }
 }
 
-test("maps AO inputs, human input, and approval into prefillable requests", () => {
+test("keeps human input and approval as runtime workflow steps", () => {
   const workflow: WorkflowDefinition = {
     name: "interactive",
     agents_dir: "agents",
@@ -113,32 +121,46 @@ test("maps AO inputs, human input, and approval into prefillable requests", () =
         kind: "workflow_input",
         prompt: "研究地域",
       },
-      {
-        stepId: "clarify",
-        inputName: "preference",
-        kind: "human_input",
-        prompt: "请补充偏好。",
-      },
-      {
-        stepId: "approve",
-        inputName: "__approval_approve",
-        kind: "approval",
-        prompt: "是否继续？",
-      },
     ],
   );
 
   const prepared = prepareWorkflowForExecution(workflow, {
     region: "中国",
     preference: "重视隐私",
-    __approval_approve: "yes",
   });
-  assert.equal(prepared.workflow.steps[1]?.type, "human_input");
+  assert.equal(prepared.workflow.steps[1]?.type, "approval");
   assert.equal(
     prepared.workflow.steps[1]?.output,
-    "__approval_approve",
+    undefined,
   );
   assert.equal(prepared.inputs.get("region"), "中国");
+});
+
+test("requests human input only after upstream runtime steps complete", async () => {
+  const connector = new RecordingConnector();
+  const events: string[] = [];
+  let requestedAfterEvidence = false;
+
+  const result = await runWorkflowFile(join(fixtures, "interactive-workflow.yaml"), {
+    connector,
+    agentsDir: join(fixtures, "agents"),
+    inputs: { topic: "test topic" },
+    onEvent: (event) => events.push(`${event.type}:${event.stepId}`),
+    requestInput: async (request) => {
+      requestedAfterEvidence = events.includes("step.completed:evidence");
+      assert.deepEqual(request, {
+        stepId: "clarify",
+        inputName: "preference",
+        kind: "human_input",
+        prompt: "请补充研究偏好。",
+      });
+      return "prioritize public policy";
+    },
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(requestedAfterEvidence, true);
+  assert.match(connector.calls.at(-1)?.userMessage ?? "", /prioritize public policy/u);
 });
 
 class RejectingVerifierConnector extends RecordingConnector {
@@ -311,6 +333,56 @@ test("AO loads full expert prompts and executes dependencies in order", async ()
     "step.started:final",
     "step.completed:final",
   ]);
+});
+
+test("AO runtime events preserve localized workflow step names", async () => {
+  const connector = new RecordingConnector();
+  const events: Array<{ type: string; stepId?: string; stepName?: string; role?: string }> = [];
+
+  await runWorkflowFile(join(fixtures, "workflow.yaml"), {
+    connector,
+    agentsDir: join(fixtures, "agents"),
+    inputs: { topic: "test topic" },
+    onEvent: (event) => events.push(event),
+  });
+
+  const evidenceStarted = events.find((event) => event.type === "step.started" && event.stepId === "evidence");
+  const finalCompleted = events.find((event) => event.type === "step.completed" && event.stepId === "final");
+
+  assert.equal(evidenceStarted?.stepName, "证据研究专家");
+  assert.equal(evidenceStarted?.role, "research/analyst");
+  assert.equal(finalCompleted?.stepName, "报告整合专家");
+  assert.equal(finalCompleted?.role, "research/writer");
+});
+
+test("reuses checkpointed ancestors when rerunning a downstream step", async () => {
+  const initial = await runWorkflowFile(join(fixtures, "workflow.yaml"), {
+    connector: new RecordingConnector(),
+    agentsDir: join(fixtures, "agents"),
+    inputs: { topic: "test topic" },
+  });
+  const evidence = initial.steps.find((step) => step.id === "evidence");
+  assert.ok(evidence);
+
+  const connector = new RecordingConnector();
+  const checkpointed: string[] = [];
+  const result = await runWorkflowFile(join(fixtures, "workflow.yaml"), {
+    connector,
+    agentsDir: join(fixtures, "agents"),
+    inputs: { topic: "test topic" },
+    resume: {
+      completedSteps: [evidence],
+      outputVariables: { evidence: evidence.output ?? "" },
+      fromStep: "final",
+    },
+    onCheckpointStep: (step) => checkpointed.push(step.id),
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(connector.calls.length, 1);
+  assert.match(connector.calls[0]?.userMessage ?? "", /evidence result/u);
+  assert.equal(result.steps.find((step) => step.id === "final")?.verification, undefined);
+  assert.deepEqual(checkpointed, ["final"]);
 });
 
 test("injects each resolved profile into the AO runtime config", async () => {

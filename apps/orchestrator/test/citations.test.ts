@@ -185,6 +185,66 @@ test("removes numbered reference sections before rebuilding one source list", ()
   }
 });
 
+test("removes unknown links from a policy-governed final report", () => {
+  const result = normalizeFinalCitations(
+    [
+      "# Report",
+      "",
+      "Verified [source](https://known.example/data)",
+      "Invented [source](https://unknown.example/data)",
+    ].join("\n"),
+    [{ title: "Known", url: "https://known.example/data" }],
+    {
+      strategy: "public_verified",
+      allowedPublicUrls: ["https://known.example/data"],
+      allowsPrivateAttribution: false,
+      requiresPublicCitationForFact: true,
+      forbidsExternalLinks: false,
+      sourceDisclosure: "restricted",
+    },
+  );
+
+  assert.match(result.markdown, /known\.example/u);
+  assert.doesNotMatch(result.markdown, /unknown\.example/u);
+});
+
+test("keeps mixed-evidence links inline without appending a reference section", () => {
+  const result = normalizeFinalCitations(
+    "# Report\n\nPublic evidence: [verified source](https://known.example/data)\n\n## 参考来源\n\n[1] [Known](https://known.example/data)",
+    [{ title: "Known", url: "https://known.example/data" }],
+    {
+      strategy: "mixed_evidence",
+      allowedPublicUrls: ["https://known.example/data"],
+      allowsPrivateAttribution: true,
+      requiresPublicCitationForFact: true,
+      forbidsExternalLinks: false,
+      sourceDisclosure: "restricted",
+    },
+  );
+
+  assert.match(result.markdown, /\[verified source\]\(https:\/\/known\.example\/data\)/u);
+  assert.doesNotMatch(result.markdown, /参考来源|References/u);
+  assert.equal(result.citations.length, 1);
+});
+
+test("falls back to an evidence-limited brief for private reports", () => {
+  const result = normalizeFinalCitations(
+    "# Report\n\nFake [policy](https://unknown.example/policy)\n\ndocument:internal/tool/call_01",
+    [],
+    {
+      strategy: "private_bounded",
+      allowedPublicUrls: [],
+      allowsPrivateAttribution: true,
+      requiresPublicCitationForFact: false,
+      forbidsExternalLinks: true,
+      sourceDisclosure: "restricted",
+    },
+  );
+
+  assert.doesNotMatch(result.markdown, /unknown\.example|document:/u);
+  assert.match(result.markdown, /受限资料/u);
+});
+
 test("warns when data claims or links cannot be verified", () => {
   const result = normalizeFinalCitations(
     "收入增长 42%，但没有引用。\n\n[未知来源](https://unknown.example/data)",

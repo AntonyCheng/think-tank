@@ -216,3 +216,52 @@ test("AO cannot add a retriever outside the task source grant", () => {
       && error.path === "$.source.retrievers",
   );
 });
+
+/* test("AO may narrow an MCP profile grant", () => {
+  assert.doesNotThrow(() =>
+    assertSourceScopeWithinTask(
+      {
+        mode: "mcp",
+        mcpProfileIds: ["policy-library", "statistics"],
+        web: { retrievers: ["duckduckgo"] },
+      },
+      {
+        mode: "mcp",
+        mcpProfileIds: ["statistics"],
+        web: { retrievers: ["duckduckgo"] },
+      },
+    )
+  );
+});
+
+test("AO cannot add an MCP profile outside the task grant", () => {
+  assert.throws(
+    () =>
+      assertSourceScopeWithinTask(
+        { mode: "mcp", mcpProfileIds: ["policy-library"] },
+        { mode: "mcp", mcpProfileIds: ["statistics"] },
+      ),
+    (error: unknown) =>
+      error instanceof ResearchProfileError &&
+      error.code === "profile_capability_disabled" &&
+      error.path === "$.source.mcpProfileIds",
+  );
+});
+
+test("AO cannot add Web search to a pure MCP task", () => {
+  assert.throws(
+    () =>
+      assertSourceScopeWithinTask(
+        { mode: "mcp", mcpProfileIds: ["policy-library"] },
+        {
+          mode: "mcp",
+          mcpProfileIds: ["policy-library"],
+          web: { retrievers: ["duckduckgo"] },
+        },
+      ),
+    (error: unknown) =>
+      error instanceof ResearchProfileError &&
+      error.code === "profile_capability_disabled" &&
+      error.path === "$.source.web",
+  );
+}); */

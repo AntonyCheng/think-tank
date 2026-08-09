@@ -74,8 +74,7 @@ Copy-Item .env.example .env
 npm run test:acceptance
 ```
 
-自动化与真实链路的逐项通过条件见
-[`docs/v1-acceptance-matrix.md`](docs/v1-acceptance-matrix.md)。
+自动化与真实链路的通过条件由同目录测试与 `npm run test:acceptance` 维护。
 
 终端一启动 GPTR 服务：
 
@@ -161,9 +160,8 @@ GET /api/tasks/:id/export/pdf
 最终 Markdown 是所有交付格式的唯一内容源。DOCX 由 `python-docx` 直接
 生成，PDF 由 ReportLab 直接生成；生产服务不调用 Microsoft Word 或
 LibreOffice，也不执行 DOCX 到 PDF 的转换。PDF 是固定版式交付物，DOCX
-是可编辑交付物，两者不承诺像素级一致。详细的三平台依赖、字体边界和验收
-矩阵见
-[`docs/architecture/cross-platform-document-export.md`](docs/architecture/cross-platform-document-export.md)。
+是可编辑交付物，两者不承诺像素级一致；导出兼容性由
+`.github/workflows/document-export-matrix.yml` 与对应测试维护。
 PDF 固定嵌入项目资产中的 Noto Sans SC 字体，许可证随字体保存在
 `services/researcher/assets/fonts/OFL.txt`，因此生成和中文文本抽取都不依赖
 宿主操作系统字体。

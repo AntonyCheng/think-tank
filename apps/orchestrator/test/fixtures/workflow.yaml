@@ -8,10 +8,12 @@ inputs:
     required: true
 steps:
   - id: evidence
+    name: 证据研究专家
     role: research/analyst
     task: Gather evidence about {{topic}}.
     output: evidence
   - id: final
+    name: 报告整合专家
     role: research/writer
     task: |
       Produce the final report for {{topic}}.

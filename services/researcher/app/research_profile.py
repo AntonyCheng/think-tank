@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 ResearchMode = Literal["standard", "deep", "synthesis"]
-ResearchSourceMode = Literal["web", "urls", "local", "hybrid", "mcp"]
+ResearchSourceMode = Literal["web", "urls", "local", "hybrid"]
 ResearchRetriever = Literal[
     "duckduckgo",
     "tavily",
@@ -93,18 +93,11 @@ class HybridSourcePolicy(_FrozenModel):
     web: WebSearchPolicy | None = None
 
 
-class McpSourcePolicy(_FrozenModel):
-    mode: Literal["mcp"] = "mcp"
-    mcp_profile_ids: tuple[str, ...]
-    web: WebSearchPolicy | None = None
-
-
 ResearchSourcePolicy = (
     WebSourcePolicy
     | UrlSourcePolicy
     | LocalSourcePolicy
     | HybridSourcePolicy
-    | McpSourcePolicy
 )
 
 
@@ -149,18 +142,11 @@ class HybridSourcePolicyOverride(_FrozenModel):
     web: WebSearchPolicyOverride | None = None
 
 
-class McpSourcePolicyOverride(_FrozenModel):
-    mode: Literal["mcp"]
-    mcp_profile_ids: tuple[str, ...]
-    web: WebSearchPolicyOverride | None = None
-
-
 ResearchSourcePolicyOverride = (
     WebSearchPolicyOverride
     | UrlSourcePolicyOverride
     | LocalSourcePolicyOverride
     | HybridSourcePolicyOverride
-    | McpSourcePolicyOverride
 )
 
 
@@ -283,7 +269,7 @@ def _parse_source(
         if "mode" not in source
         else _enum_value(
             source["mode"],
-            ("web", "urls", "local", "hybrid", "mcp"),
+            ("web", "urls", "local", "hybrid"),
             "$.source.mode",
         )
     )
@@ -345,22 +331,10 @@ def _parse_source(
             web=web,
         )
 
-    _assert_known_fields(
-        source,
-        {"mode", "mcpProfileIds", "web"},
-        "$.source",
-    )
-    return McpSourcePolicy(
-        mcp_profile_ids=_parse_identifiers(
-            source.get("mcpProfileIds"),
-            "$.source.mcpProfileIds",
-            10,
-        ),
-        web=(
-            None
-            if "web" not in source
-            else _parse_nested_web(source["web"], "$.source.web", defaults)
-        ),
+    raise ResearchProfileError(
+        "profile_invalid_value",
+        "$.source.mode",
+        f"Unsupported source mode '{mode}'.",
     )
 
 
@@ -749,7 +723,7 @@ def _assert_source_capabilities(
     elif (
         isinstance(
             profile.source,
-            (UrlSourcePolicy, HybridSourcePolicy, McpSourcePolicy),
+            (UrlSourcePolicy, HybridSourcePolicy),
         )
         and profile.source.web is not None
     ):

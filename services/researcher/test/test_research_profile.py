@@ -94,7 +94,7 @@ def test_current_environment_accepts_standard_url_sources() -> None:
     )
 
     assert result.source.mode == "urls"
-    assert capabilities.source_modes == ("web", "urls")
+    assert capabilities.source_modes == ("web", "urls", "local", "hybrid")
     assert capabilities.domain_filters is True
 
 
@@ -143,6 +143,21 @@ def test_request_profile_uses_ready_deployment_retriever_catalog() -> None:
     )
 
     assert profile.source.retrievers == ("duckduckgo", "openalex")
+
+
+def test_research_request_accepts_task_id_alias() -> None:
+    request = ResearchRequest.model_validate(
+        {
+            "taskId": "task-local-documents",
+            "systemPrompt": "Expert.",
+            "task": "Research the uploaded document.",
+        }
+    )
+
+    assert request.task_id == "task-local-documents"
+    assert request.model_dump(by_alias=True)["taskId"] == (
+        "task-local-documents"
+    )
 
 
 def test_current_environment_rejects_url_sources_for_deep_research() -> None:

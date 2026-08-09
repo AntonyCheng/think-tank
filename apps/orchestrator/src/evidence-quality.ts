@@ -1,5 +1,9 @@
 import type { CitationNormalization } from "./citations.js";
 import type { EvidenceBundle, EvidenceSource } from "./evidence-bundle.js";
+import {
+  deriveReportEvidencePolicy,
+  type ReportEvidencePolicy,
+} from "./report-evidence-policy.js";
 
 const CITATION_COVERAGE_TARGET = 0.8;
 const VALID_LINK_RATE_TARGET = 1;
@@ -56,18 +60,25 @@ export interface EvidenceQualityAssessment {
     };
     sourceTypes: Record<EvidenceSourceType, number>;
   };
+  reportEvidencePolicy: Pick<
+    ReportEvidencePolicy,
+    "strategy" | "allowsPrivateAttribution" | "forbidsExternalLinks"
+  >;
   warnings: EvidenceQualityWarning[];
 }
 
 export interface EvidenceQualityInput {
   citationNormalization: CitationNormalization;
   evidenceBundles: readonly EvidenceBundle[];
+  reportEvidencePolicy?: ReportEvidencePolicy;
 }
 
 export function assessEvidenceQuality(
   input: EvidenceQualityInput,
 ): EvidenceQualityAssessment {
   const { citationNormalization } = input;
+  const reportEvidencePolicy = input.reportEvidencePolicy ??
+    deriveReportEvidencePolicy({ evidenceBundles: input.evidenceBundles });
   const observedSources = input.evidenceBundles.flatMap((bundle) =>
     bundle.sources.filter(isPublicSource)
   );
@@ -99,6 +110,7 @@ export function assessEvidenceQuality(
 
   const warnings: EvidenceQualityWarning[] = [];
   if (
+    reportEvidencePolicy.strategy !== "private_bounded" &&
     citationCoverage !== null &&
     citationCoverage < CITATION_COVERAGE_TARGET
   ) {
@@ -108,7 +120,10 @@ export function assessEvidenceQuality(
         `证据质量：含数据段落的已验证引用覆盖率为 ${percent(citationCoverage)}，低于 ${percent(CITATION_COVERAGE_TARGET)}。`,
     });
   }
-  if (validLinkRate !== null && validLinkRate < VALID_LINK_RATE_TARGET) {
+  if (
+    reportEvidencePolicy.strategy !== "private_bounded" &&
+    validLinkRate !== null && validLinkRate < VALID_LINK_RATE_TARGET
+  ) {
     warnings.push({
       code: "unverified_links",
       message:
@@ -116,6 +131,7 @@ export function assessEvidenceQuality(
     });
   }
   if (
+    reportEvidencePolicy.strategy !== "private_bounded" &&
     uniqueSources.size > 0 &&
     citationNormalization.verifiedBodyLinkCount === 0
   ) {
@@ -125,6 +141,7 @@ export function assessEvidenceQuality(
     });
   }
   if (
+    reportEvidencePolicy.strategy !== "private_bounded" &&
     uniqueSources.size === 0 &&
     citationNormalization.numericClaimParagraphs > 0
   ) {
@@ -184,6 +201,11 @@ export function assessEvidenceQuality(
         ratio: domainRatio,
       },
       sourceTypes,
+    },
+    reportEvidencePolicy: {
+      strategy: reportEvidencePolicy.strategy,
+      allowsPrivateAttribution: reportEvidencePolicy.allowsPrivateAttribution,
+      forbidsExternalLinks: reportEvidencePolicy.forbidsExternalLinks,
     },
     warnings,
   };

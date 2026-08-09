@@ -7,6 +7,7 @@ import type {
   ResearchTaskSnapshot,
 } from "./research-tasks.js";
 import type { ResearchDiagnosticRecord } from "./research-telemetry.js";
+import type { WorkflowCheckpoint } from "./workflow-checkpoint.js";
 
 export interface StoredResearchTask {
   snapshot: ResearchTaskSnapshot;
@@ -34,6 +35,8 @@ export interface ResearchTaskStore {
     event: ResearchTaskEventDraft,
   ): ResearchTaskTransition;
   load(id: string): StoredResearchTask | undefined;
+  list(): ResearchTaskSnapshot[];
+  delete(id: string): boolean;
   record(
     id: string,
     changes: Partial<ResearchTaskSnapshot>,
@@ -44,12 +47,16 @@ export interface ResearchTaskStore {
     diagnostic: ResearchDiagnosticRecord,
   ): StoredResearchDiagnostic | undefined;
   loadDiagnostics(id: string): StoredResearchDiagnostic[];
+  saveCheckpoint(checkpoint: WorkflowCheckpoint): void;
+  latestCheckpoint(id: string): WorkflowCheckpoint | undefined;
+  listCheckpoints(id: string): WorkflowCheckpoint[];
   recoverInterrupted(): number;
 }
 
 export class InMemoryResearchTaskStore implements ResearchTaskStore {
   readonly #tasks = new Map<string, StoredResearchTask>();
   readonly #diagnostics = new Map<string, StoredResearchDiagnostic[]>();
+  readonly #checkpoints = new Map<string, WorkflowCheckpoint[]>();
   readonly #diagnosticLimit: number;
 
   constructor(diagnosticLimit = 2_000) {
@@ -75,6 +82,19 @@ export class InMemoryResearchTaskStore implements ResearchTaskStore {
   load(id: string): StoredResearchTask | undefined {
     const stored = this.#tasks.get(id);
     return stored ? structuredClone(stored) : undefined;
+  }
+
+  list(): ResearchTaskSnapshot[] {
+    return [...this.#tasks.values()].map((stored) =>
+      structuredClone(stored.snapshot)
+    );
+  }
+
+  delete(id: string): boolean {
+    const deleted = this.#tasks.delete(id);
+    this.#diagnostics.delete(id);
+    this.#checkpoints.delete(id);
+    return deleted;
   }
 
   record(
@@ -138,21 +158,63 @@ export class InMemoryResearchTaskStore implements ResearchTaskStore {
     return structuredClone(this.#diagnostics.get(id) ?? []);
   }
 
+  saveCheckpoint(checkpoint: WorkflowCheckpoint): void {
+    const records = this.#checkpoints.get(checkpoint.taskId) ?? [];
+    const existing = records.findIndex(
+      (record) => record.runId === checkpoint.runId &&
+        record.sequence === checkpoint.sequence,
+    );
+    if (existing >= 0) {
+      records[existing] = structuredClone(checkpoint);
+    } else {
+      records.push(structuredClone(checkpoint));
+    }
+    records.sort(compareCheckpoints);
+    this.#checkpoints.set(checkpoint.taskId, records);
+  }
+
+  latestCheckpoint(id: string): WorkflowCheckpoint | undefined {
+    const records = this.#checkpoints.get(id);
+    return records?.length
+      ? structuredClone(records.at(-1))
+      : undefined;
+  }
+
+  listCheckpoints(id: string): WorkflowCheckpoint[] {
+    return structuredClone(this.#checkpoints.get(id) ?? []);
+  }
+
   recoverInterrupted(): number {
     let recovered = 0;
     for (const stored of this.#tasks.values()) {
       if (isTerminal(stored.snapshot.status)) continue;
+      const checkpoint = this.latestCheckpoint(stored.snapshot.id);
       this.record(
         stored.snapshot.id,
-        {
-          status: "failed",
-          pendingInput: undefined,
-          error: restartInterruptionMessage(),
-        },
-        {
-          type: "task.failed",
-          data: { error: restartInterruptionMessage(), reason: "restart" },
-        },
+        checkpoint
+          ? {
+              status: "recoverable",
+              pendingInput: undefined,
+              recovery: {
+                latestRunId: checkpoint.runId,
+                checkpointAt: checkpoint.createdAt,
+                reason: "restart",
+              },
+            }
+          : {
+              status: "failed",
+              pendingInput: undefined,
+              error: restartInterruptionMessage(),
+            },
+        checkpoint
+          ? {
+              type: "task.recoverable",
+              data: { reason: "restart", runId: checkpoint.runId },
+            }
+          : {
+              type: "task.failed",
+              data: { error: restartInterruptionMessage(), reason: "restart" },
+            },
       );
       recovered += 1;
     }
@@ -204,10 +266,21 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
         PRIMARY KEY (task_id, diagnostic_id),
         FOREIGN KEY (task_id) REFERENCES research_tasks(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS research_task_checkpoints (
+        task_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        checkpoint_json TEXT NOT NULL,
+        PRIMARY KEY (task_id, run_id, sequence),
+        FOREIGN KEY (task_id) REFERENCES research_tasks(id) ON DELETE CASCADE
+      );
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (1, datetime('now'));
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (2, datetime('now'));
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+      VALUES (3, datetime('now'));
     `);
   }
 
@@ -260,6 +333,24 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
         data: JSON.parse(row.data_json) as Record<string, unknown>,
       })),
     };
+  }
+
+  list(): ResearchTaskSnapshot[] {
+    const rows = this.#database.prepare(`
+      SELECT snapshot_json
+      FROM research_tasks
+      ORDER BY updated_at DESC, id DESC
+    `).all() as Array<{ snapshot_json: string }>;
+    return rows.map((row) =>
+      JSON.parse(row.snapshot_json) as ResearchTaskSnapshot
+    );
+  }
+
+  delete(id: string): boolean {
+    const result = this.#database.prepare(`
+      DELETE FROM research_tasks WHERE id = ?
+    `).run(id);
+    return Number(result.changes) > 0;
   }
 
   record(
@@ -408,6 +499,48 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
     }));
   }
 
+  saveCheckpoint(checkpoint: WorkflowCheckpoint): void {
+    this.#database.prepare(`
+      INSERT INTO research_task_checkpoints(
+        task_id, run_id, sequence, created_at, checkpoint_json
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(task_id, run_id, sequence) DO UPDATE SET
+        created_at = excluded.created_at,
+        checkpoint_json = excluded.checkpoint_json
+    `).run(
+      checkpoint.taskId,
+      checkpoint.runId,
+      checkpoint.sequence,
+      checkpoint.createdAt,
+      JSON.stringify(checkpoint),
+    );
+  }
+
+  latestCheckpoint(id: string): WorkflowCheckpoint | undefined {
+    const row = this.#database.prepare(`
+      SELECT checkpoint_json
+      FROM research_task_checkpoints
+      WHERE task_id = ?
+      ORDER BY created_at DESC, sequence DESC
+      LIMIT 1
+    `).get(id) as { checkpoint_json: string } | undefined;
+    return row
+      ? JSON.parse(row.checkpoint_json) as WorkflowCheckpoint
+      : undefined;
+  }
+
+  listCheckpoints(id: string): WorkflowCheckpoint[] {
+    const rows = this.#database.prepare(`
+      SELECT checkpoint_json
+      FROM research_task_checkpoints
+      WHERE task_id = ?
+      ORDER BY created_at, sequence
+    `).all(id) as Array<{ checkpoint_json: string }>;
+    return rows.map((row) =>
+      JSON.parse(row.checkpoint_json) as WorkflowCheckpoint
+    );
+  }
+
   recoverInterrupted(): number {
     const rows = this.#database.prepare(`
       SELECT id
@@ -415,17 +548,33 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
       WHERE status NOT IN ('completed', 'completed_with_warnings', 'failed', 'canceled')
     `).all() as Array<{ id: string }>;
     for (const row of rows) {
+      const checkpoint = this.latestCheckpoint(row.id);
       this.record(
         row.id,
-        {
-          status: "failed",
-          pendingInput: undefined,
-          error: restartInterruptionMessage(),
-        },
-        {
-          type: "task.failed",
-          data: { error: restartInterruptionMessage(), reason: "restart" },
-        },
+        checkpoint
+          ? {
+              status: "recoverable",
+              pendingInput: undefined,
+              recovery: {
+                latestRunId: checkpoint.runId,
+                checkpointAt: checkpoint.createdAt,
+                reason: "restart",
+              },
+            }
+          : {
+              status: "failed",
+              pendingInput: undefined,
+              error: restartInterruptionMessage(),
+            },
+        checkpoint
+          ? {
+              type: "task.recoverable",
+              data: { reason: "restart", runId: checkpoint.runId },
+            }
+          : {
+              type: "task.failed",
+              data: { error: restartInterruptionMessage(), reason: "restart" },
+            },
       );
     }
     return rows.length;
@@ -479,6 +628,14 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
       throw error;
     }
   }
+}
+
+function compareCheckpoints(
+  left: WorkflowCheckpoint,
+  right: WorkflowCheckpoint,
+): number {
+  return left.createdAt.localeCompare(right.createdAt) ||
+    left.sequence - right.sequence;
 }
 
 function taskEvent(

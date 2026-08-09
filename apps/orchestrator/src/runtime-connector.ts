@@ -51,12 +51,15 @@ export function createRuntimeConnector(
     profile: ResearchProfile;
     capabilities: ResearchCapabilities;
   },
+  taskId?: string,
   evidenceLedger?: EvidenceLedger,
+  workflowRunId?: string,
 ): LLMConnector {
   const researchConnector = new GptrConnector({
     serviceUrl: settings.gptrServiceUrl,
     retriever: settings.retriever,
     researchProfile: researchPolicy?.profile,
+    taskId,
     researchCapabilities: researchPolicy?.capabilities,
     runtimeContext,
     baseUrl: settings.planner.base_url,
@@ -70,6 +73,7 @@ export function createRuntimeConnector(
     cleanupGraceMs: settings.gptrCleanupGraceMs,
     taskConcurrencyBudget: settings.gptrTaskConcurrencyBudget,
     evidenceLedger,
+    workflowRunId,
     onResearchEvent: observers.onResearchEvent,
     onResearchHeartbeat: observers.onResearchHeartbeat,
     onResearchFailure: observers.onResearchFailure,

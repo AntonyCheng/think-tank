@@ -1,0 +1,30 @@
+name: interactive-runtime-contract
+agents_dir: ./agents
+llm:
+  provider: openai
+  model: planner-model
+inputs:
+  - name: topic
+    required: true
+steps:
+  - id: evidence
+    role: research/analyst
+    task: Gather evidence about {{topic}}.
+    output: evidence
+  - id: clarify
+    type: human_input
+    prompt: 请补充研究偏好。
+    output: preference
+    depends_on: [evidence]
+  - id: final
+    role: research/writer
+    task: |
+      Produce the final report for {{topic}}.
+      Evidence:
+      {{evidence}}
+      Preference:
+      {{preference}}
+    acceptance: |
+      1. The output contains a final report.
+    output: final_report
+    depends_on: [clarify]

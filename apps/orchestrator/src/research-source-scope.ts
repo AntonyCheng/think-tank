@@ -24,13 +24,27 @@ export function assertSourceScopeWithinTask(
     );
   }
 
+  if (taskSource.mode === "local" && stepSource.mode !== "local") {
+    throw new ResearchProfileError("profile_capability_disabled", "$.source.mode", "An AO step cannot introduce Web or other sources for a local-document task.");
+  }
+  if (taskSource.mode === "hybrid" && stepSource.mode !== "hybrid") {
+    throw new ResearchProfileError("profile_capability_disabled", "$.source.mode", "An AO step cannot replace a hybrid task source grant.");
+  }
+  if (
+    (taskSource.mode === "local" || taskSource.mode === "hybrid") &&
+    (stepSource.mode === "local" || stepSource.mode === "hybrid") &&
+    stepSource.documentIds.some((id) => !taskSource.documentIds.includes(id))
+  ) {
+    throw new ResearchProfileError("profile_capability_disabled", "$.source.documentIds", "An AO step cannot add documents outside the task source grant.");
+  }
+
   if (taskSource.mode === "urls" && stepSource.mode === "urls") {
     const grantedUrls = new Set(taskSource.urls.map(canonicalScopeUrl));
     if (
       stepSource.urls.some(
         (url) => !grantedUrls.has(canonicalScopeUrl(url)),
       )
-    ) {
+) {
       throw new ResearchProfileError(
         "profile_capability_disabled",
         "$.source.urls",

@@ -30,6 +30,7 @@ import { collectObservedSources } from "./citations.js";
 import type { ResearchFailure } from "./research-telemetry.js";
 
 export interface GptrConnectorOptions {
+  taskId?: string;
   serviceUrl: string;
   retriever: ResearchRetriever;
   researchProfile?: ResearchProfile;
@@ -45,6 +46,7 @@ export interface GptrConnectorOptions {
   timeoutMs?: number;
   cleanupGraceMs?: number;
   taskConcurrencyBudget?: number;
+  workflowRunId?: string;
   evidenceLedger?: EvidenceLedger;
   onResearchEvent?: (
     event: ResearchResponse["events"][number],
@@ -110,11 +112,13 @@ export class GptrConnector implements LLMConnector {
     const environment = currentResearchProfileEnvironment(
       profileRetriever(taskProfile, this.#options.retriever),
     );
-    const requestedResearchProfile = resolveResearchProfile(
+    const baseResearchProfile = resolveResearchProfile(
       rawProfile,
       environment.defaults,
       capabilities,
     );
+    const runtime = researchStepRuntime(config);
+    const requestedResearchProfile = baseResearchProfile;
     const requestedWeight = researchWeight(requestedResearchProfile);
     const queuedAt = new Date().toISOString();
     const lease = await this.#budget.acquire(
@@ -127,9 +131,11 @@ export class GptrConnector implements LLMConnector {
       environment.defaults,
       capabilities,
     );
-    const runtime = researchStepRuntime(config);
     const invocation: ResearchInvocation = {
-      id: `research-${++this.#invocationSequence}`,
+      id: researchRunId(
+        this.#options.workflowRunId,
+        ++this.#invocationSequence,
+      ),
       aoStepId: runtime?.aoStepId ?? "unattributed",
       dependsOn: runtime?.dependsOn ?? [],
       queuedAt,
@@ -171,14 +177,13 @@ export class GptrConnector implements LLMConnector {
     });
     const request: ResearchRequest = {
       researchRunId: invocation.id,
+      ...(this.#options.taskId ? { taskId: this.#options.taskId } : {}),
       executionTimeoutMs: deadline.executionTimeoutMs,
       systemPrompt,
       // AO renders dependency outputs into userMessage. Synthesis already
       // receives the authoritative upstream bundles below, so sending that
       // rendered text again needlessly doubles the prompt size.
-      task: researchProfile.mode === "synthesis"
-        ? runtime?.taskTemplate ?? userMessage
-        : userMessage,
+      task: researchTask(runtime, userMessage, researchProfile.mode),
       reportSource: "web",
       retriever: profileRetriever(
         researchProfile,
@@ -319,6 +324,7 @@ export class GptrConnector implements LLMConnector {
   }
 }
 
+
 function researchStepRuntime(config: LLMConfig): {
   aoStepId: string;
   dependsOn: string[];
@@ -349,6 +355,32 @@ function researchStepRuntime(config: LLMConfig): {
       ? record.taskTemplate
       : undefined,
   };
+}
+
+function researchTask(
+  runtime: ReturnType<typeof researchStepRuntime>,
+  userMessage: string,
+  mode: ResearchProfile["mode"],
+): string {
+  if (mode !== "synthesis") return userMessage;
+  return [
+    runtime?.taskTemplate ?? userMessage,
+    "",
+    "Final delivery contract:",
+    "- Produce a comprehensive decision-oriented report, not a compressed summary.",
+    "- Represent every assigned upstream expert dimension with its evidence, implications, and material uncertainty.",
+    "- Preserve upstream factual source links beside the claims they support.",
+    "- Explain cross-dimension relationships, tradeoffs, risks, and forward-looking indicators when the evidence supports them.",
+    "- Do not impose or optimize for a character, word, or token limit.",
+  ].join("\n");
+}
+
+function researchRunId(
+  workflowRunId: string | undefined,
+  sequence: number,
+): string {
+  const localId = `research-${sequence}`;
+  return workflowRunId ? `${workflowRunId}:${localId}` : localId;
 }
 
 function legacyResearchEvidenceCapture(

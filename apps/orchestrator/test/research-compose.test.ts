@@ -27,6 +27,43 @@ test("adds the native AO acceptance contract without changing the topic", () => 
   assert.doesNotMatch(description, /并包含参考来源部分/u);
 });
 
+/* test("replaces public citation acceptance requirements for private-only research", () => {
+  const description = researchCompositionDescription(
+    "Summarize restricted materials",
+    {
+      startedAt: "2026-08-02T10:00:00.000Z",
+      timeZone: "Asia/Shanghai",
+      localDate: "2026-08-02",
+      localTime: "18:00:00",
+      weekday: "Sunday",
+    },
+    {
+      schemaVersion: 1,
+      mode: "standard",
+      source: { mode: "mcp", mcpProfileIds: ["policy"] },
+      quality: { curateSources: true },
+      limits: {
+        maxSearchResultsPerQuery: 5,
+        maxIterations: 3,
+        maxSubtopics: 3,
+      },
+    },
+    {
+      modes: ["standard"],
+      sourceModes: ["mcp"],
+      retrievers: [],
+      maxRetrievers: 0,
+      sourceCuration: true,
+      domainFilters: false,
+    },
+  );
+
+  assert.match(description, /restricted evidence only/u);
+  assert.match(description, /generic public-link instructions above do not apply/u);
+  assert.match(description, /must not require clickable URLs/u);
+});
+
+*/
 test("pins a relative multi-year request to the current year-to-date", () => {
   const description = researchCompositionDescription(
     "帮我分析一下美国近三年经济情况",

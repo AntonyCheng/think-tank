@@ -53,6 +53,12 @@ const result = await runResearchTopic(topic, {
     if ("diagnostic" in event) {
       return;
     }
+    if (!("stepId" in event)) {
+      process.stdout.write(
+        `${event.timestamp} ${event.type}\n`,
+      );
+      return;
+    }
     const verification = event.verification
       ? ` acceptance=${event.verification.pass ? "passed" : "failed"}${event.verification.reworked ? ",reworked" : ""}`
       : "";

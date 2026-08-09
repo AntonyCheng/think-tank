@@ -1,5 +1,5 @@
 export type ResearchMode = "standard" | "deep" | "synthesis";
-export type ResearchSourceMode = "web" | "urls" | "local" | "hybrid" | "mcp";
+export type ResearchSourceMode = "web" | "urls" | "local" | "hybrid";
 export const RESEARCH_RETRIEVERS = [
   "duckduckgo",
   "tavily",
@@ -54,11 +54,7 @@ export type ResearchSourcePolicy =
       urls?: readonly string[];
       web?: WebSearchPolicy;
     }
-  | {
-      mode: "mcp";
-      mcpProfileIds: readonly string[];
-      web?: WebSearchPolicy;
-    };
+  ;
 
 export interface ResearchLimits {
   maxSearchResultsPerQuery: number;
@@ -95,11 +91,7 @@ export type ResearchSourcePolicyOverride =
       urls?: readonly string[];
       web?: WebSearchPolicyOverride;
     }
-  | {
-      mode: "mcp";
-      mcpProfileIds: readonly string[];
-      web?: WebSearchPolicyOverride;
-    };
+  ;
 
 export interface ResearchProfileOverride {
   schemaVersion?: 1;
@@ -212,7 +204,7 @@ function parseSource(
     ? "web"
     : enumValue(
       source.mode,
-      ["web", "urls", "local", "hybrid", "mcp"] as const,
+      ["web", "urls", "local", "hybrid"] as const,
       "$.source.mode",
     );
 
@@ -270,24 +262,6 @@ function parseSource(
         ),
         ...(urls === undefined ? {} : { urls }),
         ...(web === undefined ? {} : { web }),
-      };
-    }
-    case "mcp": {
-      assertKnownFields(
-        source,
-        ["mode", "mcpProfileIds", "web"],
-        "$.source",
-      );
-      return {
-        mode,
-        mcpProfileIds: parseIdentifiers(
-          source.mcpProfileIds,
-          "$.source.mcpProfileIds",
-          10,
-        ),
-        ...(source.web === undefined
-          ? {}
-          : { web: parseNestedWeb(source.web, "$.source.web", defaults) }),
       };
     }
   }

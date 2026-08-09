@@ -11,6 +11,7 @@ import {
 } from "../src/research-task-store.js";
 import type { ResearchTaskSnapshot } from "../src/research-tasks.js";
 import type { ResearchDiagnosticRecord } from "../src/research-telemetry.js";
+import type { WorkflowCheckpoint } from "../src/workflow-checkpoint.js";
 
 for (const adapter of [
   {
@@ -58,6 +59,42 @@ for (const adapter of [
         store.load(snapshot.id)?.events.map((event) => event.type),
         ["task.queued", "task.running"],
       );
+    } finally {
+      cleanup();
+    }
+  });
+
+  test(`${adapter.name} preserves ordered durable workflow checkpoints`, () => {
+    const { store, cleanup } = adapter.create();
+    try {
+      const snapshot = taskSnapshot("task-checkpoints");
+      store.create(snapshot, { type: "task.queued", data: {} });
+      store.saveCheckpoint(checkpoint(snapshot.id, 1));
+      store.saveCheckpoint(checkpoint(snapshot.id, 0));
+
+      assert.deepEqual(
+        store.listCheckpoints(snapshot.id).map((item) => item.sequence),
+        [0, 1],
+      );
+      assert.equal(store.latestCheckpoint(snapshot.id)?.sequence, 1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test(`${adapter.name} deletes a task and all task-scoped records`, () => {
+    const { store, cleanup } = adapter.create();
+    try {
+      const snapshot = taskSnapshot("task-delete", "completed");
+      store.create(snapshot, { type: "task.completed", data: {} });
+      store.recordDiagnostic(snapshot.id, diagnostic(1));
+      store.saveCheckpoint(checkpoint(snapshot.id, 1));
+
+      assert.equal(store.delete(snapshot.id), true);
+      assert.equal(store.load(snapshot.id), undefined);
+      assert.deepEqual(store.loadDiagnostics(snapshot.id), []);
+      assert.deepEqual(store.listCheckpoints(snapshot.id), []);
+      assert.equal(store.delete(snapshot.id), false);
     } finally {
       cleanup();
     }
@@ -192,5 +229,24 @@ function diagnostic(index: number): ResearchDiagnosticRecord {
     rawStage: "logs",
     data: { index },
     truncated: false,
+  };
+}
+
+function checkpoint(taskId: string, sequence: number): WorkflowCheckpoint {
+  return {
+    schemaVersion: 1,
+    taskId,
+    runId: "run-1",
+    reason: "initial",
+    sequence,
+    createdAt: `2026-08-03T00:00:0${sequence}.000Z`,
+    workflow: { yaml: "name: checkpoint", sha256: "workflow-hash" },
+    inputs: { topic: "研究话题" },
+    inputHash: "input-hash",
+    runtimeFingerprint: "runtime-hash",
+    policyFingerprint: "policy-hash",
+    completedSteps: [],
+    outputVariables: {},
+    evidenceBundles: [],
   };
 }

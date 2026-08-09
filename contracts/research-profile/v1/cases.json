@@ -19,7 +19,7 @@
       },
       "capabilities": {
         "modes": ["standard", "deep", "synthesis"],
-        "sourceModes": ["web", "urls", "local", "hybrid", "mcp"],
+        "sourceModes": ["web", "urls", "local", "hybrid"],
         "retrievers": [
           "duckduckgo",
           "tavily",
@@ -570,38 +570,6 @@
           "mode": "hybrid",
           "documentIds": ["doc-2026"],
           "urls": ["http://example.com/context"],
-          "web": {
-            "retrievers": ["duckduckgo"]
-          }
-        },
-        "quality": {
-          "curateSources": true
-        },
-        "limits": {
-          "maxSearchResultsPerQuery": 5,
-          "maxIterations": 3,
-          "maxSubtopics": 3
-        }
-      }
-    },
-    {
-      "name": "MCP source accepts platform profile identifiers and a web fallback",
-      "environment": "expanded",
-      "input": {
-        "source": {
-          "mode": "mcp",
-          "mcpProfileIds": ["trusted-search"],
-          "web": {
-            "retrievers": ["duckduckgo"]
-          }
-        }
-      },
-      "expected": {
-        "schemaVersion": 1,
-        "mode": "standard",
-        "source": {
-          "mode": "mcp",
-          "mcpProfileIds": ["trusted-search"],
           "web": {
             "retrievers": ["duckduckgo"]
           }

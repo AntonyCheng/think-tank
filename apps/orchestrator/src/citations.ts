@@ -1,4 +1,5 @@
 import type { ResearchResponse } from "./contracts.js";
+import type { ReportEvidencePolicy } from "./report-evidence-policy.js";
 
 export interface VerifiedCitation {
   id: number;
@@ -62,10 +63,16 @@ export function collectObservedSources(
 export function normalizeFinalCitations(
   markdown: string,
   observedSources: readonly ObservedSource[],
+  reportPolicy?: ReportEvidencePolicy,
 ): CitationNormalization {
-  const body = stripReferenceSections(markdown);
+  const body = sanitizeReportLinks(
+    stripReferenceSections(markdown),
+    observedSources,
+    reportPolicy,
+  );
   const formatted = formatBodyCitations(body, observedSources);
-  const normalizedBody = formatted.markdown;
+  const preserveSemanticLinks = reportPolicy?.strategy === "mixed_evidence";
+  const normalizedBody = preserveSemanticLinks ? body : formatted.markdown;
   const citations = formatted.citations;
   const citationsByUrl = new Map(
     citations.map((citation) => [canonicalUrl(citation.url), citation]),
@@ -102,7 +109,10 @@ export function normalizeFinalCitations(
     );
   }
 
-  const sections = [normalizedBody, referenceSection(citations)].filter(
+  const sections = [
+    normalizedBody,
+    preserveSemanticLinks ? "" : referenceSection(citations),
+  ].filter(
     Boolean,
   );
 
@@ -126,6 +136,52 @@ export function formatCitationReport(
   return [formatted.markdown, referenceSection(formatted.citations)]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function sanitizeReportLinks(
+  markdown: string,
+  observedSources: readonly ObservedSource[],
+  reportPolicy: ReportEvidencePolicy | undefined,
+): string {
+  if (!reportPolicy) return markdown;
+  const observed = new Set(
+    observedSources.map((source) => canonicalUrl(source.url)).filter(Boolean),
+  );
+  const declared = new Set(
+    reportPolicy.allowedPublicUrls.map(canonicalUrl).filter(Boolean),
+  );
+  const allowed = declared.size === 0
+    ? observed
+    : new Set([...observed].filter((url) => declared.has(url)));
+  const hasHttpUrl = /https?:\/\/[^\s)<]+/iu;
+  const hasInternalDisclosure = /(?:document:|127\.0\.0\.1|localhost|\.venv[\\/])/iu;
+  const lines = markdown.split("\n").filter((line) => {
+    const urls = [...line.matchAll(/https?:\/\/[^\s)<]+/giu)]
+      .map((match) => canonicalUrl(match[0] ?? ""))
+      .filter(Boolean);
+    if (reportPolicy.forbidsExternalLinks && (urls.length > 0 || hasInternalDisclosure.test(line))) {
+      return false;
+    }
+    if (urls.length === 0) return true;
+    return urls.every((url) => allowed.has(url));
+  });
+  const sanitized = lines.join("\n").trim();
+  if (reportPolicy.forbidsExternalLinks) {
+    if (hasPrivateBodyContent(sanitized)) return sanitized;
+    return [
+      sanitized,
+      "现有受限资料不足以支持可公开核验的事实结论。",
+    ].filter(Boolean).join("\n\n");
+  }
+  if (sanitized && !hasHttpUrl.test(sanitized)) return sanitized;
+  return sanitized;
+}
+
+function hasPrivateBodyContent(markdown: string): boolean {
+  return markdown.split("\n").some((line) => {
+    const value = line.trim();
+    return value.length > 0 && !value.startsWith("#");
+  });
 }
 
 export function humanizeCitationLinks(
@@ -237,7 +293,7 @@ function stripReferenceSections(markdown: string): string {
     });
   }
 
-  if (removals.length === 0) return markdown;
+  if (removals.length === 0) return stripTrailingReferenceSection(markdown);
   let cursor = 0;
   const retained: string[] = [];
   for (const removal of removals) {
@@ -246,10 +302,26 @@ function stripReferenceSections(markdown: string): string {
     cursor = removal.end;
   }
   retained.push(markdown.slice(cursor));
-  return retained.join("").trim();
+  return stripTrailingReferenceSection(retained.join("").trim());
+}
+
+function stripTrailingReferenceSection(markdown: string): string {
+  const trailingReference = new RegExp(
+    String.raw`\n#{1,6}\s*(?:\u53c2\u8003\u6765\u6e90|\u53c2\u8003\u6587\u732e|\u5df2\u9a8c\u8bc1\u6765\u6e90|references?|sources?)\s*\n[\s\S]*$`,
+    "iu",
+  );
+  return markdown.replace(trailingReference, "").trim();
 }
 
 function isReferenceHeadingLabel(value: string): boolean {
+  const plainLabel = value.replace(/[*_`]/gu, "").trim().toLowerCase();
+  if (
+    /^(?:references?|sources?)(?:\s*[（(](?:references?|sources?)[）)])?$/u
+      .test(plainLabel) ||
+    ["\u53c2\u8003\u6765\u6e90", "\u53c2\u8003\u6587\u732e", "\u5df2\u9a8c\u8bc1\u6765\u6e90"].includes(plainLabel)
+  ) {
+    return true;
+  }
   const label = value
     .replace(/[ \t]+#+[ \t]*$/u, "")
     .replace(/[*_`]/gu, "")

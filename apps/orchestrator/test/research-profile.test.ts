@@ -94,7 +94,7 @@ test("current deployment accepts standard URL sources and domain filters", () =>
   );
 
   assert.equal(profile.source.mode, "urls");
-  assert.deepEqual(environment.capabilities.sourceModes, ["web", "urls"]);
+  assert.deepEqual(environment.capabilities.sourceModes, ["web", "urls", "local", "hybrid"]);
   assert.equal(environment.capabilities.domainFilters, true);
 });
 

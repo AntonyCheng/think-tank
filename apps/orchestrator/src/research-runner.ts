@@ -1,7 +1,9 @@
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
   parseWorkflow,
+  type StepResult,
   type WorkflowResult,
 } from "agency-orchestrator";
 
@@ -15,6 +17,10 @@ import {
   normalizeFinalCitations,
   type VerifiedCitation,
 } from "./citations.js";
+import {
+  deriveReportEvidencePolicy,
+  type ReportEvidencePolicy,
+} from "./report-evidence-policy.js";
 import {
   type EvidenceBundle,
   EvidenceLedger,
@@ -33,15 +39,28 @@ import {
   createTaskTemporalContext,
   resolveRelativeYearScope,
 } from "./task-temporal-context.js";
-import { composeValidatedWorkflow } from "./workflow-composer.js";
+import {
+  composeValidatedWorkflow,
+  type WorkflowCompositionDiagnostic,
+} from "./workflow-composer.js";
 import {
   resolveWorkflowResearchProfiles,
 } from "./research-profile-mapping.js";
+import {
+  projectWorkflowPlan,
+  type WorkflowPlan,
+} from "./workflow-plan.js";
 import type {
   ResearchCapabilities,
   ResearchProfile,
 } from "./research-profile.js";
 import { defaultResearchProfile } from "./research-profile-runtime.js";
+import {
+  checkpointHash,
+  createRunId,
+  type WorkflowCheckpoint,
+  type WorkflowRunRequest,
+} from "./workflow-checkpoint.js";
 import {
   ResearchTelemetryTracker,
   type ResearchActivity,
@@ -59,6 +78,14 @@ export type ResearchRunnerEvent =
       workflowPath: string;
       warnings: string[];
       researchProfiles?: Record<string, ResearchProfile>;
+      workflowPlan: WorkflowPlan;
+    }
+  | {
+      type: "workflow.repairing";
+      timestamp: string;
+      attempt: number;
+      maxAttempts: number;
+      errorCount: number;
     }
   | {
       type: "gptr.completed";
@@ -112,20 +139,25 @@ export interface ResearchRunResult {
   citations?: VerifiedCitation[];
   citationWarnings?: string[];
   evidenceQuality?: EvidenceQualityAssessment;
+  reportEvidencePolicy?: ReportEvidencePolicy;
   researchTelemetry?: ResearchTelemetrySnapshot;
 }
 
 export interface ResearchRunnerOptions {
+  taskId?: string;
   settings?: RuntimeSettings;
   onEvent?: (event: ResearchRunnerEvent) => void;
   requestInput?: (request: {
     stepId: string;
+    inputName?: string;
     kind: "workflow_input" | "human_input" | "approval";
     prompt: string;
   }) => Promise<string>;
   signal?: AbortSignal;
   researchProfile?: ResearchProfile;
   researchCapabilities?: ResearchCapabilities;
+  execution?: WorkflowRunRequest;
+  saveCheckpoint?: (checkpoint: WorkflowCheckpoint) => void;
 }
 
 export async function runResearchTopic(
@@ -144,6 +176,11 @@ export async function runResearchTopic(
   const relativeYearScope = resolveRelativeYearScope(topic, temporalContext);
   const lang = /[\u3400-\u9fff]/u.test(topic) ? "zh" : "en";
   const agentsDir = agentsDirForLanguage(lang);
+  const runtimeFingerprint = checkpointRuntimeFingerprint(settings);
+  const policyFingerprint = checkpointPolicyFingerprint(
+    taskProfile,
+    capabilities,
+  );
 
   options.signal?.throwIfAborted();
   const healthTimeout = AbortSignal.timeout(settings.gptrHealthTimeoutMs);
@@ -167,62 +204,164 @@ export async function runResearchTopic(
     );
   }
 
-  const composed = await composeValidatedWorkflow({
-    description: researchCompositionDescription(
-      topic,
-      temporalContext,
-      taskProfile,
-      capabilities,
-    ),
-    agentsDir,
-    agentsDirName: lang === "zh" ? "agency-agents-zh" : "agency-agents",
-    llmConfig: settings.planner,
-    autoRun: true,
-    timeoutMs: settings.gptrResearchTimeoutMs + settings.gptrCleanupGraceMs,
-    lang,
-    saveDir: resolve(".think-tank", "workflows"),
-  }, undefined, { taskProfile, capabilities }, relativeYearScope);
+  const execution = options.execution;
+  let workflowPath: string;
+  let workflowYaml: string;
+  let workflowWarnings: string[];
+  if (execution) {
+    assertCheckpointCompatible(
+      execution.checkpoint,
+      runtimeFingerprint,
+      policyFingerprint,
+    );
+    workflowYaml = execution.checkpoint.workflow.yaml;
+    workflowPath = await materializeCheckpointWorkflow(
+      options.taskId ?? execution.checkpoint.taskId,
+      execution.checkpoint.runId,
+      workflowYaml,
+    );
+    workflowWarnings = [];
+  } else {
+    const recordCompositionDiagnostic = (
+      diagnostic: WorkflowCompositionDiagnostic,
+    ): void => {
+      options.onEvent?.({
+        type: "research.diagnostic",
+        timestamp: new Date().toISOString(),
+        diagnostic: {
+          timestamp: new Date().toISOString(),
+          aoStepId: "workflow_composition",
+          researchRunId: "workflow-composition",
+          rawType: `workflow.${diagnostic.stage}`,
+          rawStage: diagnostic.stage,
+          data: {
+            message: diagnostic.message,
+            ...(diagnostic.workflowPath === undefined
+              ? {}
+              : { workflowPath: diagnostic.workflowPath }),
+            ...(diagnostic.validationErrors === undefined
+              ? {}
+              : { validationErrors: diagnostic.validationErrors }),
+            ...(diagnostic.rawOutput === undefined
+              ? {}
+              : { rawOutput: diagnostic.rawOutput }),
+          },
+          truncated: false,
+        },
+      });
+    };
+    const composed = await composeValidatedWorkflow({
+      description: researchCompositionDescription(
+        topic,
+        temporalContext,
+        taskProfile,
+        capabilities,
+      ),
+      agentsDir,
+      agentsDirName: lang === "zh" ? "agency-agents-zh" : "agency-agents",
+      llmConfig: settings.planner,
+      autoRun: true,
+      timeoutMs: settings.gptrResearchTimeoutMs + settings.gptrCleanupGraceMs,
+      lang,
+      saveDir: resolve(".think-tank", "workflows"),
+    }, undefined, { taskProfile, capabilities }, relativeYearScope, (repair) => {
+      options.onEvent?.({
+        type: "workflow.repairing",
+        timestamp: new Date().toISOString(),
+        ...repair,
+      });
+    }, recordCompositionDiagnostic);
+    workflowPath = composed.savedPath;
+    workflowYaml = await readFile(workflowPath, "utf8");
+    workflowWarnings = composed.warnings;
+  }
   options.signal?.throwIfAborted();
 
-  const workflowDefinition = parseWorkflow(composed.savedPath);
-  const researchProfiles = resolveWorkflowResearchProfiles(
+  const workflowDefinition = parseWorkflow(workflowPath);
+  const invalidatedStepIds = execution?.fromStep
+    ? invalidatedWorkflowSteps(workflowDefinition, execution.fromStep)
+    : new Set<string>();
+  const reusableSteps = execution
+    ? execution.checkpoint.completedSteps.filter((step) =>
+      step.status === "completed" && !invalidatedStepIds.has(step.id)
+    )
+    : [];
+  const reusableOutputVariables = outputVariablesForSteps(reusableSteps);
+  const reusableEvidenceBundles = execution
+    ? execution.checkpoint.evidenceBundles.filter(
+      (bundle) => !invalidatedStepIds.has(bundle.aoStepId),
+    )
+    : [];
+  const checkpoint = createCheckpoint({
+    taskId: options.taskId ?? execution?.checkpoint.taskId ?? "adhoc",
+    workflowYaml,
+    inputs: {
+      ...(execution?.checkpoint.inputs ?? {}),
+    },
+    runtimeFingerprint,
+    policyFingerprint,
+    completedSteps: reusableSteps,
+    outputVariables: reusableOutputVariables,
+    evidenceBundles: reusableEvidenceBundles,
+    execution,
+  });
+  saveCheckpoint(options, checkpoint);
+  let researchProfiles = resolveWorkflowResearchProfiles(
     workflowDefinition,
     taskProfile,
     capabilities,
   );
+  const workflowPlan = projectWorkflowPlan(workflowDefinition, researchProfiles);
   options.onEvent?.({
     type: "workflow.composed",
     timestamp: new Date().toISOString(),
-    workflowPath: composed.savedPath,
-    warnings: composed.warnings,
+    workflowPath,
+    warnings: workflowWarnings,
     researchProfiles: Object.fromEntries(researchProfiles),
+    workflowPlan,
   });
 
-  const workflowInputs: Record<string, string> = {};
+  const workflowInputs: Record<string, string> = {
+    ...checkpoint.inputs,
+  };
+  const requestInput = async (request: {
+    stepId: string;
+    inputName?: string;
+    kind: "workflow_input" | "human_input" | "approval";
+    prompt: string;
+  }): Promise<string> => {
+    if (!options.requestInput) {
+      throw new Error(`AO workflow requires user input at "${request.stepId}".`);
+    }
+    checkpoint.pendingInput = {
+      stepId: request.stepId,
+      ...(request.inputName === undefined ? {} : { inputName: request.inputName }),
+      kind: request.kind,
+      prompt: request.prompt,
+    };
+    advanceCheckpoint(options, checkpoint);
+    const answer = await options.requestInput(request);
+    options.signal?.throwIfAborted();
+    if (request.kind === "workflow_input" && request.inputName) {
+      workflowInputs[request.inputName] = answer;
+      checkpoint.inputs = { ...workflowInputs };
+      checkpoint.inputHash = checkpointHash(checkpoint.inputs);
+      checkpoint.pendingInput = undefined;
+      advanceCheckpoint(options, checkpoint);
+    }
+    return answer;
+  };
   for (
     const request of collectWorkflowInputRequests(
       workflowDefinition,
       workflowInputs,
     )
   ) {
-    if (!options.requestInput) {
-      throw new Error(
-        `AO workflow requires user input at "${request.stepId}".`,
-      );
-    }
-    const answer = await options.requestInput({
-      stepId: request.stepId,
-      kind: request.kind,
-      prompt: request.prompt,
-    });
-    options.signal?.throwIfAborted();
-    if (request.kind === "approval" && !isApprovalGranted(answer)) {
-      throw new Error(`AO approval declined at "${request.stepId}".`);
-    }
+    const answer = await requestInput(request);
     workflowInputs[request.inputName] = answer;
   }
 
-  const evidenceLedger = new EvidenceLedger();
+  const evidenceLedger = new EvidenceLedger(reusableEvidenceBundles);
   const telemetry = new ResearchTelemetryTracker();
   const publishTelemetry = (update: ResearchTelemetryUpdate): void => {
     options.onEvent?.({
@@ -300,11 +439,27 @@ export async function runResearchTopic(
     options.signal,
     temporalContext,
     { profile: taskProfile, capabilities },
+    options.taskId,
     evidenceLedger,
+    checkpoint.runId,
   );
+  const onCheckpointStep = (step: StepResult): void => {
+    checkpoint.completedSteps = replaceCheckpointStep(
+      checkpoint.completedSteps,
+      step,
+    );
+    checkpoint.outputVariables = outputVariablesForSteps(
+      checkpoint.completedSteps,
+    );
+    if (checkpoint.pendingInput?.stepId === step.id) {
+      checkpoint.pendingInput = undefined;
+    }
+    checkpoint.evidenceBundles = evidenceLedger.snapshot();
+    advanceCheckpoint(options, checkpoint);
+  };
 
   options.signal?.throwIfAborted();
-  const workflowResult = await runWorkflowFile(composed.savedPath, {
+  let workflowResult = await runWorkflowFile(workflowPath, {
     connector,
     agentsDir,
     concurrency: settings.concurrency,
@@ -312,6 +467,20 @@ export async function runResearchTopic(
     inputs: workflowInputs,
     researchProfiles,
     onEvent: options.onEvent,
+    requestInput,
+    signal: options.signal,
+    ...(execution
+      ? {
+          resume: {
+            completedSteps: reusableSteps,
+            outputVariables: reusableOutputVariables,
+            ...(execution.fromStep === undefined
+              ? {}
+              : { fromStep: execution.fromStep }),
+          },
+        }
+      : {}),
+    onCheckpointStep,
   });
   options.signal?.throwIfAborted();
 
@@ -319,26 +488,208 @@ export async function runResearchTopic(
     throw new Error("AO workflow failed.");
   }
 
+  const evidenceBundles = evidenceLedger.snapshot();
+  const reportEvidencePolicy = deriveReportEvidencePolicy({
+    profile: taskProfile,
+    evidenceBundles,
+  });
   const citationResult = normalizeFinalCitations(
     workflowResult.steps.at(-1)?.output ?? "",
     evidenceLedger.publicSources(),
+    reportEvidencePolicy,
   );
-  const evidenceBundles = evidenceLedger.snapshot();
   const evidenceQuality = assessEvidenceQuality({
     citationNormalization: citationResult,
     evidenceBundles,
+    reportEvidencePolicy,
   });
 
   return {
-    workflowPath: composed.savedPath,
+    workflowPath,
     output: citationResult.markdown,
     workflow: workflowResult,
     evidenceBundles,
     citations: citationResult.citations,
     citationWarnings: citationResult.warnings,
     evidenceQuality,
+    reportEvidencePolicy,
     researchTelemetry: telemetry.snapshot(),
   };
+}
+
+export function checkpointRuntimeFingerprint(
+  settings: RuntimeSettings,
+): string {
+  return checkpointHash({
+    planner: {
+      provider: settings.planner.provider,
+      baseUrl: settings.planner.base_url,
+      model: settings.planner.model,
+      maxTokens: settings.planner.max_tokens,
+      temperature: settings.planner.temperature,
+      timeout: settings.planner.timeout,
+      retry: settings.planner.retry,
+    },
+    verifierModel: settings.verifierModel,
+    gptrServiceUrl: settings.gptrServiceUrl,
+    retrievers: settings.retrievers,
+    gptrFastLlm: settings.gptrFastLlm,
+    gptrSmartLlm: settings.gptrSmartLlm,
+    gptrEmbedding: settings.gptrEmbedding,
+    gptrEmbeddingBaseUrl: settings.gptrEmbeddingBaseUrl,
+    timeZone: settings.timeZone,
+    concurrency: settings.concurrency,
+    deepLimits: settings.gptrDeepLimits,
+  });
+}
+
+export function checkpointPolicyFingerprint(
+  profile: ResearchProfile,
+  capabilities: ResearchCapabilities,
+): string {
+  return checkpointHash({ profile, capabilities });
+}
+
+export function assertCheckpointCompatible(
+  checkpoint: WorkflowCheckpoint,
+  runtimeFingerprint: string,
+  policyFingerprint: string,
+): void {
+  if (checkpoint.schemaVersion !== 1) {
+    throw new Error("此任务的恢复检查点版本不受支持，请重新提交研究任务。");
+  }
+  if (checkpoint.workflow.sha256 !== checkpointHash(checkpoint.workflow.yaml)) {
+    throw new Error("任务工作流检查点已损坏，无法安全恢复。");
+  }
+  if (checkpoint.inputHash !== checkpointHash(checkpoint.inputs)) {
+    throw new Error("任务输入检查点已损坏，无法安全恢复。");
+  }
+  if (checkpoint.runtimeFingerprint !== runtimeFingerprint) {
+    throw new Error("当前模型或运行配置已变化，无法安全恢复此任务。");
+  }
+  if (checkpoint.policyFingerprint !== policyFingerprint) {
+    throw new Error("当前研究策略已变化，无法安全恢复此任务。");
+  }
+}
+
+function createCheckpoint(input: {
+  taskId: string;
+  workflowYaml: string;
+  inputs: Record<string, string>;
+  runtimeFingerprint: string;
+  policyFingerprint: string;
+  completedSteps: StepResult[];
+  outputVariables: Record<string, string>;
+  evidenceBundles: EvidenceBundle[];
+  execution?: WorkflowRunRequest;
+}): WorkflowCheckpoint {
+  const execution = input.execution;
+  return {
+    schemaVersion: 1,
+    taskId: input.taskId,
+    runId: createRunId(),
+    ...(execution === undefined ? {} : { parentRunId: execution.checkpoint.runId }),
+    reason: execution?.fromStep
+      ? "from_step"
+      : execution
+      ? "resume"
+      : "initial",
+    sequence: 0,
+    createdAt: new Date().toISOString(),
+    workflow: {
+      yaml: input.workflowYaml,
+      sha256: checkpointHash(input.workflowYaml),
+    },
+    inputs: structuredClone(input.inputs),
+    inputHash: checkpointHash(input.inputs),
+    runtimeFingerprint: input.runtimeFingerprint,
+    policyFingerprint: input.policyFingerprint,
+    completedSteps: structuredClone(input.completedSteps),
+    outputVariables: structuredClone(input.outputVariables),
+    evidenceBundles: structuredClone(input.evidenceBundles),
+  };
+}
+
+function saveCheckpoint(
+  options: ResearchRunnerOptions,
+  checkpoint: WorkflowCheckpoint,
+): void {
+  options.saveCheckpoint?.(structuredClone(checkpoint));
+}
+
+function advanceCheckpoint(
+  options: ResearchRunnerOptions,
+  checkpoint: WorkflowCheckpoint,
+): void {
+  checkpoint.sequence += 1;
+  checkpoint.createdAt = new Date().toISOString();
+  saveCheckpoint(options, checkpoint);
+}
+
+function outputVariablesForSteps(
+  steps: readonly StepResult[],
+): Record<string, string> {
+  const variables: Record<string, string> = {};
+  for (const step of steps) {
+    if (step.output_var && step.output !== undefined) {
+      variables[step.output_var] = step.output;
+    }
+  }
+  return variables;
+}
+
+function replaceCheckpointStep(
+  completed: readonly StepResult[],
+  next: StepResult,
+): StepResult[] {
+  return [
+    ...completed.filter((step) => step.id !== next.id),
+    structuredClone(next),
+  ];
+}
+
+function invalidatedWorkflowSteps(
+  workflow: ReturnType<typeof parseWorkflow>,
+  fromStep: string,
+): Set<string> {
+  const target = workflow.steps.find((step) => step.id === fromStep);
+  if (!target) {
+    throw new Error(`AO resume step "${fromStep}" does not exist.`);
+  }
+  if (target.type && target.type !== "normal") {
+    throw new Error(`AO resume step "${fromStep}" must be a normal step.`);
+  }
+  const dependents = new Map<string, string[]>();
+  for (const step of workflow.steps) {
+    for (const dependency of step.depends_on ?? []) {
+      const values = dependents.get(dependency) ?? [];
+      values.push(step.id);
+      dependents.set(dependency, values);
+    }
+  }
+  const invalidated = new Set([fromStep]);
+  const pending = [fromStep];
+  while (pending.length > 0) {
+    const stepId = pending.pop()!;
+    for (const dependent of dependents.get(stepId) ?? []) {
+      if (invalidated.has(dependent)) continue;
+      invalidated.add(dependent);
+      pending.push(dependent);
+    }
+  }
+  return invalidated;
+}
+
+async function materializeCheckpointWorkflow(
+  taskId: string,
+  parentRunId: string,
+  yaml: string,
+): Promise<string> {
+  const directory = resolve(".think-tank", "workflows", "checkpoints");
+  await mkdir(directory, { recursive: true });
+  const path = resolve(directory, `${taskId}-${parentRunId}.yaml`);
+  await writeFile(path, yaml, "utf8");
+  return path;
 }
 
 function telemetryIdentity(
@@ -362,9 +713,7 @@ function telemetryIdentity(
 }
 
 export function isApprovalGranted(answer: string): boolean {
-  return /^(?:y(?:es)?|true|1|是|同意|批准|继续|确认)$/iu.test(
-    answer.trim(),
-  );
+  return answer.trim() === "approved";
 }
 
 export function semanticResearchStage(
@@ -519,12 +868,7 @@ export function localizeResearchProgress(
     return url ? `已收集来源：${url}` : "已收集一个研究来源。";
   }
   if (stage === "context_combined") {
-    const count = countMatch(
-      /Combined research context:\s+(\d+)\s+MCP sources?/iu,
-    );
-    return count !== undefined
-      ? `已合并研究上下文：${count} 个 MCP 来源，并纳入网页内容。`
-      : "研究上下文已合并。";
+    return "研究上下文已合并。";
   }
   if (stage === "research_step_finalized") {
     const rawCost = message.match(

@@ -209,6 +209,77 @@ test("projects retriever configuration and bounded degradation in Chinese", () =
   );
 });
 
+/* test("projects bounded managed MCP activity without private configuration", () => {
+  const tracker = new ResearchTelemetryTracker();
+  const configured = tracker.observe({
+    timestamp: "2026-07-29T02:00:01.000Z",
+    type: "mcp.configured",
+    data: {
+      profiles: ["policy-library"],
+      strategy: "fast",
+      webEnabled: true,
+    },
+  }, standardRun);
+  const started = tracker.observe({
+    timestamp: "2026-07-29T02:00:02.000Z",
+    type: "mcp.tool.started",
+    data: {
+      profileId: "policy-library",
+      tool: "search_policy",
+      callId: "call_01",
+    },
+  }, standardRun);
+  const completed = tracker.observe({
+    timestamp: "2026-07-29T02:00:03.000Z",
+    type: "mcp.tool.completed",
+    data: {
+      profileId: "policy-library",
+      tool: "search_policy",
+      callId: "call_01",
+      characters: 100_000,
+      truncated: true,
+    },
+  }, standardRun);
+  const summary = tracker.observe({
+    timestamp: "2026-07-29T02:00:04.000Z",
+    type: "mcp.summary",
+    data: {
+      configured: ["policy-library"],
+      calls: 1,
+      accepted: 1,
+      failed: 0,
+      timedOut: 0,
+      truncated: 1,
+    },
+  }, standardRun);
+
+  assert.equal(configured.publicEvent?.phase, "searching");
+  assert.equal(
+    configured.activityEvent?.message,
+    "已配置 1 个受管 MCP 来源，采用只读 fast 策略并保留 Web 补充。",
+  );
+  assert.equal(
+    started.activityEvent?.message,
+    "正在调用受管 MCP 工具：search_policy。",
+  );
+  assert.equal(
+    completed.activityEvent?.message,
+    "已接收 search_policy 的受管 MCP 证据，输出已按上限截断。",
+  );
+  assert.equal(summary.snapshot.runs[0]?.phase, "collecting");
+  assert.equal(
+    summary.activityEvent?.message,
+    "受管 MCP 完成：调用 1 次，保留 1 条证据，失败 0 次，其中超时 0 次。",
+  );
+  const publicText = [configured, started, completed, summary]
+    .map((item) => item.activityEvent?.message)
+    .join(" ");
+  assert.doesNotMatch(
+    publicText,
+    /authorization|internal\.example|private-secret|call_01/u,
+  );
+}); */
+
 test("completes a research run with exact sources, elapsed time, and GPTR cost", () => {
   const tracker = new ResearchTelemetryTracker();
   tracker.observe({

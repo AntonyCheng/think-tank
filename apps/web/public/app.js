@@ -2,10 +2,13 @@ const form = document.querySelector("#research-form");
 const topicInput = document.querySelector("#topic");
 const submitButton = document.querySelector("#submit-button");
 const cancelButton = document.querySelector("#cancel-button");
+const resumeButton = document.querySelector("#resume-button");
 const formError = document.querySelector("#form-error");
 const sourceMode = document.querySelector("#source-mode");
 const sourceUrls = document.querySelector("#source-urls");
 const sourceUrlsField = document.querySelector("#source-urls-field");
+const sourceDocuments = document.querySelector("#source-documents");
+const sourceDocumentsField = document.querySelector("#source-documents-field");
 const includeDomains = document.querySelector("#include-domains");
 const excludeDomains = document.querySelector("#exclude-domains");
 const includeDomainsField = document.querySelector(
@@ -36,8 +39,12 @@ const contentAcceptanceState = document.querySelector(
 const evidenceQualityState = document.querySelector(
   "#evidence-quality-state",
 );
+const expertRoster = document.querySelector("#expert-roster");
+const expertRosterSummary = document.querySelector("#expert-roster-summary");
+const expertRosterList = document.querySelector("#expert-roster-list");
 const reportEmpty = document.querySelector("#report-empty");
 const report = document.querySelector("#report");
+const reportEvidencePolicy = document.querySelector("#report-evidence-policy");
 const qualityWarning = document.querySelector("#quality-warning");
 const contentWarningSection = document.querySelector(
   "#content-warning-section",
@@ -62,8 +69,20 @@ const inputForm = document.querySelector("#input-form");
 const inputPrompt = document.querySelector("#input-prompt");
 const inputAnswer = document.querySelector("#input-answer");
 const inputError = document.querySelector("#input-error");
+const inputSubmit = document.querySelector("#input-submit");
+const approvalApprove = document.querySelector("#approval-approve");
+const approvalDecline = document.querySelector("#approval-decline");
 const serviceState = document.querySelector(".service-state");
 const serviceLabel = document.querySelector("#service-label");
+const historyButton = document.querySelector("#history-button");
+const historyDialog = document.querySelector("#history-dialog");
+const historyClose = document.querySelector("#history-close");
+const historyQuery = document.querySelector("#history-query");
+const historyFilters = document.querySelector("#history-filters");
+const historyList = document.querySelector("#history-list");
+const historyEmpty = document.querySelector("#history-empty");
+const historyMore = document.querySelector("#history-more");
+const historyError = document.querySelector("#history-error");
 const settingsButton = document.querySelector("#settings-button");
 const settingsDialog = document.querySelector("#settings-dialog");
 const settingsForm = document.querySelector("#settings-form");
@@ -131,6 +150,9 @@ timelineMarkdownRenderer.renderer.rules.link_open =
 
 let eventSource;
 let activeTaskId;
+let activeTaskCreatedAt;
+let activeTaskFinishedAt;
+let activeInputRequest;
 let activeReportMarkdown = "";
 let receivedEvents = 0;
 let researchActivityCount = 0;
@@ -138,8 +160,11 @@ let sources = 0;
 let lastEventId = 0;
 let authoritativeSourceCount;
 const steps = new Map();
+const stepLabels = new Map();
+const plannedExperts = new Map();
 const progressStages = new Map();
 const researchRuns = new Map();
+let plannedExpertCount = 0;
 let retrieverCapabilities = [{
   id: "duckduckgo",
   label: "DuckDuckGo",
@@ -148,13 +173,46 @@ let retrieverCapabilities = [{
 }];
 let maxRetrievers = 1;
 let defaultRetrievers = ["duckduckgo"];
+let historyFilter = "all";
+let historyCursor;
+let historyLoading = false;
+let historySearchTimer;
+
+function createClientTaskId() {
+  const webCrypto = globalThis.crypto;
+  if (typeof webCrypto?.randomUUID === "function") {
+    return webCrypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+  if (typeof webCrypto?.getRandomValues === "function") {
+    webCrypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0"));
+  return [
+    hex.slice(0, 4),
+    hex.slice(4, 6),
+    hex.slice(6, 8),
+    hex.slice(8, 10),
+    hex.slice(10, 16),
+  ].map((part) => part.join("")).join("-");
+}
 
 checkHealth();
-restoreActiveTask();
+restoreInitialTask();
 renderRetrieverControls();
 refreshResearchSettings();
 updateResearchSourceFields();
-setInterval(refreshResearchActivityFreshness, 1_000);
+setInterval(() => {
+  refreshResearchActivityFreshness();
+  refreshTaskElapsed();
+}, 1_000);
 
 sourceMode.addEventListener("change", updateResearchSourceFields);
 
@@ -175,11 +233,17 @@ form.addEventListener("submit", async (event) => {
   clearError();
 
   try {
+    const taskId = createClientTaskId();
+    const documentIds = await uploadDocuments(taskId);
+    if (researchProfile.source.mode === "local" || researchProfile.source.mode === "hybrid") {
+      researchProfile.source.documentIds = documentIds;
+    }
     const response = await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         topic,
+        taskId,
         ...(researchProfile ? { researchProfile } : {}),
       }),
     });
@@ -189,7 +253,13 @@ form.addEventListener("submit", async (event) => {
     }
 
     activeTaskId = task.id;
+    setTaskLifecycle(task);
     localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, activeTaskId);
+    window.history.replaceState(
+      null,
+      "",
+      `#/tasks/${encodeURIComponent(task.id)}`,
+    );
     setStatus(task.status);
     connectEvents(task.id);
     workspace.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -200,20 +270,27 @@ form.addEventListener("submit", async (event) => {
 });
 
 function updateResearchSourceFields() {
-  const usesUrls = sourceMode.value !== "web";
-  const usesWeb = sourceMode.value !== "urls";
+  const usesUrls = ["urls", "urls_web"].includes(sourceMode.value);
+  const usesDocuments = ["local", "hybrid"].includes(sourceMode.value);
+  const usesWeb = ["web", "urls_web", "hybrid"].includes(
+    sourceMode.value,
+  );
   sourceUrlsField.hidden = !usesUrls;
   includeDomainsField.hidden = !usesWeb;
   excludeDomainsField.hidden = !usesWeb;
   taskRetrieversField.hidden = !usesWeb;
   sourceUrls.required = usesUrls;
+  sourceDocuments.required = usesDocuments;
+  sourceDocumentsField.hidden = !usesDocuments;
 }
 
 function buildResearchProfile() {
   const include = parseDomainList(includeDomains.value);
   const exclude = parseDomainList(excludeDomains.value);
   const retrievers = selectedRetrievers(taskRetrievers);
-  const usesWeb = sourceMode.value !== "urls";
+  const usesWeb = ["web", "urls_web", "hybrid"].includes(
+    sourceMode.value,
+  );
   if (usesWeb && retrievers.length === 0) {
     throw new Error("请至少选择一个本次研究使用的检索器。");
   }
@@ -227,6 +304,17 @@ function buildResearchProfile() {
         retrievers,
         ...(include.length ? { includeDomains: include } : {}),
         ...(exclude.length ? { excludeDomains: exclude } : {}),
+      },
+    };
+  }
+
+  if (sourceMode.value === "local" || sourceMode.value === "hybrid") {
+    if (sourceDocuments.files.length === 0) throw new Error("请至少选择一个本地文档。");
+    return {
+      source: {
+        mode: sourceMode.value,
+        documentIds: [],
+        ...(sourceMode.value === "hybrid" ? { web: { retrievers, ...(include.length ? { includeDomains: include } : {}), ...(exclude.length ? { excludeDomains: exclude } : {}) } } : {}),
       },
     };
   }
@@ -271,6 +359,29 @@ function buildResearchProfile() {
   };
 }
 
+async function uploadDocuments(taskId) {
+  const files = [...sourceDocuments.files];
+  if (files.length > 20) throw new Error("本地文档最多 20 个。");
+  const records = await Promise.all(files.map(async (file) => {
+    if (file.size > 25 * 1024 * 1024) throw new Error(`${file.name} 超过 25 MiB 限制。`);
+    const contentBase64 = await fileToBase64(file);
+    const response = await fetch(`/api/tasks/${taskId}/documents`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: file.name, contentBase64 }) });
+    const record = await response.json();
+    if (!response.ok) throw new Error(record.error || `${file.name} 上传失败。`);
+    return record;
+  }));
+  return records.map((record) => record.documentId);
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1]);
+    reader.onerror = () => reject(reader.error || new Error("文件读取失败。"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function parseDomainList(value) {
   return uniqueValues(
     value
@@ -313,19 +424,48 @@ cancelButton.addEventListener("click", async () => {
   }
 });
 
+resumeButton.addEventListener("click", async () => {
+  if (!activeTaskId) return;
+  resumeButton.disabled = true;
+  try {
+    const response = await fetch(`/api/tasks/${activeTaskId}/resume`, {
+      method: "POST",
+    });
+    const task = await response.json();
+    if (!response.ok) throw new Error(task.error || "恢复任务失败");
+    failure.hidden = true;
+    setStatus(task.status);
+    setSubmitting(true);
+  } catch (error) {
+    showFailure(
+      error instanceof Error ? error.message : String(error),
+      "无法恢复任务",
+    );
+    resumeButton.disabled = false;
+  }
+});
+
 inputForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const answer = inputAnswer.value.trim();
-  if (!answer || !activeTaskId) return;
+  if (!answer) return;
+  await submitInputAnswer(answer);
+});
 
-  const button = inputForm.querySelector("button");
-  button.disabled = true;
+approvalApprove.addEventListener("click", () => submitInputAnswer("approved"));
+approvalDecline.addEventListener("click", () => submitInputAnswer("declined"));
+
+async function submitInputAnswer(answer) {
+  if (!activeTaskId || !activeInputRequest?.requestId) return;
+  inputSubmit.disabled = true;
+  approvalApprove.disabled = true;
+  approvalDecline.disabled = true;
   inputError.hidden = true;
   try {
     const response = await fetch(`/api/tasks/${activeTaskId}/input`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answer }),
+      body: JSON.stringify({ answer, requestId: activeInputRequest.requestId }),
     });
     const body = await response.json();
     if (!response.ok) {
@@ -335,9 +475,11 @@ inputForm.addEventListener("submit", async (event) => {
     inputError.textContent =
       error instanceof Error ? error.message : String(error);
     inputError.hidden = false;
-    button.disabled = false;
+    inputSubmit.disabled = false;
+    approvalApprove.disabled = false;
+    approvalDecline.disabled = false;
   }
-});
+}
 
 settingsButton.addEventListener("click", async () => {
   settingsError.hidden = true;
@@ -355,6 +497,45 @@ settingsButton.addEventListener("click", async () => {
 });
 
 settingsClose.addEventListener("click", () => settingsDialog.close());
+
+historyButton.addEventListener("click", async () => {
+  historyDialog.showModal();
+  await loadHistory(true);
+  historyQuery.focus();
+});
+
+historyClose.addEventListener("click", () => historyDialog.close());
+
+historyFilters.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-history-filter]");
+  if (!button) return;
+  historyFilter = button.dataset.historyFilter || "all";
+  for (const filterButton of historyFilters.querySelectorAll("button")) {
+    filterButton.setAttribute(
+      "aria-pressed",
+      String(filterButton === button),
+    );
+  }
+  await loadHistory(true);
+});
+
+historyQuery.addEventListener("input", () => {
+  clearTimeout(historySearchTimer);
+  historySearchTimer = setTimeout(() => loadHistory(true), 220);
+});
+
+historyMore.addEventListener("click", () => loadHistory(false));
+
+historyList.addEventListener("click", async (event) => {
+  const deleteButton = event.target.closest("button[data-delete-task-id]");
+  if (deleteButton) {
+    await deleteHistoricalTask(deleteButton.dataset.deleteTaskId, deleteButton);
+    return;
+  }
+  const button = event.target.closest("button[data-task-id]");
+  if (!button) return;
+  await openHistoricalTask(button.dataset.taskId);
+});
 
 settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -447,6 +628,7 @@ function applyResearchSettings(settings) {
     defaultRetrievers = [retrieverCapabilities[0].id];
   }
   renderRetrieverControls();
+  updateResearchSourceFields();
 
   for (const [name, value] of Object.entries(settings)) {
     if (
@@ -528,6 +710,193 @@ function enforceRetrieverLimit(event) {
 taskRetrievers.addEventListener("change", enforceRetrieverLimit);
 settingsRetrievers.addEventListener("change", enforceRetrieverLimit);
 
+async function restoreInitialTask() {
+  const taskId = taskIdFromHash();
+  if (taskId) {
+    await openHistoricalTask(taskId, false);
+    return;
+  }
+  await restoreActiveTask();
+}
+
+function taskIdFromHash() {
+  const match = /^#\/tasks\/([^/]+)$/u.exec(window.location.hash);
+  return match?.[1] ? decodeURIComponent(match[1]) : undefined;
+}
+
+async function loadHistory(reset) {
+  if (historyLoading) return;
+  if (reset) {
+    historyCursor = undefined;
+    historyList.replaceChildren();
+  }
+  historyLoading = true;
+  historyMore.disabled = true;
+  historyError.hidden = true;
+  try {
+    const params = new URLSearchParams({
+      limit: "30",
+      filter: historyFilter,
+    });
+    const query = historyQuery.value.trim();
+    if (query) params.set("q", query);
+    if (!reset && historyCursor) params.set("cursor", historyCursor);
+    const response = await fetch(`/api/tasks?${params}`);
+    const page = await response.json();
+    if (!response.ok) throw new Error(page.error || "无法读取历史研究");
+    for (const item of page.items || []) {
+      historyList.append(renderHistoryItem(item));
+    }
+    historyCursor = page.nextCursor;
+    historyEmpty.hidden = historyList.children.length > 0;
+    historyMore.hidden = !historyCursor;
+  } catch (error) {
+    historyError.textContent = error instanceof Error ? error.message : String(error);
+    historyError.hidden = false;
+  } finally {
+    historyLoading = false;
+    historyMore.disabled = false;
+  }
+}
+
+function renderHistoryItem(item) {
+  const row = document.createElement("li");
+  row.className = "history-item";
+  const content = document.createElement("button");
+  content.type = "button";
+  content.className = "history-open";
+  content.dataset.taskId = item.id;
+
+  const topic = document.createElement("span");
+  topic.className = "history-item-topic";
+  topic.textContent = item.topic;
+
+  const status = document.createElement("span");
+  status.className = "history-item-status";
+  status.textContent = historyStatusLabel(item.status);
+
+  const meta = document.createElement("span");
+  meta.className = "history-item-meta";
+  const details = [
+    formatHistoryDate(item.updatedAt),
+    status.textContent,
+    `${item.expertCount || 0} 位专家`,
+    `${item.sourceCount || 0} 个来源`,
+  ];
+  if (Number.isFinite(item.elapsedMs)) details.push(formatDuration(item.elapsedMs));
+  if (Number.isFinite(item.costUsd)) details.push(formatUsd(item.costUsd));
+  if (item.warningCount > 0) details.push(`${item.warningCount} 条警告`);
+  meta.textContent = details.join(" · ");
+
+  content.append(topic, meta);
+  row.append(content);
+  if (isTerminalHistoryStatus(item.status)) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "history-delete";
+    remove.dataset.deleteTaskId = item.id;
+    remove.textContent = "删除";
+    remove.title = "永久删除这项研究及其本地资料";
+    remove.setAttribute("aria-label", `删除研究：${item.topic}`);
+    row.append(remove);
+  }
+  return row;
+}
+
+function isTerminalHistoryStatus(status) {
+  return ["completed", "completed_with_warnings", "failed", "canceled"].includes(status);
+}
+
+async function deleteHistoricalTask(taskId, button) {
+  if (!taskId) return;
+  if (!window.confirm("删除后将无法恢复该研究报告、执行记录和本地资料。确定删除吗？")) {
+    return;
+  }
+  button.disabled = true;
+  historyError.hidden = true;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(result.error || "无法删除研究记录");
+    }
+    if (activeTaskId === taskId) clearDeletedTaskView();
+    await loadHistory(true);
+  } catch (error) {
+    historyError.textContent = error instanceof Error ? error.message : String(error);
+    historyError.hidden = false;
+    button.disabled = false;
+  }
+}
+
+function clearDeletedTaskView() {
+  eventSource?.close();
+  eventSource = undefined;
+  activeTaskId = undefined;
+  localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
+  window.history.replaceState(null, "", "#/");
+  resetWorkspace("");
+  workspace.hidden = true;
+}
+
+function historyStatusLabel(status) {
+  return {
+    queued: "排队中",
+    recoverable: "可恢复",
+    running: "研究中",
+    needs_input: "等待补充",
+    canceling: "取消中",
+    canceled: "已取消",
+    completed: "已完成",
+    completed_with_warnings: "有警告",
+    failed: "未完成",
+  }[status] || status;
+}
+
+function formatHistoryDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+async function openHistoricalTask(taskId, updateRoute = true) {
+  try {
+    const response = await fetch(`/api/tasks/${taskId}`);
+    const task = await response.json();
+    if (!response.ok) throw new Error(task.error || "无法读取历史研究");
+
+    eventSource?.close();
+    activeTaskId = task.id;
+    localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, task.id);
+    if (updateRoute) {
+      window.history.replaceState(
+        null,
+        "",
+        `#/tasks/${encodeURIComponent(task.id)}`,
+      );
+    }
+    topicInput.value = task.topic;
+    resetWorkspace(task.topic);
+    setTaskLifecycle(task);
+    setStatus(task.status);
+    renderWorkflowPlan(task.workflowPlan);
+    updateResearchTelemetry(task.researchTelemetry, isTerminalStatus(task.status));
+    await loadTask(task.id);
+    connectEvents(task.id);
+    historyDialog.close();
+  } catch (error) {
+    historyError.textContent = error instanceof Error ? error.message : String(error);
+    historyError.hidden = false;
+  }
+}
+
 async function checkHealth() {
   try {
     const response = await fetch("/ready");
@@ -558,7 +927,9 @@ async function restoreActiveTask() {
     activeTaskId = task.id;
     topicInput.value = task.topic;
     resetWorkspace(task.topic);
+    setTaskLifecycle(task);
     setStatus(task.status);
+    renderWorkflowPlan(task.workflowPlan);
     updateResearchTelemetry(
       task.researchTelemetry,
       isTerminalStatus(task.status),
@@ -582,8 +953,12 @@ function connectEvents(taskId) {
     "task.running",
     "task.needs_input",
     "task.input_received",
+    "task.recoverable",
+    "task.resumed",
+    "task.rerun_requested",
     "task.canceling",
     "task.canceled",
+    "workflow.repairing",
     "workflow.composed",
     "step.started",
     "research.activity",
@@ -632,6 +1007,28 @@ function handleEvent(event) {
       setStatus("running");
       addTimeline("正在组建研究团队", "running", event.timestamp);
       break;
+    case "task.recoverable":
+      setStatus("recoverable");
+      hideInputRequest();
+      addTimeline("任务可从检查点恢复", "queued", event.timestamp);
+      showFailure(
+        "服务重启前已完成的步骤已保存。恢复后只会执行尚未完成的步骤。",
+        "任务可恢复",
+      );
+      setSubmitting(false);
+      break;
+    case "task.resumed":
+      setStatus("queued");
+      failure.hidden = true;
+      addTimeline("已请求从检查点恢复", "queued", event.timestamp);
+      setSubmitting(true);
+      break;
+    case "task.rerun_requested":
+      setStatus("queued");
+      reportActions.hidden = true;
+      addTimeline("已请求局部重跑", "queued", event.timestamp);
+      setSubmitting(true);
+      break;
     case "task.needs_input":
       setStatus("needs_input");
       showInputRequest(event.data);
@@ -653,6 +1050,7 @@ function handleEvent(event) {
       addTimeline("正在取消研究任务", "queued", event.timestamp);
       break;
     case "task.canceled":
+      markTaskFinished(event.timestamp);
       setStatus("canceled");
       hideInputRequest();
       addTimeline("研究任务已取消", "queued", event.timestamp);
@@ -664,6 +1062,7 @@ function handleEvent(event) {
       setSubmitting(false);
       break;
     case "workflow.composed":
+      renderWorkflowPlan(event.data.workflowPlan);
       addTimeline(
         "专家工作流已生成",
         "completed",
@@ -671,8 +1070,23 @@ function handleEvent(event) {
         shortPath(event.data.workflowPath),
       );
       break;
+    case "workflow.repairing":
+      addTimeline(
+        `专家工作流预检未通过，正在自动修复（${event.data.attempt}/${event.data.maxAttempts}）`,
+        "running",
+        event.timestamp,
+        `发现 ${event.data.errorCount || 0} 项结构校验问题。`,
+      );
+      break;
     case "step.started":
-      upsertStep(event.data.stepId, "running", event.timestamp);
+      updateRosterStep(event.data.stepId, "running", event.data);
+      upsertStep(
+        event.data.stepId,
+        "running",
+        event.timestamp,
+        undefined,
+        stepLabel(event.data),
+      );
       break;
     case "research.activity":
       upsertResearchActivity(event.data, event.timestamp);
@@ -713,6 +1127,11 @@ function handleEvent(event) {
       );
       break;
     case "step.completed": {
+      updateRosterStep(
+        event.data.stepId,
+        rosterStepStatus(event.data.status),
+        event.data,
+      );
       const verification = event.data.verification;
       upsertStep(
         event.data.stepId,
@@ -721,6 +1140,7 @@ function handleEvent(event) {
         verification
           ? `验收${verification.pass ? "通过" : "未通过"}${verification.reworked ? " · 已返工" : ""}`
           : undefined,
+        stepLabel(event.data),
       );
       if (verification) {
         contentAcceptanceState.textContent = verification.pass
@@ -730,12 +1150,14 @@ function handleEvent(event) {
       break;
     }
     case "task.completed":
+      markTaskFinished(event.timestamp);
       setStatus("completed");
       addTimeline("研究任务完成", "completed", event.timestamp);
       eventSource?.close();
       loadTask(activeTaskId);
       break;
     case "task.completed_with_warnings":
+      markTaskFinished(event.timestamp);
       setStatus("completed_with_warnings");
       updateQualityStates(
         event.data.contentAcceptance,
@@ -751,7 +1173,9 @@ function handleEvent(event) {
       loadTask(activeTaskId);
       break;
     case "task.failed":
+      markTaskFinished(event.timestamp);
       setStatus("failed");
+      hideInputRequest();
       addTimeline("研究任务失败", "failed", event.timestamp);
       eventSource?.close();
       showFailure(event.data.error || "任务执行失败");
@@ -765,6 +1189,7 @@ async function loadTask(taskId) {
     const response = await fetch(`/api/tasks/${taskId}`);
     const task = await response.json();
     if (!response.ok) throw new Error(task.error || "无法读取任务结果");
+    setTaskLifecycle(task);
     updateResearchTelemetry(
       task.researchTelemetry,
       isTerminalStatus(task.status),
@@ -781,6 +1206,7 @@ async function loadTask(taskId) {
       failure.hidden = true;
       setExportLinks(task.id);
       reportActions.hidden = false;
+      updateReportEvidencePolicy(task.reportEvidencePolicy);
       updateQualityStates(task.contentAcceptance, task.evidenceQuality);
       showQualityWarnings(
         task.contentAcceptance,
@@ -789,6 +1215,11 @@ async function loadTask(taskId) {
       );
     } else if (task.status === "failed") {
       showFailure(task.error);
+    } else if (task.status === "recoverable") {
+      showFailure(
+        "服务重启前已完成的步骤已保存。恢复后只会执行尚未完成的步骤。",
+        "任务可恢复",
+      );
     } else if (task.status === "canceled") {
       showFailure(task.error || "当前研究任务已取消。", "任务已取消");
     }
@@ -804,6 +1235,12 @@ function resetWorkspace(topic) {
   taskTopic.textContent = topic;
   timeline.replaceChildren();
   steps.clear();
+  stepLabels.clear();
+  plannedExperts.clear();
+  plannedExpertCount = 0;
+  expertRoster.hidden = true;
+  expertRosterSummary.textContent = "";
+  expertRosterList.replaceChildren();
   progressStages.clear();
   researchRuns.clear();
   receivedEvents = 0;
@@ -811,6 +1248,8 @@ function resetWorkspace(topic) {
   sources = 0;
   lastEventId = 0;
   authoritativeSourceCount = undefined;
+  activeTaskCreatedAt = undefined;
+  activeTaskFinishedAt = undefined;
   eventCount.textContent = "0 个执行节点 · 0 条研究事件";
   eventCount.title = "尚未接收公开事件";
   stepCount.textContent = "0";
@@ -824,6 +1263,7 @@ function resetWorkspace(topic) {
   activeReportMarkdown = "";
   report.replaceChildren();
   report.hidden = true;
+  reportEvidencePolicy.hidden = true;
   reportEmpty.hidden = false;
   failure.hidden = true;
   failureTitle.textContent = "任务未完成";
@@ -838,18 +1278,175 @@ function resetWorkspace(topic) {
   setStatus("queued");
 }
 
-function upsertStep(id, status, timestamp, detail) {
+function renderWorkflowPlan(plan) {
+  if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) return;
+
+  const workflowSteps = plan.steps.filter(
+    (step) => step && typeof step.id === "string" && step.id.trim(),
+  );
+  if (workflowSteps.length === 0) return;
+
+  plannedExperts.clear();
+  expertRosterList.replaceChildren();
+  const names = new Map(
+    workflowSteps.map((step) => [step.id, rosterStepName(step)]),
+  );
+  const experts = workflowSteps.filter((step) => step.type === "expert");
+  const parallelExperts = experts.filter(
+    (step) => !Array.isArray(step.dependsOn) || step.dependsOn.length === 0,
+  );
+  plannedExpertCount = experts.length;
+  updateStepCount();
+  expertRosterSummary.textContent = experts.length > 0
+    ? `${experts.length} 名专家 · ${parallelExperts.length} 项可并行`
+    : `${workflowSteps.length} 个流程节点`;
+
+  for (const step of workflowSteps) {
+    const item = document.createElement("li");
+    item.className = "expert-roster-item pending";
+    item.dataset.stepId = step.id;
+
+    const title = document.createElement("div");
+    title.className = "expert-roster-title";
+    const name = document.createElement("strong");
+    name.textContent = rosterStepName(step);
+    const status = document.createElement("span");
+    status.className = "expert-roster-status";
+    status.textContent = "待执行";
+    title.append(name, status);
+
+    const meta = document.createElement("div");
+    meta.className = "expert-roster-meta";
+    const role = document.createElement("span");
+    role.textContent = step.role || rosterTypeLabel(step.type);
+    meta.append(role);
+    const mode = rosterModeLabel(step.mode);
+    if (mode) {
+      const modeLabel = document.createElement("span");
+      modeLabel.textContent = mode;
+      meta.append(modeLabel);
+    }
+
+    const dependency = document.createElement("p");
+    dependency.className = "expert-roster-dependency";
+    const dependsOn = Array.isArray(step.dependsOn) ? step.dependsOn : [];
+    dependency.textContent = dependsOn.length === 0
+      ? "可直接开始"
+      : `依赖：${dependsOn.map((id) => names.get(id) || id).join("、")}`;
+
+    item.append(title, meta, dependency);
+    expertRosterList.append(item);
+    plannedExperts.set(step.id, { item, status });
+  }
+  expertRoster.hidden = false;
+}
+
+function updateRosterStep(id, status, data) {
+  const planned = plannedExperts.get(id);
+  if (!planned) return;
+
+  if (typeof data?.stepName === "string" && data.stepName.trim()) {
+    planned.item.querySelector(".expert-roster-title strong").textContent =
+      data.stepName.trim();
+  }
+  planned.item.className = `expert-roster-item ${status}`;
+  planned.status.textContent = rosterStatusLabel(status);
+}
+
+function rosterStepStatus(status) {
+  if (status === "failed") return "failed";
+  if (status === "skipped") return "skipped";
+  return "completed";
+}
+
+function rosterStatusLabel(status) {
+  return {
+    pending: "待执行",
+    running: "研究中",
+    completed: "已完成",
+    failed: "失败",
+    skipped: "已跳过",
+  }[status] || "待执行";
+}
+
+function rosterStepName(step) {
+  return typeof step?.name === "string" && step.name.trim()
+    ? step.name.trim()
+    : step.id;
+}
+
+function rosterTypeLabel(type) {
+  return type === "approval" ? "人工确认" : "人工输入";
+}
+
+function rosterModeLabel(mode) {
+  return {
+    standard: "标准研究",
+    deep: "深度研究",
+    synthesis: "汇总整合",
+  }[mode] || "";
+}
+
+function setTaskLifecycle(task) {
+  if (typeof task?.createdAt === "string") {
+    activeTaskCreatedAt = task.createdAt;
+  }
+  if (
+    isTerminalStatus(task?.status) &&
+    typeof task?.updatedAt === "string"
+  ) {
+    activeTaskFinishedAt = task.updatedAt;
+  } else if (!isTerminalStatus(task?.status)) {
+    activeTaskFinishedAt = undefined;
+  }
+  refreshTaskElapsed();
+}
+
+function markTaskFinished(timestamp) {
+  if (typeof timestamp === "string") {
+    activeTaskFinishedAt = timestamp;
+  }
+  refreshTaskElapsed();
+}
+
+function refreshTaskElapsed() {
+  const startedAt = Date.parse(activeTaskCreatedAt || "");
+  if (!Number.isFinite(startedAt)) return;
+  const finishedAt = activeTaskFinishedAt
+    ? Date.parse(activeTaskFinishedAt)
+    : Date.now();
+  if (!Number.isFinite(finishedAt)) return;
+  const elapsedMs = Math.max(0, finishedAt - startedAt);
+  researchElapsed.textContent = formatDuration(elapsedMs);
+  researchElapsed.title = activeTaskFinishedAt
+    ? "从任务提交到任务结束的墙钟耗时，包含排队等待"
+    : "从任务提交到当前的墙钟耗时，包含排队等待";
+}
+
+function upsertStep(id, status, timestamp, detail, label) {
+  if (label) stepLabels.set(id, label);
   let item = steps.get(id);
   if (!item) {
-    item = addTimeline(humanizeStep(id), status, timestamp, detail);
+    item = addTimeline(
+      stepLabels.get(id) || humanizeStep(id),
+      status,
+      timestamp,
+      detail,
+    );
     item.dataset.stepId = id;
     steps.set(id, item);
-    stepCount.textContent = String(steps.size);
+    updateStepCount();
     return;
   }
   item.className = `timeline-item ${status}`;
+  item.querySelector(".timeline-title span").textContent =
+    stepLabels.get(id) || humanizeStep(id);
   item.querySelector(".timeline-time").textContent = formatTime(timestamp);
   setTimelineDetail(item, detail);
+}
+
+function updateStepCount() {
+  stepCount.textContent = String(plannedExpertCount || steps.size);
 }
 
 function upsertProgress(researchId, stage, timestamp, detail) {
@@ -888,7 +1485,7 @@ function upsertResearchRun(progress, timestamp) {
   if (!progress?.researchRunId) return;
   let run = researchRuns.get(progress.researchRunId);
   if (!run) {
-    const title = `${humanizeStep(progress.aoStepId)} · ${
+    const title = `${stepLabels.get(progress.aoStepId) || humanizeStep(progress.aoStepId)} · ${
       humanizeResearchPhase(progress.phase)
     }`;
     const status = researchRunStatus(progress.state);
@@ -1276,8 +1873,7 @@ function updateResearchSummary(summary, exactSources) {
   sourceCount.title = exactSources
     ? "研究过程中已收集并按 URL 规范化去重的网页来源"
     : "研究进行中，各轮来源数暂按合计显示";
-  researchElapsed.textContent = formatDuration(summary.totalElapsedMs);
-  researchElapsed.title = "各轮研究执行耗时之和，不包含排队等待";
+  refreshTaskElapsed();
   if (summary.reportedCostRuns > 0) {
     researchCost.textContent = formatUsd(summary.reportedCostUsd || 0);
     researchCost.title =
@@ -1403,6 +1999,7 @@ function setStatus(status) {
     queued: "排队中",
     running: "研究中",
     needs_input: "等待补充信息",
+    recoverable: "可恢复",
     completed: "已完成",
     completed_with_warnings: "已完成 · 有警告",
     failed: "未完成",
@@ -1417,8 +2014,11 @@ function setStatus(status) {
     "running",
     "needs_input",
     "canceling",
+    "recoverable",
   ].includes(status);
   cancelButton.disabled = status === "canceling";
+  resumeButton.hidden = status !== "recoverable";
+  resumeButton.disabled = false;
 }
 
 function isTerminalStatus(status) {
@@ -1431,18 +2031,31 @@ function isTerminalStatus(status) {
 }
 
 function showInputRequest(request) {
+  activeInputRequest = request;
   inputPrompt.textContent = request.prompt || "请补充研究所需信息";
   inputAnswer.value = "";
-  inputAnswer.placeholder =
-    request.kind === "approval" ? "请输入 yes 或 no" : "请输入补充信息";
-  inputForm.querySelector("button").disabled = false;
+  const approval = request.kind === "approval";
+  inputAnswer.placeholder = "请输入补充信息";
+  inputAnswer.hidden = approval;
+  inputAnswer.required = !approval;
+  inputSubmit.hidden = approval;
+  approvalApprove.hidden = !approval;
+  approvalDecline.hidden = !approval;
+  inputSubmit.disabled = false;
+  approvalApprove.disabled = false;
+  approvalDecline.disabled = false;
   inputError.hidden = true;
   inputForm.hidden = false;
   reportEmpty.hidden = true;
-  inputAnswer.focus();
+  if (approval) {
+    approvalApprove.focus();
+  } else {
+    inputAnswer.focus();
+  }
 }
 
 function hideInputRequest() {
+  activeInputRequest = undefined;
   inputForm.hidden = true;
   inputError.hidden = true;
   if (report.hidden && failure.hidden) {
@@ -1496,6 +2109,17 @@ function showQualityWarnings(
     return;
   }
   qualityWarning.hidden = false;
+}
+
+function updateReportEvidencePolicy(policy) {
+  const labels = {
+    public_verified: "本报告基于本次收集的公开可核验来源。",
+    private_bounded: "本报告基于受限资料；不包含可公开核验的外部引用。",
+    mixed_evidence: "本报告同时使用公开来源与受限资料，二者已分开标注。",
+  };
+  const message = labels[policy?.strategy];
+  reportEvidencePolicy.hidden = !message;
+  reportEvidencePolicy.textContent = message || "";
 }
 
 function renderWarningList(list, warnings) {
@@ -1586,6 +2210,11 @@ function humanizeStep(id) {
   return id
     .replaceAll("_", " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function stepLabel(data) {
+  const label = data?.stepName || data?.agentName;
+  return typeof label === "string" && label.trim() ? label.trim() : undefined;
 }
 
 function humanizeStage(stage) {

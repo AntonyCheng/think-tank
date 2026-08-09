@@ -405,12 +405,7 @@ export function localizeResearchProgress(
     return url ? `已收集来源：${url}` : "已收集一个研究来源。";
   }
   if (stage === "context_combined") {
-    const count = countMatch(
-      /Combined research context:\s+(\d+)\s+MCP sources?/iu,
-    );
-    return count !== undefined
-      ? `已合并研究上下文：${count} 个 MCP 来源，并纳入网页内容。`
-      : "研究上下文已合并。";
+    return "研究上下文已合并。";
   }
   if (stage === "research_step_finalized") {
     const rawCost = message.match(
@@ -570,6 +565,13 @@ function stringArrayFromObject(
       (item): item is string => typeof item === "string",
     )
     : [];
+}
+
+function safeCapabilityName(value: unknown, fallback: string): string {
+  return typeof value === "string" &&
+      /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value)
+    ? value
+    : fallback;
 }
 
 function retrieverLabel(value: string): string {

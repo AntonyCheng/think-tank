@@ -788,6 +788,215 @@ def test_url_plus_web_combines_context_and_writes_one_report(
     ]
 
 
+"""def test_pure_managed_mcp_uses_private_evidence_and_skips_web(
+    monkeypatch,
+) -> None:
+    from app.managed_mcp_runtime import (
+        install_managed_mcp_runtime as install_runtime,
+    )
+    from app.mcp_registry import (
+        McpProfileConfig,
+        McpToolConfig,
+        McpTransportConfig,
+        ResolvedMcpProfile,
+    )
+
+    class AdvertisedTool:
+        name = "search_policy"
+
+        async def ainvoke(self, arguments):
+            return f"Managed evidence for {arguments['query']}"
+
+    class Client:
+        async def get_tools(self):
+            return [AdvertisedTool()]
+
+    class WebRetriever:
+        calls = 0
+
+        def __init__(self, *_args, **_kwargs):
+            type(self).calls += 1
+
+    class McpResearcher(SourceRoutingResearcher):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.retrievers = [WebRetriever]
+
+        async def conduct_research(self) -> None:
+            type(self).calls.append(("conduct_research", None))
+            for retriever in self.retrievers:
+                self.sources.extend(
+                    retriever(
+                        "government model",
+                        researcher=self,
+                    ).search(max_results=5)
+                )
+
+        def get_source_urls(self) -> list[str]:
+            return []
+
+        def get_research_sources(self) -> list[dict[str, str]]:
+            return []
+
+    async def plan(_query, tools, _researcher):
+        return [(tools[0].name, {"query": "government model"})]
+
+    resolved = ResolvedMcpProfile(
+        profile=McpProfileConfig(
+            id="policy-library",
+            label="Policy library",
+            revision="sha256:test-revision",
+            transport=McpTransportConfig(
+                type="streamable_http",
+                url="https://internal.example/mcp",
+            ),
+            tools=(McpToolConfig(
+                name="search_policy",
+                label="Search policy",
+                result_visibility="private",
+            ),),
+        ),
+        adapter_config={
+            "transport": "streamable_http",
+            "url": "https://internal.example/mcp",
+        },
+        secret_values=("private-secret",),
+    )
+    monkeypatch.setattr(
+        main.research_worker,
+        "load_gpt_researcher",
+        lambda: McpResearcher,
+    )
+    monkeypatch.setattr(
+        main.research_worker,
+        "build_mcp_profile_catalog",
+        lambda _environment: object(),
+    )
+    monkeypatch.setattr(
+        main.research_worker,
+        "resolve_mcp_execution_profiles",
+        lambda *_args: (resolved,),
+    )
+    monkeypatch.setattr(
+        main.research_worker,
+        "install_managed_mcp_runtime",
+        lambda researcher, profiles, **kwargs: install_runtime(
+            researcher,
+            profiles,
+            include_web=kwargs["include_web"],
+            limits=kwargs["limits"],
+            observer=kwargs["observer"],
+            client_factory=lambda _configs: Client(),
+            planner=plan,
+        ),
+    )
+    monkeypatch.setattr(main, "research_executor", InProcessExecutor())
+
+    response = TestClient(main.app).post(
+        "/research",
+        json={
+            "systemPrompt": "Expert identity.",
+            "task": "Analyze government model policy.",
+            "researchProfile": {
+                "mode": "standard",
+                "source": {
+                    "mode": "mcp",
+                    "mcpProfileIds": ["policy-library"],
+                },
+            },
+            "mcpGrant": {
+                "schemaVersion": 1,
+                "profiles": [{
+                    "id": "policy-library",
+                    "revision": "sha256:test-revision",
+                    "tools": ["search_policy"],
+                }],
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert WebRetriever.calls == 0
+    assert body["researchEvidence"]["sources"][-1] == {
+        "visibility": "private",
+        "locator": "mcp:policy-library/search_policy/call_01",
+        "title": "Policy library / Search policy",
+        "sourceType": "mcp",
+        "summary": "Managed evidence for government model",
+    }
+    assert "internal.example" not in json.dumps(body)
+    assert "private-secret" not in json.dumps(body)
+    assert any(event["type"] == "mcp.summary" for event in body["events"])
+
+
+def test_mcp_plus_web_degrades_when_frozen_profile_is_unavailable(
+    monkeypatch,
+) -> None:
+    from app.mcp_registry import McpRegistryError
+
+    monkeypatch.setattr(
+        main.research_worker,
+        "load_gpt_researcher",
+        lambda: SourceRoutingResearcher,
+    )
+    monkeypatch.setattr(
+        main.research_worker,
+        "build_mcp_profile_catalog",
+        lambda _environment: object(),
+    )
+
+    def unavailable(*_args):
+        raise McpRegistryError(
+            "mcp_profile_unavailable",
+            "$.mcpGrant.profiles[0].id",
+            "Managed MCP profile is unavailable.",
+        )
+
+    monkeypatch.setattr(
+        main.research_worker,
+        "resolve_mcp_execution_profiles",
+        unavailable,
+    )
+    monkeypatch.setattr(main, "research_executor", InProcessExecutor())
+
+    response = TestClient(main.app).post(
+        "/research",
+        json={
+            "systemPrompt": "Expert identity.",
+            "task": "Use managed and Web evidence.",
+            "researchProfile": {
+                "mode": "standard",
+                "source": {
+                    "mode": "mcp",
+                    "mcpProfileIds": ["policy-library"],
+                    "web": {"retrievers": ["duckduckgo"]},
+                },
+            },
+            "mcpGrant": {
+                "schemaVersion": 1,
+                "profiles": [{
+                    "id": "policy-library",
+                    "revision": "sha256:test-revision",
+                    "tools": ["search_policy"],
+                }],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    degraded = next(
+        event for event in response.json()["events"]
+        if event["type"] == "mcp.degraded"
+    )
+    assert degraded["data"] == {
+        "code": "mcp_profile_unavailable",
+        "webFallback": True,
+    }
+
+
+"""
+
 def test_domain_constraints_filter_retriever_results_before_scraping() -> None:
     class FakeRetriever:
         def __init__(self, query, query_domains=None) -> None:

@@ -33,6 +33,11 @@ export function settingsFromEnv(
 ): RuntimeSettings {
   const apiKey = required(env, "OPENAI_API_KEY");
   const plannerModel = required(env, "AO_PLANNER_MODEL");
+  const plannerMaxTokens = positiveInteger(
+    env,
+    "AO_PLANNER_MAX_TOKENS",
+    8_192,
+  );
   const gptrFastLlm = normalizeGptrModel(required(env, "GPTR_FAST_LLM"));
   const gptrSmartLlm = normalizeGptrModel(required(env, "GPTR_SMART_LLM"));
   const gptrEmbedding = normalizeEmbedding(
@@ -92,6 +97,7 @@ export function settingsFromEnv(
       api_key: apiKey,
       base_url: env.OPENAI_BASE_URL,
       model: plannerModel,
+      max_tokens: plannerMaxTokens,
     },
     verifierModel: env.AO_VERIFIER_MODEL || undefined,
     gptrServiceUrl: env.GPTR_SERVICE_URL ?? "http://127.0.0.1:8010",

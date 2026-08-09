@@ -19,6 +19,7 @@ test("loads the deployment-global v1 settings and normalizes GPTR models", () =>
   });
 
   assert.equal(settings.planner.model, "planner");
+  assert.equal(settings.planner.max_tokens, 8_192);
   assert.equal(settings.gptrFastLlm, "openai:fast");
   assert.equal(settings.gptrSmartLlm, "custom:smart");
   assert.equal(settings.gptrEmbedding, "custom:embedding-model");
@@ -40,6 +41,33 @@ test("loads the deployment-global v1 settings and normalizes GPTR models", () =>
     maxDepth: 3,
     maxResearchCalls: 32,
   });
+});
+
+test("accepts a configurable OpenAI-compatible planner output budget", () => {
+  const settings = settingsFromEnv({
+    OPENAI_API_KEY: "key",
+    AO_PLANNER_MODEL: "planner",
+    AO_PLANNER_MAX_TOKENS: "12000",
+    GPTR_FAST_LLM: "fast",
+    GPTR_SMART_LLM: "smart",
+    GPTR_EMBEDDING: "m3e",
+  });
+
+  assert.equal(settings.planner.max_tokens, 12_000);
+});
+
+test("rejects an invalid planner output budget", () => {
+  assert.throws(
+    () => settingsFromEnv({
+      OPENAI_API_KEY: "key",
+      AO_PLANNER_MODEL: "planner",
+      AO_PLANNER_MAX_TOKENS: "0",
+      GPTR_FAST_LLM: "fast",
+      GPTR_SMART_LLM: "smart",
+      GPTR_EMBEDDING: "m3e",
+    }),
+    /AO_PLANNER_MAX_TOKENS must be a positive integer/u,
+  );
 });
 
 test("loads an ordered multi-retriever default grant", () => {

@@ -10,6 +10,7 @@ from app.source_access import (
     SourceAccessLimits,
     SourceHttpResponse,
     SourceMaterializer,
+    source_fallback_decision,
     url_allowed_by_domains,
 )
 
@@ -60,6 +61,82 @@ class SequenceTransport:
         return response
 
 
+def test_static_html_without_a_rendering_signal_never_requests_fallback() -> None:
+    decision = source_fallback_decision(
+        b"<html><body><p>Short public notice.</p></body></html>",
+        "text/html",
+        "Short public notice.",
+    )
+
+    assert not decision.eligible
+
+
+def test_empty_client_rendered_html_is_eligible_for_one_fallback() -> None:
+    decision = source_fallback_decision(
+        b"<html><body><div id=\"root\"></div><script src=\"/app.js\"></script></body></html>",
+        "text/html",
+        "",
+    )
+
+    assert decision.reason == "empty_text"
+
+
+def test_rendered_fallback_replaces_an_empty_static_html_response() -> None:
+    static = SourceHttpResponse(
+        status=200,
+        headers={"content-type": "text/html"},
+        body=b"<html><body><div id=\"root\"></div><script src=\"/app.js\"></script></body></html>",
+        peer_ip="93.184.216.34",
+    )
+    rendered = SourceHttpResponse(
+        status=200,
+        headers={"content-type": "text/html"},
+        body=b"<html><head><title>Rendered</title></head><body><main>Verified rendered evidence.</main></body></html>",
+        peer_ip="93.184.216.34",
+    )
+    materializer = SourceMaterializer(
+        resolver=StubResolver("93.184.216.34"),
+        transport=StubTransport(static),
+        fallback_transport=StubTransport(rendered),
+        fallback_strategy="browser",
+    )
+
+    result = asyncio.run(
+        materializer.materialize(["https://public.example/report"])
+    )
+
+    assert result.sources[0].fetch_strategy == "browser"
+    assert result.sources[0].fallback_reason == "empty_text"
+    assert result.sources[0].text == "Rendered Verified rendered evidence."
+
+
+def test_rendered_fallback_rejects_an_unverified_peer() -> None:
+    static = SourceHttpResponse(
+        status=200,
+        headers={"content-type": "text/html"},
+        body=b"<div id=\"root\"></div><script src=\"/app.js\"></script>",
+        peer_ip="93.184.216.34",
+    )
+    rendered = SourceHttpResponse(
+        status=200,
+        headers={"content-type": "text/html"},
+        body=b"<main>Unexpected rendered content.</main>",
+        peer_ip="93.184.216.35",
+    )
+    materializer = SourceMaterializer(
+        resolver=StubResolver("93.184.216.34"),
+        transport=StubTransport(static),
+        fallback_transport=StubTransport(rendered),
+    )
+
+    result = asyncio.run(
+        materializer.materialize(["https://public.example/report"])
+    )
+
+    assert result.sources == ()
+    assert result.failures[0].code == "source_content_empty"
+
+
 def test_private_dns_result_is_rejected_before_http_access() -> None:
     materializer = SourceMaterializer(
         resolver=StubResolver("127.0.0.1"),
@@ -101,7 +178,7 @@ def test_public_html_is_materialized_as_canonical_text_evidence() -> None:
     assert result.sources[0].text == "Annual Report Revenue grew by 12 percent."
 
 
-def test_plain_text_respects_declared_charset_and_text_budget() -> None:
+def test_plain_text_respects_declared_charset_without_text_truncation() -> None:
     body = "季度报告：收入增长百分之十二。".encode("gb18030")
     materializer = SourceMaterializer(
         resolver=StubResolver("93.184.216.34"),
@@ -113,7 +190,6 @@ def test_plain_text_respects_declared_charset_and_text_budget() -> None:
                 peer_ip="93.184.216.34",
             )
         ),
-        limits=SourceAccessLimits(max_text_characters=8),
     )
 
     result = asyncio.run(
@@ -122,7 +198,7 @@ def test_plain_text_respects_declared_charset_and_text_budget() -> None:
 
     assert result.sources[0].media_type == "text/plain"
     assert result.sources[0].title == "report.txt"
-    assert result.sources[0].text == "季度报告：收入增"
+    assert result.sources[0].text == "季度报告：收入增长百分之十二。"
 
 
 def test_pdf_text_is_extracted_without_a_second_network_request() -> None:

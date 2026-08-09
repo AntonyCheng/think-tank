@@ -4,6 +4,7 @@ import {
   type ResearchProfile,
   type ResearchProfileDefaults,
   type ResearchRetriever,
+  type ResearchSourceMode,
 } from "./research-profile.js";
 
 export interface ResearchProfileEnvironment {
@@ -38,6 +39,12 @@ export function currentResearchProfileEnvironment(
       "Default research retrievers must be available capabilities.",
     );
   }
+  const sourceModes: ResearchSourceMode[] = [
+    "web",
+    "urls",
+    "local",
+    "hybrid",
+  ];
   return {
     defaults: Object.freeze({
       defaultRetriever,
@@ -45,7 +52,7 @@ export function currentResearchProfileEnvironment(
     }),
     capabilities: Object.freeze({
       modes: Object.freeze(["standard", "deep", "synthesis"] as const),
-      sourceModes: Object.freeze(["web", "urls"] as const),
+      sourceModes: Object.freeze(sourceModes),
       urlSourceModes: Object.freeze(["standard"] as const),
       domainFilterModes: Object.freeze(["standard"] as const),
       retrievers: Object.freeze(available),

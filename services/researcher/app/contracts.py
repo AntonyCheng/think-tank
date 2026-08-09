@@ -20,6 +20,7 @@ class TaskTemporalContext(BaseModel):
 class ResearchRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    task_id: str | None = Field(alias="taskId", default=None)
     research_run_id: str | None = Field(alias="researchRunId", default=None)
     execution_timeout_ms: int | None = Field(
         alias="executionTimeoutMs",
@@ -77,6 +78,19 @@ class PublicEvidenceSourceCapture(BaseModel):
     summary: str | None = None
 
 
+class PrivateEvidenceSourceCapture(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    visibility: Literal["private"] = "private"
+    locator: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    source_type: Literal["document"] | None = Field(
+        alias="sourceType",
+        default=None,
+    )
+    summary: str | None = None
+
+
 class ResearchEvidenceContext(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -92,7 +106,7 @@ class ResearchEvidenceCapture(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     queries: list[EvidenceQueryCapture]
-    sources: list[PublicEvidenceSourceCapture]
+    sources: list[PublicEvidenceSourceCapture | PrivateEvidenceSourceCapture]
     research_context: ResearchEvidenceContext = Field(
         alias="researchContext",
     )

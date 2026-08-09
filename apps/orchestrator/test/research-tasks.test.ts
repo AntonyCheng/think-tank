@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ResearchTaskManager } from "../src/research-tasks.js";
+import {
+  ResearchTaskManager,
+  type ResearchTaskSnapshot,
+} from "../src/research-tasks.js";
 import {
   resolveResearchProfile,
   type ResearchCapabilities,
 } from "../src/research-profile.js";
 import type { EvidenceBundle } from "../src/evidence-bundle.js";
 import { InMemoryResearchTaskStore } from "../src/research-task-store.js";
+import type { WorkflowCheckpoint } from "../src/workflow-checkpoint.js";
 import type {
   ResearchActivity,
   ResearchRunProgress,
@@ -59,6 +63,19 @@ test("queues a research task and preserves its event history", async () => {
       timestamp: new Date().toISOString(),
       workflowPath: "workflow.yaml",
       warnings: [],
+      workflowPlan: {
+        schemaVersion: 1,
+        workflowName: "test",
+        steps: [{
+          id: "research",
+          name: "Research expert",
+          role: "research/analyst",
+          type: "expert",
+          dependsOn: [],
+          mode: "standard",
+          terminal: true,
+        }],
+      },
     });
     onEvent({
       type: "step.started",
@@ -87,6 +104,9 @@ test("queues a research task and preserves its event history", async () => {
   const completed = manager.get(submitted.id);
   assert.equal(completed?.output, "# report");
   assert.equal(completed?.workflowPath, "workflow.yaml");
+  assert.deepEqual(completed?.workflowPlan?.steps.map((step) => step.id), [
+    "research",
+  ]);
 
   const events: string[] = [];
   manager.subscribe(submitted.id, (event) => events.push(event.type));
@@ -453,14 +473,24 @@ test("pauses for AO input and resumes with the submitted answer", async () => {
 
   const submitted = manager.submit("research topic");
   await waitFor(() => manager.get(submitted.id)?.status === "needs_input");
-  assert.deepEqual(manager.get(submitted.id)?.pendingInput, {
-    stepId: "clarify_scope",
-    kind: "human_input",
-    prompt: "请补充研究地域范围。",
-  });
+  const pendingInput = manager.get(submitted.id)?.pendingInput;
+  assert.match(pendingInput?.requestId ?? "", /^[0-9a-f-]{36}$/u);
+  assert.deepEqual(
+    { ...pendingInput, requestId: "request-id" },
+    {
+      requestId: "request-id",
+      stepId: "clarify_scope",
+      kind: "human_input",
+      prompt: "请补充研究地域范围。",
+    },
+  );
 
   assert.equal(
-    manager.answerInput(submitted.id, "仅研究中国市场"),
+    manager.answerInput(
+      submitted.id,
+      "仅研究中国市场",
+      pendingInput?.requestId,
+    ),
     true,
   );
   await waitFor(() => manager.get(submitted.id)?.status === "completed");
@@ -471,6 +501,29 @@ test("pauses for AO input and resumes with the submitted answer", async () => {
   manager.subscribe(submitted.id, (event) => events.push(event.type));
   assert.ok(events.includes("task.needs_input"));
   assert.ok(events.includes("task.input_received"));
+});
+
+test("rejects stale input requests and records a declined approval", async () => {
+  const manager = new ResearchTaskManager(
+    async (_topic, _onEvent, controls) => {
+      await controls.requestInput({
+        stepId: "approve_scope",
+        kind: "approval",
+        prompt: "批准继续研究吗？",
+      });
+      throw new Error("unreachable");
+    },
+  );
+
+  const submitted = manager.submit("approval topic");
+  await waitFor(() => manager.get(submitted.id)?.status === "needs_input");
+  const pending = manager.get(submitted.id)?.pendingInput;
+  assert.ok(pending?.requestId);
+  assert.equal(manager.answerInput(submitted.id, "approved", "stale"), false);
+  assert.equal(manager.answerInput(submitted.id, "yes", pending?.requestId), false);
+  assert.equal(manager.answerInput(submitted.id, "declined", pending?.requestId), true);
+  await waitFor(() => manager.get(submitted.id)?.status === "failed");
+  assert.match(manager.get(submitted.id)?.error ?? "", /审批已被拒绝/u);
 });
 
 test("serializes submitted research tasks", async () => {
@@ -586,6 +639,11 @@ test("delivers evidence-quality warnings separately from content acceptance", as
           commercial: 1,
           other: 0,
         },
+      },
+      reportEvidencePolicy: {
+        strategy: "public_verified",
+        allowsPrivateAttribution: false,
+        forbidsExternalLinks: false,
       },
       warnings: [{
         code: "citation_coverage_low",
@@ -712,6 +770,208 @@ test("does not consume the execution budget while waiting for user input", async
   assert.equal(manager.answerInput(submitted.id, "中国市场"), true);
   await waitFor(() => manager.get(submitted.id)?.status === "completed");
 });
+
+test("recovers an interrupted checkpoint without repeating completed steps", async () => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot = checkpointTaskSnapshot("checkpoint-recovery", "running");
+  store.create(snapshot, { type: "task.queued", data: {} });
+  store.record(snapshot.id, { status: "running" }, { type: "task.running", data: {} });
+  const checkpoint = workflowCheckpoint(snapshot.id);
+  store.saveCheckpoint(checkpoint);
+
+  let execution: WorkflowCheckpoint | undefined;
+  const manager = new ResearchTaskManager(
+    async (_topic, _onEvent, controls) => {
+      execution = controls.execution?.checkpoint;
+      return completedResult("# recovered report");
+    },
+    store,
+  );
+
+  assert.equal(manager.get(snapshot.id)?.status, "recoverable");
+  assert.equal(manager.resume(snapshot.id), true);
+  await waitFor(() => manager.get(snapshot.id)?.status === "completed");
+  assert.deepEqual(execution?.completedSteps.map((step) => step.id), ["evidence"]);
+  assert.equal(manager.get(snapshot.id)?.output, "# recovered report");
+});
+
+test("issues a new input request after recovery and rejects the stale token", async () => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot = checkpointTaskSnapshot("checkpoint-input", "needs_input");
+  store.create(snapshot, { type: "task.queued", data: {} });
+  const checkpoint = workflowCheckpoint(snapshot.id, {
+    pendingInput: {
+      stepId: "clarify",
+      inputName: "scope",
+      kind: "human_input",
+      prompt: "请补充范围。",
+    },
+  });
+  store.saveCheckpoint(checkpoint);
+
+  const manager = new ResearchTaskManager(
+    async (_topic, _onEvent, controls) => {
+      const answer = await controls.requestInput({
+        stepId: "clarify",
+        inputName: "scope",
+        kind: "human_input",
+        prompt: "请补充范围。",
+      });
+      return completedResult(`# ${answer}`);
+    },
+    store,
+  );
+
+  assert.equal(manager.get(snapshot.id)?.status, "recoverable");
+  assert.equal(manager.resume(snapshot.id), true);
+  await waitFor(() => manager.get(snapshot.id)?.status === "needs_input");
+  const freshRequest = manager.get(snapshot.id)?.pendingInput?.requestId;
+  assert.ok(freshRequest);
+  assert.notEqual(freshRequest, "stale-request-id");
+  assert.equal(
+    manager.answerInput(snapshot.id, "中国市场", "stale-request-id"),
+    false,
+  );
+  assert.equal(manager.answerInput(snapshot.id, "中国市场", freshRequest), true);
+  await waitFor(() => manager.get(snapshot.id)?.status === "completed");
+});
+
+test("records the previous report before a normal rerun", async () => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot = checkpointTaskSnapshot("checkpoint-feedback", "completed");
+  snapshot.output = "# prior report";
+  store.create(snapshot, { type: "task.completed", data: {} });
+  const checkpoint = workflowCheckpoint(snapshot.id, {
+    completedSteps: [
+      {
+        id: "final",
+        role: "research/writer",
+        status: "completed",
+        output: "# prior report",
+        output_var: "report",
+        duration: 1,
+        tokens: { input: 0, output: 0 },
+      },
+    ],
+    outputVariables: { report: "# prior report" },
+  });
+  store.saveCheckpoint(checkpoint);
+
+  const manager = new ResearchTaskManager(
+    async () => completedResult("# rerun report", "final"),
+    store,
+  );
+
+  assert.equal(
+    manager.rerun(snapshot.id, "final"),
+    true,
+  );
+  await waitFor(() => manager.get(snapshot.id)?.status === "completed");
+  assert.deepEqual(manager.get(snapshot.id)?.revisions, [{
+    runId: checkpoint.runId,
+    createdAt: manager.get(snapshot.id)?.revisions?.[0]?.createdAt,
+    reason: "initial",
+    output: "# prior report",
+  }]);
+  assert.equal(manager.get(snapshot.id)?.output, "# rerun report");
+});
+
+test("delivers a report with normal citation warnings", async () => {
+  const manager = new ResearchTaskManager(async () => ({
+    ...completedResult("# prior report", "final"),
+    citationWarnings: ["部分来源需要人工复核。"],
+  }));
+
+  const submitted = manager.submit("research topic");
+  await waitFor(() =>
+    manager.get(submitted.id)?.status === "completed_with_warnings"
+  );
+
+  const task = manager.get(submitted.id);
+  assert.equal(task?.output, "# prior report");
+  assert.match(task?.warnings?.join("\n") ?? "", /人工复核/u);
+  const events: string[] = [];
+  manager.subscribe(submitted.id, (event) => events.push(event.type));
+  assert.ok(events.includes("task.completed_with_warnings"));
+});
+
+test("delivers a normal report without revision metadata", async () => {
+  const report = "# completed report";
+  const manager = new ResearchTaskManager(async () =>
+    completedResult(report, "final"));
+
+  const submitted = manager.submit("research topic");
+  await waitFor(() => manager.get(submitted.id)?.status === "completed");
+
+  const task = manager.get(submitted.id);
+  assert.equal(task?.output, report);
+  assert.equal("revisionOutcome" in (task ?? {}), false);
+});
+
+function checkpointTaskSnapshot(
+  id: string,
+  status: ResearchTaskSnapshot["status"],
+): ResearchTaskSnapshot {
+  return {
+    id,
+    topic: "checkpoint topic",
+    status,
+    createdAt: "2026-08-03T00:00:00.000Z",
+    updatedAt: "2026-08-03T00:00:00.000Z",
+  };
+}
+
+function workflowCheckpoint(
+  taskId: string,
+  changes: Partial<WorkflowCheckpoint> = {},
+): WorkflowCheckpoint {
+  return {
+    schemaVersion: 1,
+    taskId,
+    runId: "run-initial",
+    reason: "initial",
+    sequence: 1,
+    createdAt: "2026-08-03T00:01:00.000Z",
+    workflow: { yaml: "name: test", sha256: "hash" },
+    inputs: { topic: "checkpoint topic" },
+    inputHash: "input-hash",
+    runtimeFingerprint: "runtime-hash",
+    policyFingerprint: "policy-hash",
+    completedSteps: [{
+      id: "evidence",
+      role: "research/analyst",
+      status: "completed",
+      output: "evidence result",
+      output_var: "evidence",
+      duration: 1,
+      tokens: { input: 0, output: 0 },
+    }],
+    outputVariables: { evidence: "evidence result" },
+    evidenceBundles: [],
+    ...changes,
+  };
+}
+
+function completedResult(output: string, stepId = "final") {
+  return {
+    workflowPath: "workflow.yaml",
+    output,
+    workflow: {
+      name: "test",
+      success: true,
+      steps: [{
+        id: stepId,
+        role: "research/writer",
+        status: "completed" as const,
+        output,
+        duration: 1,
+        tokens: { input: 0, output: 0 },
+      }],
+      totalDuration: 1,
+      totalTokens: { input: 0, output: 0 },
+    },
+  };
+}
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {

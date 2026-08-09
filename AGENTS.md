@@ -7,7 +7,7 @@
 - `apps/web/public/` is the dependency-light frontend (`index.html`, `app.js`, and `styles.css`) served by the API.
 - `services/researcher/app/` contains the FastAPI GPTR adapter and document exporter; `services/researcher/test/` contains Pytest tests.
 - `services/researcher/assets/fonts/` holds the licensed PDF font asset.
-- `scripts/` contains acceptance tooling, while `docs/` records architecture and acceptance decisions.
+- `scripts/` contains acceptance tooling; executable tests and source code are the current behavioral reference.
 - Generated workflows, exports, settings, logs, `.venv/`, and `node_modules/` are local artifacts and should not be committed.
 
 ## Build, Test, and Development Commands

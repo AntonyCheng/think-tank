@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import socket
 from collections.abc import Sequence
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Mapping
+from pathlib import Path
+from typing import Mapping, Protocol
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
@@ -28,7 +30,8 @@ class SourceAccessLimits:
     max_total_bytes: int = 20 * 1024 * 1024
     max_redirects: int = 5
     timeout_seconds: int = 30
-    max_text_characters: int = 200_000
+    fallback_max_attempts: int = 1
+    fallback_minimum_text_characters: int = 200
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,8 @@ class MaterializedSource:
     text: str
     byte_size: int
     redirect_chain: tuple[str, ...] = ()
+    fetch_strategy: str = "static"
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,16 +68,40 @@ class SourceAccessError(Exception):
         self.url = url
 
 
+@dataclass(frozen=True)
+class SourceFallbackDecision:
+    reason: str | None = None
+
+    @property
+    def eligible(self) -> bool:
+        return self.reason is not None
+
+
+class SourceHttpTransport(Protocol):
+    async def fetch(
+        self,
+        url: str,
+        *,
+        addresses: Sequence[str],
+        max_bytes: int,
+        timeout_seconds: int,
+    ) -> SourceHttpResponse: ...
+
+
 class SourceMaterializer:
     def __init__(
         self,
         resolver,
         transport,
         limits: SourceAccessLimits | None = None,
+        fallback_transport: SourceHttpTransport | None = None,
+        fallback_strategy: str = "fallback",
     ) -> None:
         self._resolver = resolver
         self._transport = transport
         self._limits = limits or SourceAccessLimits()
+        self._fallback_transport = fallback_transport
+        self._fallback_strategy = fallback_strategy
 
     async def materialize(
         self,
@@ -179,17 +208,11 @@ class SourceMaterializer:
                     requested_url,
                     "The source could not be downloaded.",
                 ) from exc
-            peer = ipaddress.ip_address(response.peer_ip)
-            normalized_addresses = {
-                str(ipaddress.ip_address(address))
-                for address in addresses
-            }
-            if not peer.is_global or str(peer) not in normalized_addresses:
-                raise SourceAccessError(
-                    "source_peer_forbidden",
-                    requested_url,
-                    "The source connection reached an unexpected address.",
-                )
+            _assert_verified_peer(
+                response.peer_ip,
+                addresses,
+                requested_url,
+            )
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.headers.get("location", "").strip()
                 if not location:
@@ -231,22 +254,72 @@ class SourceMaterializer:
             media_type, charset = _content_type(
                 response.headers.get("content-type", "")
             )
-            try:
-                title, text = _source_text(
-                    response.body,
-                    current_url,
-                    media_type,
-                    charset,
-                )
-            except SourceAccessError:
-                raise
-            except Exception as exc:
-                raise SourceAccessError(
-                    "source_media_type_unsupported",
-                    requested_url,
-                    "The source content could not be safely extracted.",
-                ) from exc
-            text = text[:self._limits.max_text_characters]
+            title, text = _extract_source_text(
+                response.body,
+                current_url,
+                media_type,
+                charset,
+                requested_url,
+            )
+            strategy = "static"
+            fallback_reason = None
+            decision = source_fallback_decision(
+                response.body,
+                media_type,
+                text,
+                self._limits.fallback_minimum_text_characters,
+            )
+            if (
+                decision.eligible
+                and self._fallback_transport is not None
+                and self._limits.fallback_max_attempts > 0
+            ):
+                try:
+                    fallback_response = await self._fallback_transport.fetch(
+                        current_url,
+                        addresses=addresses,
+                        max_bytes=self._limits.max_response_bytes,
+                        timeout_seconds=self._limits.timeout_seconds,
+                    )
+                    _assert_verified_peer(
+                        fallback_response.peer_ip,
+                        addresses,
+                        requested_url,
+                    )
+                    if (
+                        fallback_response.status < 200
+                        or fallback_response.status >= 300
+                        or len(fallback_response.body)
+                        > self._limits.max_response_bytes
+                    ):
+                        raise SourceAccessError(
+                            "source_fallback_failed",
+                            requested_url,
+                            "The rendered source could not be downloaded.",
+                        )
+                    fallback_media_type, fallback_charset = _content_type(
+                        fallback_response.headers.get("content-type", "")
+                    )
+                    fallback_title, fallback_text = _extract_source_text(
+                        fallback_response.body,
+                        current_url,
+                        fallback_media_type,
+                        fallback_charset,
+                        requested_url,
+                    )
+                    if fallback_text.strip():
+                        response = fallback_response
+                        media_type = fallback_media_type
+                        title = fallback_title
+                        text = fallback_text
+                        strategy = self._fallback_strategy
+                        fallback_reason = decision.reason
+                except SourceAccessError:
+                    # The static response remains authoritative when it had
+                    # extractable text; empty pages keep the stable failure.
+                    pass
+                except Exception:
+                    pass
             if not text.strip():
                 raise SourceAccessError(
                     "source_content_empty",
@@ -261,6 +334,8 @@ class SourceMaterializer:
                 text=text,
                 byte_size=len(response.body),
                 redirect_chain=tuple(redirect_chain),
+                fetch_strategy=strategy,
+                fallback_reason=fallback_reason,
             )
         raise SourceAccessError(
             "source_redirect_limit",
@@ -343,6 +418,59 @@ def _source_text(
         url,
         "The source content type is not supported.",
     )
+
+
+def _extract_source_text(
+    body: bytes,
+    url: str,
+    media_type: str,
+    charset: str,
+    requested_url: str,
+) -> tuple[str, str]:
+    try:
+        return _source_text(body, url, media_type, charset)
+    except SourceAccessError:
+        raise
+    except Exception as exc:
+        raise SourceAccessError(
+            "source_media_type_unsupported",
+            requested_url,
+            "The source content could not be safely extracted.",
+        ) from exc
+
+
+def source_fallback_decision(
+    body: bytes,
+    media_type: str,
+    text: str,
+    minimum_text_characters: int = 200,
+) -> SourceFallbackDecision:
+    """Return a conservative rendering fallback decision for static HTML."""
+    if media_type != "text/html":
+        return SourceFallbackDecision()
+    decoded = body.decode("utf-8", errors="replace").lower()
+    has_rendering_signal = any(
+        marker in decoded
+        for marker in (
+            "<script",
+            "id=\"root\"",
+            "id='root'",
+            "id=\"app\"",
+            "id='app'",
+            "data-reactroot",
+            "ng-version",
+            "__next",
+            "enable javascript",
+            "javascript is required",
+        )
+    )
+    if not has_rendering_signal:
+        return SourceFallbackDecision()
+    if not text.strip():
+        return SourceFallbackDecision("empty_text")
+    if len(text.strip()) < minimum_text_characters:
+        return SourceFallbackDecision("client_rendered")
+    return SourceFallbackDecision()
 
 
 def _url_title(url: str) -> str:
@@ -590,11 +718,63 @@ def _response_peer_ip(response: aiohttp.ClientResponse) -> str:
     return str(peer[0])
 
 
+def _assert_verified_peer(
+    peer_ip: str,
+    addresses: Sequence[str],
+    requested_url: str,
+) -> None:
+    peer = ipaddress.ip_address(peer_ip)
+    normalized_addresses = {
+        str(ipaddress.ip_address(address))
+        for address in addresses
+    }
+    if not peer.is_global or str(peer) not in normalized_addresses:
+        raise SourceAccessError(
+            "source_peer_forbidden",
+            requested_url,
+            "The source connection reached an unexpected address.",
+        )
+
+
 def default_source_materializer(
     limits: SourceAccessLimits | None = None,
 ) -> SourceMaterializer:
+    resolved_limits = limits or SourceAccessLimits(
+        timeout_seconds=max(
+            1,
+            _positive_environment("GPTR_SOURCE_FALLBACK_TIMEOUT_MS", 45_000) // 1000,
+        ),
+    )
+    fallback_transport = None
+    fallback_strategy = "fallback"
+    providers = tuple(
+        value.strip().lower()
+        for value in os.getenv("GPTR_SOURCE_FALLBACK_PROVIDERS", "").split(",")
+        if value.strip()
+    )
+    if "browser" in providers:
+        from .browser_source_fetcher import PlaywrightSourceTransport
+
+        fallback_transport = PlaywrightSourceTransport(
+            os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+            or str(Path(".think-tank") / "playwright-browsers")
+        )
+        fallback_strategy = "browser"
     return SourceMaterializer(
         resolver=SystemHostResolver(),
         transport=AioHttpSourceTransport(),
-        limits=limits,
+        limits=resolved_limits,
+        fallback_transport=fallback_transport,
+        fallback_strategy=fallback_strategy,
     )
+
+
+def _positive_environment(name: str, fallback: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback

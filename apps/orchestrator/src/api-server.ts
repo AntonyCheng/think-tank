@@ -4,7 +4,12 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-import { runResearchTopic } from "./research-runner.js";
+import {
+  assertCheckpointCompatible,
+  checkpointPolicyFingerprint,
+  checkpointRuntimeFingerprint,
+  runResearchTopic,
+} from "./research-runner.js";
 import {
   ResearchTaskManager,
   type ResearchTaskEvent,
@@ -25,6 +30,7 @@ import {
   type RetrieverCatalog,
 } from "./gptr-capabilities.js";
 import { replaceEnvironmentValue } from "./environment-file.js";
+import { TaskDocumentStore } from "./document-store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const require = createRequire(import.meta.url);
@@ -124,6 +130,7 @@ export function createApiServer(
     ),
   environmentFilePath = resolve(moduleDirectory, "../../../.env"),
 ) {
+  const documents = new TaskDocumentStore();
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
@@ -252,6 +259,7 @@ export function createApiServer(
             response,
             202,
             manager.submit(topic, {
+              ...(typeof body.taskId === "string" ? { taskId: body.taskId } : {}),
               researchProfile,
               researchCapabilities: environment.capabilities,
             }),
@@ -266,6 +274,148 @@ export function createApiServer(
         }
       }
 
+      if (request.method === "GET" && url.pathname === "/api/tasks") {
+        const filter = url.searchParams.get("filter") ?? "all";
+        if (![
+          "all",
+          "completed",
+          "warnings",
+          "unfinished",
+        ].includes(filter)) {
+          return sendJson(response, 422, { error: "history filter is invalid" });
+        }
+        const requestedLimit = url.searchParams.get("limit");
+        const limit = requestedLimit === null
+          ? undefined
+          : Number(requestedLimit);
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+          return sendJson(response, 422, { error: "history limit is invalid" });
+        }
+        return sendJson(response, 200, manager.listHistory({
+          ...(url.searchParams.get("cursor")
+            ? { cursor: url.searchParams.get("cursor")! }
+            : {}),
+          ...(limit === undefined ? {} : { limit }),
+          ...(url.searchParams.get("q")
+            ? { query: url.searchParams.get("q")! }
+            : {}),
+          filter: filter as import("./research-tasks.js").ResearchHistoryFilter,
+        }));
+      }
+
+      if (
+        request.method === "DELETE" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments.length === 3
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!["completed", "completed_with_warnings", "failed", "canceled"].includes(task.status)) {
+          return sendJson(response, 409, {
+            error: "only completed, failed, or canceled tasks can be deleted",
+          });
+        }
+        await documents.deleteTask(task.id);
+        const result = manager.delete(task.id);
+        if (result !== "deleted") {
+          return sendJson(response, 404, { error: "task not found" });
+        }
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "documents" &&
+        segments.length === 4
+      ) {
+        const body = await readJsonBody(request, 26 * 1024 * 1024 * 2);
+        if (typeof body.name !== "string" || typeof body.contentBase64 !== "string") return sendJson(response, 422, { error: "name and contentBase64 are required" });
+        try {
+          return sendJson(response, 201, await documents.save(segments[2], body.name, Buffer.from(body.contentBase64, "base64")));
+        } catch (error) {
+          return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      if (
+        request.method === "GET" &&
+        segments[0] === "api" && segments[1] === "tasks" && segments[2] &&
+        segments[3] === "documents" && segments.length === 4
+      ) {
+        return sendJson(response, 200, await documents.list(segments[2]));
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" && segments[1] === "tasks" && segments[2] &&
+        segments[3] === "start" && segments.length === 4
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!manager.start(segments[2])) return sendJson(response, 409, { error: "task is not queued" });
+        return sendJson(response, 202, manager.get(segments[2]));
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "resume" && segments.length === 4
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        try {
+          assertCurrentCheckpointCompatibility(manager, task.id, settings);
+        } catch (error) {
+          return sendJson(response, 422, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        if (!manager.resume(task.id)) {
+          return sendJson(response, 409, {
+            error: "task is not recoverable",
+          });
+        }
+        return sendJson(response, 202, manager.get(task.id));
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "rerun" && segments.length === 4
+      ) {
+        const body = await readJsonBody(request);
+        const fromStep = validStepId(body.fromStep);
+        if (!fromStep) {
+          return sendJson(response, 422, { error: "fromStep is required" });
+        }
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        try {
+          assertCurrentCheckpointCompatibility(manager, task.id, settings);
+        } catch (error) {
+          return sendJson(response, 422, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        if (!manager.rerun(task.id, fromStep)) {
+          return sendJson(response, 409, {
+            error: "task cannot be rerun from this step",
+          });
+        }
+        return sendJson(response, 202, manager.get(task.id));
+      }
+
       if (
         request.method === "POST" &&
         segments[0] === "api" &&
@@ -276,16 +426,36 @@ export function createApiServer(
       ) {
         const body = await readJsonBody(request);
         const answer = typeof body.answer === "string" ? body.answer : "";
+        const requestId = typeof body.requestId === "string"
+          ? body.requestId.trim()
+          : "";
         if (!answer.trim()) {
           return sendJson(response, 422, {
             error: "answer must be a non-empty string",
+          });
+        }
+        if (!requestId) {
+          return sendJson(response, 422, {
+            error: "requestId is required",
           });
         }
         const task = manager.get(segments[2]);
         if (!task) {
           return sendJson(response, 404, { error: "task not found" });
         }
-        if (!manager.answerInput(segments[2], answer)) {
+        if (task.status !== "needs_input" ||
+            task.pendingInput?.requestId !== requestId) {
+          return sendJson(response, 409, {
+            error: "task is not waiting for input",
+          });
+        }
+        if (task.pendingInput.kind === "approval" &&
+            answer.trim() !== "approved" && answer.trim() !== "declined") {
+          return sendJson(response, 422, {
+            error: "approval answer must be approved or declined",
+          });
+        }
+        if (!manager.answerInput(segments[2], answer, requestId)) {
           return sendJson(response, 409, {
             error: "task is not waiting for input",
           });
@@ -558,13 +728,14 @@ function streamEvents(
 
 async function readJsonBody(
   request: NodeJS.ReadableStream,
+  maximumBytes = MAX_BODY_BYTES,
 ): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let length = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     length += buffer.length;
-    if (length > MAX_BODY_BYTES) {
+    if (length > maximumBytes) {
       throw new Error("request body is too large");
     }
     chunks.push(buffer);
@@ -595,6 +766,34 @@ function sendJson(
   response.end(JSON.stringify(body));
 }
 
+function validStepId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized && normalized.length <= 120 ? normalized : undefined;
+}
+
+function assertCurrentCheckpointCompatibility(
+  manager: ResearchTaskManager,
+  taskId: string,
+  settings: RuntimeSettingsStore | undefined,
+): void {
+  const checkpoint = manager.checkpoint(taskId);
+  if (!checkpoint) {
+    throw new Error("此任务没有可用的恢复检查点。");
+  }
+  const task = manager.get(taskId);
+  if (!settings || !task?.researchProfile || !task.researchCapabilities) return;
+  const runtime = settings.getRuntimeSettings();
+  assertCheckpointCompatible(
+    checkpoint,
+    checkpointRuntimeFingerprint(runtime),
+    checkpointPolicyFingerprint(
+      task.researchProfile,
+      task.researchCapabilities,
+    ),
+  );
+}
+
 if (
   process.argv[1] &&
   fileURLToPath(import.meta.url) === resolve(process.argv[1])
@@ -616,12 +815,15 @@ if (
   const manager = new ResearchTaskManager(
     (topic, onEvent, controls) =>
       runResearchTopic(topic, {
+        taskId: controls.taskId,
         onEvent,
         requestInput: controls.requestInput,
         signal: controls.signal,
         settings: settings.getRuntimeSettings(),
         researchProfile: controls.researchProfile,
         researchCapabilities: controls.researchCapabilities,
+        execution: controls.execution,
+        saveCheckpoint: controls.saveCheckpoint,
       }),
     taskStore,
     {

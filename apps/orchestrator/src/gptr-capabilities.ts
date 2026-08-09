@@ -168,3 +168,10 @@ function parseRetrieverCapability(value: unknown): RetrieverCapability {
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+
+function arrayValue(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`GPT Researcher returned invalid ${label}.`);
+  }
+  return value;
+}

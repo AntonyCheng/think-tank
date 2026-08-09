@@ -2,16 +2,53 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertCheckpointCompatible,
   isApprovalGranted,
   semanticResearchStage,
   summarizeResearchEvent,
 } from "../src/research-runner.js";
+import {
+  checkpointHash,
+  type WorkflowCheckpoint,
+} from "../src/workflow-checkpoint.js";
 
-test("recognizes explicit AO approval answers", () => {
-  for (const answer of ["yes", "Y", "true", "1", "是", "同意", "批准", "继续"]) {
+test("rejects recovery when runtime or research policy fingerprints change", () => {
+  const workflowYaml = "name: checkpoint";
+  const inputs = { topic: "研究话题" };
+  const checkpoint: WorkflowCheckpoint = {
+    schemaVersion: 1,
+    taskId: "compatibility-check",
+    runId: "run-initial",
+    reason: "initial",
+    sequence: 1,
+    createdAt: "2026-08-04T00:00:00.000Z",
+    workflow: { yaml: workflowYaml, sha256: checkpointHash(workflowYaml) },
+    inputs,
+    inputHash: checkpointHash(inputs),
+    runtimeFingerprint: "runtime-v1",
+    policyFingerprint: "policy-v1",
+    completedSteps: [],
+    outputVariables: {},
+    evidenceBundles: [],
+  };
+
+  assert.doesNotThrow(() =>
+    assertCheckpointCompatible(checkpoint, "runtime-v1", "policy-v1"));
+  assert.throws(
+    () => assertCheckpointCompatible(checkpoint, "runtime-v2", "policy-v1"),
+    /模型或运行配置已变化/u,
+  );
+  assert.throws(
+    () => assertCheckpointCompatible(checkpoint, "runtime-v1", "policy-v2"),
+    /研究策略已变化/u,
+  );
+});
+
+test("recognizes the explicit AO approval decision", () => {
+  for (const answer of ["approved", " approved "]) {
     assert.equal(isApprovalGranted(answer), true);
   }
-  for (const answer of ["no", "否", "不同意", "", "maybe"]) {
+  for (const answer of ["yes", "同意", "declined", "", "maybe"]) {
     assert.equal(isApprovalGranted(answer), false);
   }
 });
@@ -117,8 +154,8 @@ test("translates known GPTR progress details into concise Chinese", () => {
     },
     {
       stage: "context_combined",
-      output: "📚 Combined research context: 0 MCP sources, web content",
-      expected: "已合并研究上下文：0 个 MCP 来源，并纳入网页内容。",
+      output: "📚 Combined research context: web content",
+      expected: "研究上下文已合并。",
     },
     {
       stage: "research_step_finalized",

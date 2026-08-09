@@ -36,7 +36,12 @@ def current_research_environment(
         ),
         ResearchCapabilities(
             modes=("standard", "deep", "synthesis"),
-            source_modes=("web", "urls"),
+            source_modes=(
+                "web",
+                "urls",
+                "local",
+                "hybrid",
+            ),
             url_source_modes=("standard",),
             domain_filter_modes=("standard",),
             retrievers=retrievers,

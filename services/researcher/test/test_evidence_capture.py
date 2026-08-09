@@ -64,7 +64,7 @@ def test_captures_standard_gptr_evidence_through_public_methods() -> None:
                     "url": "https://example.com/report",
                     "title": "行业报告",
                     "sourceType": "web",
-                    "summary": ("可验证的行业数据 " * 200).strip()[:1000],
+                    "summary": ("可验证的行业数据 " * 200).strip(),
             },
             {
                 "visibility": "public",
@@ -102,3 +102,22 @@ def test_synthesis_context_avoids_duplicate_raw_context_when_report_exists() -> 
     assert "# Market" in context
     assert "https://example.com/source" in context
     assert "RAW-CONTEXT-MUST-NOT-APPEAR" not in context
+
+
+def test_synthesis_context_hides_private_source_locator() -> None:
+    context = render_synthesis_context(
+        "Write a concise synthesis.",
+        [{
+            "aoStepId": "restricted",
+            "report": {"content": "# Brief\n\nSource-backed finding."},
+            "sources": [{
+                "visibility": "private",
+                "locator": "document:doc_private_123",
+                "title": "Local document",
+                "summary": "Restricted material was parsed.",
+            }],
+        }],
+    )
+
+    assert "Restricted source: Local document" in context
+    assert "document:doc_private_123" not in context
