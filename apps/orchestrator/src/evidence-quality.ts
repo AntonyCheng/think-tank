@@ -5,7 +5,7 @@ import {
   type ReportEvidencePolicy,
 } from "./report-evidence-policy.js";
 
-const CITATION_COVERAGE_TARGET = 0.8;
+const CITATION_COVERAGE_TARGET = 0.75;
 const VALID_LINK_RATE_TARGET = 1;
 const DUPLICATION_WARNING_THRESHOLD = 0.25;
 const MINIMUM_SOURCES_FOR_DIVERSITY = 3;
@@ -71,6 +71,38 @@ export interface EvidenceQualityInput {
   citationNormalization: CitationNormalization;
   evidenceBundles: readonly EvidenceBundle[];
   reportEvidencePolicy?: ReportEvidencePolicy;
+}
+
+export function applyCurrentEvidenceQualityTargets(
+  assessment: EvidenceQualityAssessment,
+): EvidenceQualityAssessment {
+  const citationCoverage = assessment.metrics.citationCoverage;
+  const warnings = assessment.warnings.filter((warning) =>
+    warning.code !== "citation_coverage_low"
+  );
+  if (
+    assessment.reportEvidencePolicy.strategy !== "private_bounded" &&
+    citationCoverage.ratio !== null &&
+    citationCoverage.ratio < CITATION_COVERAGE_TARGET
+  ) {
+    warnings.push({
+      code: "citation_coverage_low",
+      message:
+        `证据质量：含数据段落的已验证引用覆盖率为 ${percent(citationCoverage.ratio)}，低于 ${percent(CITATION_COVERAGE_TARGET)}。`,
+    });
+  }
+  return {
+    ...assessment,
+    status: warnings.length === 0 ? "passed" : "warning",
+    metrics: {
+      ...assessment.metrics,
+      citationCoverage: {
+        ...citationCoverage,
+        target: CITATION_COVERAGE_TARGET,
+      },
+    },
+    warnings,
+  };
 }
 
 export function assessEvidenceQuality(

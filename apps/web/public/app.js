@@ -1190,6 +1190,7 @@ async function loadTask(taskId) {
     const task = await response.json();
     if (!response.ok) throw new Error(task.error || "无法读取任务结果");
     setTaskLifecycle(task);
+    setStatus(task.status);
     updateResearchTelemetry(
       task.researchTelemetry,
       isTerminalStatus(task.status),

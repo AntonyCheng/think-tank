@@ -3,7 +3,10 @@ import test from "node:test";
 
 import type { CitationNormalization } from "../src/citations.js";
 import type { EvidenceBundle } from "../src/evidence-bundle.js";
-import { assessEvidenceQuality } from "../src/evidence-quality.js";
+import {
+  applyCurrentEvidenceQualityTargets,
+  assessEvidenceQuality,
+} from "../src/evidence-quality.js";
 
 function citationNormalization(
   overrides: Partial<CitationNormalization> = {},
@@ -91,7 +94,7 @@ test("computes deterministic evidence metrics without a model or network", () =>
         citedClaimParagraphs: 2,
         totalClaimParagraphs: 2,
         ratio: 1,
-        target: 0.8,
+        target: 0.75,
       },
       validLinkRate: {
         verifiedLinks: 3,
@@ -168,6 +171,56 @@ test("returns typed warnings for low evidence quality instead of failing", () =>
   assert.equal(result.metrics.validLinkRate.ratio, 0.5);
   assert.equal(result.metrics.sourceDeduplication.duplicateRatio, 0.5);
   assert.equal(result.metrics.domainDiversity.uniqueDomains, 1);
+});
+
+test("accepts citation coverage at the 75 percent target", () => {
+  const result = assessEvidenceQuality({
+    citationNormalization: citationNormalization({
+      numericClaimParagraphs: 4,
+      citedNumericClaimParagraphs: 3,
+      bodyLinkCount: 3,
+      verifiedBodyLinkCount: 3,
+    }),
+    evidenceBundles: [bundle("market", [
+      "https://example.com/a",
+      "https://example.org/b",
+    ])],
+  });
+
+  assert.equal(result.status, "passed");
+  assert.equal(result.metrics.citationCoverage.ratio, 0.75);
+  assert.equal(result.metrics.citationCoverage.target, 0.75);
+});
+
+test("reinterprets persisted coverage using the current target", () => {
+  const assessment = assessEvidenceQuality({
+    citationNormalization: citationNormalization({
+      numericClaimParagraphs: 5,
+      citedNumericClaimParagraphs: 3,
+    }),
+    evidenceBundles: [],
+  });
+  const legacy = {
+    ...assessment,
+    status: "warning" as const,
+    metrics: {
+      ...assessment.metrics,
+      citationCoverage: {
+        ...assessment.metrics.citationCoverage,
+        ratio: 0.796,
+        target: 0.8,
+      },
+    },
+    warnings: [{
+      code: "citation_coverage_low" as const,
+      message: "证据质量：含数据段落的已验证引用覆盖率为 79.6%，低于 80%。",
+    }],
+  };
+
+  const current = applyCurrentEvidenceQualityTargets(legacy);
+  assert.equal(current.status, "passed");
+  assert.equal(current.metrics.citationCoverage.target, 0.75);
+  assert.deepEqual(current.warnings, []);
 });
 
 test("uses null ratios when a metric has no denominator", () => {

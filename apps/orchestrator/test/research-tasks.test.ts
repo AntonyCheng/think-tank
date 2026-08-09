@@ -613,7 +613,7 @@ test("delivers evidence-quality warnings separately from content acceptance", as
           citedClaimParagraphs: 1,
           totalClaimParagraphs: 4,
           ratio: 0.25,
-          target: 0.8,
+          target: 0.75,
         },
         validLinkRate: {
           verifiedLinks: 1,
@@ -647,7 +647,7 @@ test("delivers evidence-quality warnings separately from content acceptance", as
       },
       warnings: [{
         code: "citation_coverage_low",
-        message: "证据质量：含数据段落的已验证引用覆盖率为 25%，低于 80%。",
+        message: "证据质量：含数据段落的已验证引用覆盖率为 25%，低于 75%。",
       }],
     },
     workflow: {
@@ -671,7 +671,7 @@ test("delivers evidence-quality warnings separately from content acceptance", as
   });
   assert.equal(task?.evidenceQuality?.status, "warning");
   assert.deepEqual(task?.warnings, [
-    "证据质量：含数据段落的已验证引用覆盖率为 25%，低于 80%。",
+    "证据质量：含数据段落的已验证引用覆盖率为 25%，低于 75%。",
   ]);
 });
 

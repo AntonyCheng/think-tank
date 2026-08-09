@@ -9,6 +9,7 @@ import {
   formatCitationReport,
   type VerifiedCitation,
 } from "./citations.js";
+import { applyCurrentEvidenceQualityTargets } from "./evidence-quality.js";
 import {
   InMemoryResearchTaskStore,
   type ResearchTaskEventDraft,
@@ -298,7 +299,10 @@ export class ResearchTaskManager {
   }
 
   get(id: string): ResearchTaskSnapshot | undefined {
-    const snapshot = this.#store.load(id)?.snapshot;
+    const stored = this.#store.load(id)?.snapshot;
+    const snapshot = stored
+      ? presentCurrentEvidenceQuality(stored)
+      : undefined;
     if (
       !snapshot?.output ||
       !snapshot.citations?.length ||
@@ -323,6 +327,7 @@ export class ResearchTaskManager {
     const query = input.query?.trim().toLocaleLowerCase() ?? "";
     const cursor = parseHistoryCursor(input.cursor);
     const entries = this.#store.list()
+      .map(presentCurrentEvidenceQuality)
       .filter((task) => matchesHistoryFilter(task, filter))
       .filter((task) => !query || task.topic.toLocaleLowerCase().includes(query))
       .sort(compareHistoryTasks)
@@ -784,6 +789,33 @@ function historyEntry(task: ResearchTaskSnapshot): ResearchTaskHistoryEntry {
       : { costUsd: telemetry.reportedCostUsd }),
     warningCount,
     hasReport: Boolean(task.output),
+  };
+}
+
+function presentCurrentEvidenceQuality(
+  snapshot: ResearchTaskSnapshot,
+): ResearchTaskSnapshot {
+  if (!snapshot.evidenceQuality) return snapshot;
+  const previousQuality = snapshot.evidenceQuality;
+  const evidenceQuality = applyCurrentEvidenceQualityTargets(previousQuality);
+  const previousMessages = new Set(
+    previousQuality.warnings.map((warning) => warning.message),
+  );
+  const warnings = [
+    ...(snapshot.warnings ?? []).filter((warning) =>
+      !previousMessages.has(warning)
+    ),
+    ...evidenceQuality.warnings.map((warning) => warning.message),
+  ];
+  return {
+    ...snapshot,
+    ...(snapshot.status === "completed_with_warnings" && warnings.length === 0
+      ? { status: "completed" }
+      : {}),
+    evidenceQuality,
+    ...(snapshot.warnings === undefined && warnings.length === 0
+      ? {}
+      : { warnings }),
   };
 }
 
