@@ -24,6 +24,7 @@ import {
 } from "./report-editor-audit.js";
 
 const WHOLE_DOCUMENT_CHUNK_CHARACTERS = 24_000;
+const WHOLE_DOCUMENT_EDIT_CONCURRENCY = 4;
 
 export type ReportMessageRole = "user" | "assistant" | "event";
 export type ReportEditOperationState = "proposed" | "applied" | "rejected" | "stale";
@@ -86,6 +87,9 @@ export interface ReportSearchResult extends ReportEditorSource {
   taskId: string;
   provider: string;
   snippet?: string;
+  content?: string;
+  fetchStatus?: "fetched" | "failed";
+  fetchError?: string;
   selected: boolean;
   adoptedOperationId?: string;
   createdAt: string;
@@ -120,7 +124,25 @@ export interface ReportEditorModelInput {
     role: "user" | "assistant";
     content: string;
   }>;
-  sources?: ReportEditorSource[];
+  sources?: Array<ReportEditorSource & { snippet?: string; content?: string }>;
+}
+
+export type ReportAssistantIntent = "chat" | "research" | "edit" | "edit_with_research" | "clarify";
+
+export interface ReportAssistantPlan {
+  intent: ReportAssistantIntent;
+  query?: string;
+  urls: string[];
+  reply?: string;
+  editInstruction?: string;
+  targetBlockIds: string[];
+}
+
+export interface ReportAssistantPlanInput {
+  instruction: string;
+  scope: "blocks" | "document" | "text";
+  reportOutline: string;
+  conversationHistory: Array<{ role: "user" | "assistant"; content: string }>;
 }
 
 export interface ReportEditorRewrite {
@@ -130,6 +152,8 @@ export interface ReportEditorRewrite {
 
 export interface ReportEditorModel {
   rewrite(input: ReportEditorModelInput): Promise<string | ReportEditorRewrite>;
+  plan?(input: ReportAssistantPlanInput): Promise<ReportAssistantPlan>;
+  answer?(input: ReportEditorModelInput): Promise<string>;
 }
 
 export class OpenAIReportEditorModel implements ReportEditorModel {
@@ -142,6 +166,62 @@ export class OpenAIReportEditorModel implements ReportEditorModel {
       apiKey: config.api_key,
       baseUrl: config.base_url,
     });
+  }
+
+  async plan(input: ReportAssistantPlanInput): Promise<ReportAssistantPlan> {
+    const result = await this.#connector.chat(
+      [
+        "You route messages for an AI research-report workspace.",
+        "Return one strict JSON object with: intent, query, urls, reply, editInstruction, targetBlockIds.",
+        "intent must be chat, research, edit, edit_with_research, or clarify.",
+        "Use chat for conversation or questions answerable from the report and conversation.",
+        "Use research when answering requires current external facts or reading a URL, without changing the report.",
+        "Use edit only for an explicit request to change report content using existing context.",
+        "Use edit_with_research only when an explicit report change also needs external evidence.",
+        "Use clarify when the user may be asking either for information or a report change.",
+        "Never infer an edit merely because the workspace is an editor.",
+        "query is a concise web query only when research is needed; otherwise null.",
+        "urls contains every absolute HTTP(S) URL from the request.",
+        "reply is a concise clarification only for clarify; otherwise null.",
+        "editInstruction preserves the user's requested change only for edit intents; otherwise null.",
+        "targetBlockIds contains a contiguous set of exact report block IDs only when the requested edit clearly targets those blocks; otherwise use an empty array.",
+        "A request to rewrite, review, standardize, or change the whole report must use an empty targetBlockIds array.",
+      ].join("\n"),
+      [
+        `Selected scope: ${input.scope}`,
+        `Report outline:\n${input.reportOutline}`,
+        input.conversationHistory.length
+          ? `Conversation:\n${input.conversationHistory.map((item) => `${item.role}: ${item.content}`).join("\n")}`
+          : "",
+        `User message:\n${input.instruction}`,
+      ].filter(Boolean).join("\n\n"),
+      this.#config,
+    );
+    return parseAssistantPlan(result.content, input.instruction);
+  }
+
+  async answer(input: ReportEditorModelInput): Promise<string> {
+    const result = await this.#connector.chat(
+      [
+        "You are a conversational assistant for a completed research report.",
+        "Answer naturally in the user's language. Do not rewrite or modify the report.",
+        "When web sources are provided, answer only from their readable content and cite them with Markdown links.",
+        "State clearly when a page could not be read or the available evidence is insufficient.",
+        "Do not mention internal routing, JSON, writable scopes, or modification proposals.",
+      ].join("\n"),
+      [
+        `Relevant report content:\n${boundedAnswerContext(input.blockMarkdown)}`,
+        input.conversationHistory?.length
+          ? `Conversation:\n${input.conversationHistory.map((item) => `${item.role}: ${item.content}`).join("\n")}`
+          : "",
+        sourcePrompt(input.sources),
+        `User message:\n${input.instruction}`,
+      ].filter(Boolean).join("\n\n"),
+      this.#config,
+    );
+    const answer = result.content.trim();
+    if (!answer) throw new Error("AI did not return an answer");
+    return answer;
   }
 
   async rewrite(input: ReportEditorModelInput): Promise<ReportEditorRewrite> {
@@ -168,9 +248,7 @@ export class OpenAIReportEditorModel implements ReportEditorModel {
               .map((message) => `${message.role}: ${message.content}`)
               .join("\n")}`
           : "",
-        input.sources?.length
-          ? `\nSelected verified sources (cite relevant claims with these Markdown links only):\n${input.sources.map((source) => `- [${source.title}](${source.url})`).join("\n")}`
-          : "",
+        sourcePrompt(input.sources),
       ].filter(Boolean).join("\n"),
       this.#config,
     );
@@ -390,6 +468,9 @@ export class SqliteReportEditorStore implements ReportEditorStore {
         title TEXT NOT NULL,
         url TEXT NOT NULL,
         snippet TEXT,
+        content TEXT,
+        fetch_status TEXT,
+        fetch_error TEXT,
         selected INTEGER NOT NULL DEFAULT 0,
         adopted_operation_id TEXT,
         created_at TEXT NOT NULL
@@ -403,6 +484,9 @@ export class SqliteReportEditorStore implements ReportEditorStore {
     ensureColumn(this.#database, "report_edit_operations", "range_start", "INTEGER");
     ensureColumn(this.#database, "report_edit_operations", "range_end", "INTEGER");
     ensureColumn(this.#database, "report_edit_operations", "source_ids", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn(this.#database, "report_search_results", "content", "TEXT");
+    ensureColumn(this.#database, "report_search_results", "fetch_status", "TEXT");
+    ensureColumn(this.#database, "report_search_results", "fetch_error", "TEXT");
   }
 
   listConversations(taskId: string, blockId?: string): ReportConversation[] {
@@ -550,20 +634,24 @@ export class SqliteReportEditorStore implements ReportEditorStore {
     this.#database.prepare("DELETE FROM report_search_results WHERE session_id = ? AND task_id = ?").run(sessionId, taskId);
     const createdAt = new Date().toISOString();
     const insert = this.#database.prepare(`
-      INSERT INTO report_search_results(id, session_id, task_id, provider, title, url, snippet, selected, adopted_operation_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+      INSERT INTO report_search_results(id, session_id, task_id, provider, title, url, snippet, content, fetch_status, fetch_error, selected, adopted_operation_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
     `);
     const created = results.map((result) => ({ ...result, id: randomUUID(), sessionId, taskId, selected: false, createdAt }));
     for (const result of created) {
-      insert.run(result.id, result.sessionId, result.taskId, result.provider, result.title, result.url, result.snippet ?? null, result.createdAt);
+      insert.run(
+        result.id, result.sessionId, result.taskId, result.provider, result.title, result.url,
+        result.snippet ?? null, result.content ?? null, result.fetchStatus ?? null,
+        result.fetchError ?? null, result.createdAt,
+      );
     }
     return created;
   }
 
   listSearchResults(taskId: string, sessionId?: string): ReportSearchResult[] {
     const rows = sessionId
-      ? this.#database.prepare(`SELECT id, session_id, task_id, provider, title, url, snippet, selected, adopted_operation_id, created_at FROM report_search_results WHERE task_id = ? AND session_id = ? ORDER BY rowid`).all(taskId, sessionId)
-      : this.#database.prepare(`SELECT id, session_id, task_id, provider, title, url, snippet, selected, adopted_operation_id, created_at FROM report_search_results WHERE task_id = ? ORDER BY rowid DESC`).all(taskId);
+      ? this.#database.prepare(`SELECT id, session_id, task_id, provider, title, url, snippet, content, fetch_status, fetch_error, selected, adopted_operation_id, created_at FROM report_search_results WHERE task_id = ? AND session_id = ? ORDER BY rowid`).all(taskId, sessionId)
+      : this.#database.prepare(`SELECT id, session_id, task_id, provider, title, url, snippet, content, fetch_status, fetch_error, selected, adopted_operation_id, created_at FROM report_search_results WHERE task_id = ? ORDER BY rowid DESC`).all(taskId);
     return (rows as unknown as ReportSearchResultRow[]).map(searchResultFromRow);
   }
 
@@ -659,6 +747,9 @@ interface ReportSearchResultRow {
   title: string;
   url: string;
   snippet: string | null;
+  content: string | null;
+  fetch_status: "fetched" | "failed" | null;
+  fetch_error: string | null;
   selected: number;
   adopted_operation_id: string | null;
   created_at: string;
@@ -702,6 +793,9 @@ function searchResultFromRow(row: ReportSearchResultRow): ReportSearchResult {
     title: row.title,
     url: row.url,
     ...(row.snippet ? { snippet: row.snippet } : {}),
+    ...(row.content ? { content: row.content } : {}),
+    ...(row.fetch_status ? { fetchStatus: row.fetch_status } : {}),
+    ...(row.fetch_error ? { fetchError: row.fetch_error } : {}),
     selected: Boolean(row.selected),
     ...(row.adopted_operation_id ? { adoptedOperationId: row.adopted_operation_id } : {}),
     createdAt: row.created_at,
@@ -755,6 +849,87 @@ export class ReportEditorService {
     return this.store.listOperations(taskId, blockId);
   }
 
+  async planMessage(input: {
+    taskId: string;
+    scope: "blocks" | "document" | "text";
+    blockIds: string[];
+    rangeStart?: number;
+    rangeEnd?: number;
+    documentVersion: number;
+    originalFingerprint?: string;
+    originalText?: string;
+    instruction: string;
+    conversationId?: string;
+  }): Promise<ReportAssistantPlan> {
+    const { document } = this.#requireCurrentScope(input);
+    if (!this.model.plan) {
+      return { intent: "edit", urls: [], targetBlockIds: [], editInstruction: input.instruction };
+    }
+    const conversationHistory = input.conversationId
+      ? this.#conversationHistory(input.taskId, input.conversationId)
+      : [];
+    return this.model.plan({
+      instruction: input.instruction,
+      scope: input.scope,
+      reportOutline: reportOutline(document),
+      conversationHistory,
+    });
+  }
+
+  async answerMessage(input: {
+    taskId: string;
+    scope: "blocks" | "document" | "text";
+    blockIds: string[];
+    rangeStart?: number;
+    rangeEnd?: number;
+    documentVersion: number;
+    originalFingerprint?: string;
+    originalText?: string;
+    instruction: string;
+    conversationId?: string;
+    sources?: ReportSearchResult[];
+    fixedReply?: string;
+  }): Promise<{ conversation: ReportConversation; document: ReportDocument; summary: string }> {
+    const { document, range } = this.#requireCurrentScope(input);
+    const scopeKey = input.scope === "document" ? "document" : range.blockIds.join(",");
+    const conversation = this.#resolveConversation(input.taskId, scopeKey, input.conversationId);
+    const conversationHistory = this.store.listMessages(conversation.id)
+      .filter((message): message is ReportMessage & { role: "user" | "assistant" } =>
+        message.role === "user" || message.role === "assistant")
+      .slice(-10)
+      .map((message) => ({ role: message.role, content: message.content }));
+    this.store.addMessage({
+      conversationId: conversation.id,
+      taskId: input.taskId,
+      blockId: scopeKey,
+      role: "user",
+      content: input.instruction,
+      documentVersion: document.version,
+      blockFingerprint: reportMarkdownFingerprint(range.markdown),
+    });
+    let summary = input.fixedReply?.trim();
+    if (!summary) {
+      if (!this.model.answer) throw new Error("report conversation requires configured model settings");
+      summary = (await this.model.answer({
+        blockMarkdown: range.markdown,
+        instruction: input.instruction,
+        conversationHistory,
+        sources: input.sources,
+      })).trim();
+    }
+    if (!summary) throw new Error("AI did not return an answer");
+    this.store.addMessage({
+      conversationId: conversation.id,
+      taskId: input.taskId,
+      blockId: scopeKey,
+      role: "assistant",
+      content: summary,
+      documentVersion: document.version,
+      blockFingerprint: reportMarkdownFingerprint(range.markdown),
+    });
+    return { conversation, document, summary };
+  }
+
   async propose(input: {
     taskId: string;
     scope?: "blocks" | "document" | "text";
@@ -802,15 +977,6 @@ export class ReportEditorService {
       documentVersion: input.documentVersion,
       blockFingerprint: reportMarkdownFingerprint(range.markdown),
     });
-    this.store.addMessage({
-      conversationId: conversation.id,
-      taskId: input.taskId,
-      blockId: scopeKey,
-      role: "event",
-      content: `已理解修改范围：${scope === "document" ? "整篇报告" : `连续 ${range.blockIds.length} 个内容块`}。正在生成修改建议。`,
-      documentVersion: input.documentVersion,
-      blockFingerprint: reportMarkdownFingerprint(range.markdown),
-    });
     const rewrite = await this.#rewriteScope({
       document,
       range,
@@ -852,10 +1018,12 @@ export class ReportEditorService {
     const document = this.documents.get(taskId);
     if (!document) throw new Error("report document was not found");
     const adopted = this.store.adoptedSearchResults(taskId);
-    return auditReportCitations(document.currentMarkdown, document.version, [
-      ...sources,
-      ...adopted,
-    ]);
+    return auditReportCitations({
+      markdown: document.currentMarkdown,
+      baselineMarkdown: document.baselineMarkdown,
+      version: document.version,
+      sources: [...sources, ...adopted],
+    });
   }
 
   recordSearch(input: {
@@ -1062,6 +1230,13 @@ export class ReportEditorService {
     conversationHistory: Array<{ role: "user" | "assistant"; content: string }>;
     sources: ReportEditorSource[];
   }): Promise<{ replacementMarkdown: string; reply?: string }> {
+    const deterministic = deterministicMarkdownEdit(input.range.markdown, input.instruction, input.scope);
+    if (deterministic !== undefined) {
+      return {
+        replacementMarkdown: deterministic,
+        reply: "已完成这项精确修改，右侧已生成预览，请确认后应用。",
+      };
+    }
     if (
       input.scope !== "document" ||
       input.range.markdown.length <= WHOLE_DOCUMENT_CHUNK_CHARACTERS
@@ -1083,18 +1258,21 @@ export class ReportEditorService {
     }
 
     const chunks = documentEditorChunks(input.document);
-    const rewrites: Array<{ replacementMarkdown: string; reply?: string }> = [];
-    for (let index = 0; index < chunks.length; index += 1) {
-      const chunk = chunks[index]!;
-      rewrites.push(await this.#rewriteChunk({
+    const rewrites = await mapWithConcurrency(chunks, WHOLE_DOCUMENT_EDIT_CONCURRENCY, async (chunk, index) => {
+      return this.#rewriteChunk({
         blockMarkdown: chunk.markdown,
-        instruction: `${input.instruction}\n\nThis is part ${index + 1} of ${chunks.length} of one report. Return this part unchanged when the request does not require a change here.`,
+        instruction: [
+          input.instruction,
+          `This is part ${index + 1} of ${chunks.length} of one report.`,
+          "Return this part byte-for-byte unchanged when the request does not require a change here.",
+          "Do not add commentary, JSON wrappers, or content belonging to another part.",
+        ].join("\n\n"),
         previousMarkdown: chunks[index - 1]?.markdown,
         nextMarkdown: chunks[index + 1]?.markdown,
         conversationHistory: input.conversationHistory,
         sources: input.sources,
-      }));
-    }
+      });
+    });
     return {
       replacementMarkdown: rewrites.map((item, index) =>
         item.replacementMarkdown + chunks[index]!.separatorAfter,
@@ -1110,8 +1288,12 @@ export class ReportEditorService {
       nextMarkdown: boundedEditorContext(input.nextMarkdown),
     });
     const rewrite = typeof result === "string" ? { replacementMarkdown: result } : result;
+    const replacementMarkdown = removeMarkdownFence(rewrite.replacementMarkdown);
+    if (looksLikeStructuredEnvelope(replacementMarkdown)) {
+      throw new Error("AI returned structured data instead of report Markdown; the report was not changed");
+    }
     return {
-      replacementMarkdown: removeMarkdownFence(rewrite.replacementMarkdown),
+      replacementMarkdown,
       reply: rewrite.reply,
     };
   }
@@ -1151,6 +1333,18 @@ export class ReportEditorService {
     return conversation;
   }
 
+  #conversationHistory(taskId: string, conversationId: string): Array<{ role: "user" | "assistant"; content: string }> {
+    const conversation = this.store.getConversation(conversationId);
+    if (!conversation || conversation.taskId !== taskId) {
+      throw new Error("the report conversation does not belong to this task");
+    }
+    return this.store.listMessages(conversation.id)
+      .filter((message): message is ReportMessage & { role: "user" | "assistant" } =>
+        message.role === "user" || message.role === "assistant")
+      .slice(-10)
+      .map((message) => ({ role: message.role, content: message.content }));
+  }
+
   #requireProposedOperation(taskId: string, operationId: string): ReportEditOperation {
     const operation = this.store.getOperation(operationId);
     if (!operation || operation.taskId !== taskId) throw new Error("report edit operation was not found");
@@ -1188,21 +1382,150 @@ function removeMarkdownFence(value: string): string {
 
 function parseRewriteResult(value: string): ReportEditorRewrite {
   const cleaned = removeMarkdownFence(value);
-  try {
-    const parsed = JSON.parse(cleaned) as {
-      replacementMarkdown?: unknown;
-      reply?: unknown;
-    };
-    if (parsed && typeof parsed === "object" && typeof parsed.replacementMarkdown === "string") {
-      return {
-        replacementMarkdown: parsed.replacementMarkdown,
-        reply: typeof parsed.reply === "string" ? parsed.reply : undefined,
-      };
-    }
-  } catch {
-    // Older or non-JSON-compatible models can still return the replacement directly.
+  const parsed = parseJsonObject(cleaned) as {
+    replacementMarkdown?: unknown;
+    reply?: unknown;
+  };
+  if (typeof parsed.replacementMarkdown !== "string") {
+    throw new Error("AI returned an invalid report edit; the report was not changed");
   }
-  return { replacementMarkdown: value };
+  const replacementMarkdown = parsed.replacementMarkdown;
+  if (looksLikeStructuredEnvelope(replacementMarkdown)) {
+    throw new Error("AI returned a nested structured response; the report was not changed");
+  }
+  return {
+    replacementMarkdown,
+    reply: typeof parsed.reply === "string" ? parsed.reply : undefined,
+  };
+}
+
+function parseAssistantPlan(value: string, instruction: string): ReportAssistantPlan {
+  const parsed = parseJsonObject(removeMarkdownFence(value)) as Record<string, unknown>;
+  const intents = new Set<ReportAssistantIntent>(["chat", "research", "edit", "edit_with_research", "clarify"]);
+  if (typeof parsed.intent !== "string" || !intents.has(parsed.intent as ReportAssistantIntent)) {
+    throw new Error("AI could not determine how to handle this message");
+  }
+  const explicitUrls = extractHttpUrls(instruction);
+  let intent = parsed.intent as ReportAssistantIntent;
+  if (explicitUrls.length && intent === "chat") intent = "research";
+  const urls = [...new Set([
+    ...explicitUrls,
+    ...(Array.isArray(parsed.urls) ? parsed.urls.filter((item): item is string => typeof item === "string") : []),
+  ].filter(isPublicHttpUrl))];
+  return {
+    intent,
+    urls,
+    targetBlockIds: Array.isArray(parsed.targetBlockIds)
+      ? [...new Set(parsed.targetBlockIds.filter((item): item is string => typeof item === "string" && item.trim() !== "").map((item) => item.trim()))]
+      : [],
+    ...(typeof parsed.query === "string" && parsed.query.trim() ? { query: parsed.query.trim() } : {}),
+    ...(typeof parsed.reply === "string" && parsed.reply.trim() ? { reply: parsed.reply.trim() } : {}),
+    ...(typeof parsed.editInstruction === "string" && parsed.editInstruction.trim()
+      ? { editInstruction: parsed.editInstruction.trim() }
+      : {}),
+  };
+}
+
+function parseJsonObject(value: string): Record<string, unknown> {
+  const candidates = [value.trim()];
+  const first = value.indexOf("{");
+  const last = value.lastIndexOf("}");
+  if (first >= 0 && last > first) candidates.push(value.slice(first, last + 1));
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Try the next bounded candidate. Invalid output must never become report Markdown.
+    }
+  }
+  throw new Error("AI returned invalid structured output; the report was not changed");
+}
+
+function looksLikeStructuredEnvelope(value: string): boolean {
+  const cleaned = removeMarkdownFence(value).trim();
+  return /^\{\s*["'](?:replacementMarkdown|reply|intent)["']\s*:/u.test(cleaned);
+}
+
+function extractHttpUrls(value: string): string[] {
+  return [...value.matchAll(/https?:\/\/[^\s<>()\[\]{}"']+/giu)].map((match) => match[0]!.replace(/[.,;:!?，。；：！？]+$/u, ""));
+}
+
+function isPublicHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function sourcePrompt(sources: ReportEditorModelInput["sources"]): string {
+  if (!sources?.length) return "";
+  return [
+    "Readable web sources:",
+    ...sources.map((source, index) => [
+      `${index + 1}. [${source.title}](${source.url})`,
+      source.content ? boundedSourceContent(source.content) : source.snippet ?? "[Page body could not be read]",
+    ].join("\n")),
+  ].join("\n\n");
+}
+
+function boundedSourceContent(value: string): string {
+  return value.length <= 12_000 ? value : `${value.slice(0, 12_000)}\n[content truncated]`;
+}
+
+function boundedAnswerContext(value: string): string {
+  return value.length <= 18_000 ? value : `${value.slice(0, 9_000)}\n[report context shortened]\n${value.slice(-9_000)}`;
+}
+
+function reportOutline(document: ReportDocument): string {
+  return document.blocks.slice(0, 300).map((block) =>
+    `${block.id} [${block.kind}]: ${block.text.slice(0, 120)}`,
+  ).join("\n");
+}
+
+function deterministicMarkdownEdit(
+  markdown: string,
+  instruction: string,
+  scope: "blocks" | "document" | "text",
+): string | undefined {
+  if (scope === "document") {
+    const title = instruction.match(/(?:把|将)?(?:报告)?标题(?:修改|改)(?:为|成)\s*[“"]([^”"]+)[”"]/u)?.[1]?.trim();
+    if (title) {
+      const updated = markdown.replace(/^(#{1,6}\s+).+$/mu, `$1${title}`);
+      if (updated !== markdown) return updated;
+    }
+  }
+  const replacement = instruction.match(/[“"]([^”"]+)[”"]\s*(?:替换为|替换成|改为|改成)\s*[“"]([^”"]*)[”"]/u);
+  if (replacement?.[1] && markdown.includes(replacement[1])) {
+    return markdown.split(replacement[1]).join(replacement[2] ?? "");
+  }
+  const deletion = instruction.match(/(?:删除|去掉)(?:[^“"]{0,30})[“"]([^”"]+)[”"]/u)?.[1];
+  if (deletion && markdown.includes(deletion)) {
+    return markdown.split(deletion).join("");
+  }
+  return undefined;
+}
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  work: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await work(values[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function documentEditorChunks(document: ReportDocument): Array<{ markdown: string; separatorAfter: string }> {

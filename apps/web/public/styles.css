@@ -997,59 +997,6 @@ button {
   line-height: 1.55;
 }
 
-.report-editor-search {
-  display: grid;
-  gap: 8px;
-  flex: 0 0 auto;
-  padding: 10px 2px;
-  border-top: 1px solid var(--line);
-}
-
-.report-editor-search-form {
-  display: flex;
-  gap: 8px;
-}
-
-.report-editor-search-form input {
-  min-width: 0;
-  flex: 1;
-}
-
-.report-editor-search-results {
-  display: grid;
-  gap: 6px;
-  max-height: 180px;
-  overflow-y: auto;
-}
-
-.report-editor-search-result {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 7px 8px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: #101817;
-  cursor: pointer;
-}
-
-.report-editor-search-result span {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-}
-
-.report-editor-search-result strong,
-.report-editor-search-result small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.report-editor-search-result small {
-  color: var(--muted);
-}
-
 .report-editor-message > span,
 .report-editor-proposal > span {
   display: block;
@@ -1181,8 +1128,12 @@ button {
 }
 
 .report-editor-version-review {
-  max-height: 240px;
-  overflow-y: auto;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 190px;
+  max-height: min(40vh, 320px);
+  flex: 0 0 auto;
+  overflow: hidden;
   padding: 12px 26px;
   border-bottom: 1px solid var(--line);
   background: #0a100d;
@@ -1203,8 +1154,12 @@ button {
 
 .report-editor-version-list {
   display: grid;
+  align-content: start;
   gap: 8px;
+  min-height: 0;
   margin-top: 10px;
+  padding-right: 4px;
+  overflow-y: auto;
 }
 
 .report-editor-version-item {
@@ -2176,9 +2131,13 @@ footer {
 .report-editor-audit {
   max-width: 680px;
   margin: 5px 0 0;
-  color: #e1b461;
+  color: #9dc77e;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.report-editor-audit.warning {
+  color: #e1b461;
 }
 
 .report-editor-report.previewing {

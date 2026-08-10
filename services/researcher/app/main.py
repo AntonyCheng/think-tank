@@ -16,6 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from dotenv import dotenv_values
 
 from .contracts import (
+    EditorResearchRequest,
+    EditorResearchResponse,
+    EditorResearchSource,
     EditorSearchRequest,
     EditorSearchResponse,
     ResearchEvent,
@@ -23,6 +26,7 @@ from .contracts import (
     ResearchResponse,
 )
 from .editor_search import search_editor_sources
+from .source_access import SourceAccessError, default_source_materializer
 from . import research_worker
 from .report_processing import (
     collapse_repeated_report_blocks,
@@ -164,6 +168,106 @@ async def search_editor_sources_endpoint(
             timeout_ms=timeout_ms,
         )
         return EditorSearchResponse(results=results, summary=summary)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/editor/research", response_model=EditorResearchResponse)
+async def research_editor_sources_endpoint(
+    request: EditorResearchRequest,
+) -> EditorResearchResponse:
+    query = request.query.strip() if request.query else ""
+    urls = [value.strip() for value in request.urls if value.strip()]
+    if not query and not urls:
+        raise HTTPException(status_code=422, detail="A query or URL is required.")
+    try:
+        catalog = build_retriever_catalog(os.environ)
+        available = {item.id: item for item in catalog.retrievers}
+        requested = tuple(request.retrievers)
+        if len(set(requested)) != len(requested):
+            raise ValueError("Retrievers must not contain duplicates.")
+        if len(requested) > catalog.max_retrievers:
+            raise ValueError("Too many retrievers were requested.")
+        if any(retriever not in available for retriever in requested):
+            raise ValueError("A requested retriever is not available.")
+        results = []
+        runtime_summary: dict[str, Any] = {}
+        if query:
+            timeout_ms = min(available[item].timeout_ms for item in requested)
+            results, runtime_summary = await search_editor_sources(
+                query,
+                requested,
+                limit=request.limit,
+                timeout_ms=timeout_ms,
+            )
+        candidates: list[tuple[str, str, str, str | None]] = [
+            ("specified_url", url, url, None) for url in urls
+        ]
+        candidates.extend(
+            (result.provider, result.title, result.url, result.snippet)
+            for result in results
+        )
+        seen: set[str] = set()
+        unique_candidates: list[tuple[str, str, str, str | None]] = []
+        for candidate in candidates:
+            if candidate[2] in seen or len(unique_candidates) >= request.limit:
+                continue
+            seen.add(candidate[2])
+            unique_candidates.append(candidate)
+        materializer = default_source_materializer()
+        semaphore = asyncio.Semaphore(3)
+
+        async def read_candidate(
+            candidate: tuple[str, str, str, str | None],
+        ) -> EditorResearchSource:
+            provider, title, url, snippet = candidate
+            try:
+                async with semaphore:
+                    materialized = await materializer.materialize([url])
+                if not materialized.sources:
+                    failure = materialized.failures[0] if materialized.failures else None
+                    return EditorResearchSource(
+                        provider=provider,
+                        title=title,
+                        url=url,
+                        snippet=snippet,
+                        fetchStatus="failed",
+                        fetchError=failure.message if failure else "The page did not contain readable text.",
+                    )
+                page = materialized.sources[0]
+                return EditorResearchSource(
+                    provider=provider,
+                    title=page.title or title,
+                    url=page.canonical_url,
+                    snippet=snippet,
+                    content=page.text[:30_000],
+                    fetchStatus="fetched",
+                )
+            except SourceAccessError as exc:
+                return EditorResearchSource(
+                    provider=provider,
+                    title=title,
+                    url=url,
+                    snippet=snippet,
+                    fetchStatus="failed",
+                    fetchError=str(exc),
+                )
+
+        sources = list(await asyncio.gather(*(
+            read_candidate(candidate) for candidate in unique_candidates
+        )))
+        return EditorResearchResponse(
+            query=query or None,
+            sources=sources,
+            summary={
+                **runtime_summary,
+                "requested": len(candidates),
+                "fetched": sum(source.fetch_status == "fetched" for source in sources),
+                "failed": sum(source.fetch_status == "failed" for source in sources),
+            },
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:

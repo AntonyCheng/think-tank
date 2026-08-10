@@ -320,7 +320,7 @@ test("creates and applies a version-protected local report edit through the API"
     conversations: Array<{ messages: Array<{ role: string }> }>;
   };
   assert.deepEqual(conversations.conversations[0]?.messages.map((message) => message.role), [
-    "user", "event", "assistant", "event",
+    "user", "assistant", "event",
   ]);
 });
 

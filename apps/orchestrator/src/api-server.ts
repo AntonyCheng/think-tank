@@ -516,7 +516,7 @@ export function createApiServer(
           return sendJson(response, 409, { error: "report editor is only available after completion" });
         }
         const body = await readJsonBody(request);
-        const scope = body.scope === "document"
+        const scope: "document" | "text" | "blocks" = body.scope === "document"
           ? "document"
           : body.scope === "text" ? "text" : "blocks";
         const requestedBlockIds = Array.isArray(body.blockIds)
@@ -544,7 +544,7 @@ export function createApiServer(
         }
         const document = reportDocuments.getOrCreate(task.id, task.output!);
         try {
-          const result = await reportEditor.propose({
+          const commonInput = {
             taskId: task.id,
             scope,
             blockIds,
@@ -552,13 +552,106 @@ export function createApiServer(
             originalFingerprint,
             ...(scope === "text" ? { rangeStart, rangeEnd, originalText } : {}),
             instruction,
-            ...(sourceIds.length ? { sourceIds: [...new Set(sourceIds)] } : {}),
             ...(typeof body.conversationId === "string" && body.conversationId.trim()
               ? { conversationId: body.conversationId.trim() }
               : {}),
+          };
+          const plan = await reportEditor.planMessage(commonInput);
+          const targetedBlockIds = scope === "document"
+            ? contiguousTargetBlockIds(document, plan.targetBlockIds)
+            : [];
+          const editInput = targetedBlockIds.length
+            ? {
+                ...commonInput,
+                scope: "blocks" as const,
+                blockIds: targetedBlockIds,
+                originalFingerprint: undefined,
+              }
+            : commonInput;
+          if (plan.intent === "chat" || plan.intent === "clarify") {
+            const result = await reportEditor.answerMessage({
+              ...commonInput,
+              ...(plan.intent === "clarify" && plan.reply ? { fixedReply: plan.reply } : {}),
+            });
+            return sendJson(response, 201, {
+              kind: "reply",
+              intent: plan.intent,
+              ...result,
+              audit: reportEditor.audit(task.id, reportEditorSources(task)),
+            });
+          }
+
+          let automaticSources: ReturnType<ReportEditorService["recordSearch"]> | undefined;
+          if (plan.intent === "research" || plan.intent === "edit_with_research") {
+            const catalog = settings
+              ? await loadRetrieverCatalog(settings, researcherServiceUrl(), capabilityProvider)
+              : undefined;
+            const retrievers = catalog
+              ? catalog.retrievers.slice(0, catalog.maxRetrievers).map((item) => item.id)
+              : ["duckduckgo"];
+            const researched = await researchReportSources(researcherServiceUrl(), {
+              query: plan.query ?? (plan.urls.length ? undefined : instruction),
+              urls: plan.urls,
+              retrievers,
+              limit: 5,
+            });
+            automaticSources = reportEditor.recordSearch({
+              taskId: task.id,
+              scopeKey: editInput.scope === "document" ? "document" : editInput.blockIds.join(","),
+              query: plan.query ?? instruction,
+              retrievers,
+              results: researched.sources,
+            });
+            const readableIds = automaticSources.results
+              .filter((source) => source.fetchStatus === "fetched")
+              .map((source) => source.id);
+            reportEditor.selectSearchResults(task.id, automaticSources.session.id, readableIds);
+          }
+
+          if (plan.intent === "research") {
+            const result = await reportEditor.answerMessage({
+              ...commonInput,
+              sources: automaticSources?.results,
+            });
+            return sendJson(response, 201, {
+              kind: "reply",
+              intent: plan.intent,
+              ...result,
+              sources: automaticSources?.results ?? [],
+              audit: reportEditor.audit(task.id, reportEditorSources(task)),
+            });
+          }
+
+          if (
+            plan.intent === "edit_with_research" &&
+            !automaticSources?.results.some((source) => source.fetchStatus === "fetched")
+          ) {
+            const result = await reportEditor.answerMessage({
+              ...commonInput,
+              fixedReply: "我没有成功读取到可用的网页正文，因此没有生成修改，原报告保持不变。你可以提供一个可公开访问的链接，或稍后重试。",
+              sources: automaticSources?.results,
+            });
+            return sendJson(response, 201, {
+              kind: "reply",
+              intent: "clarify",
+              ...result,
+              sources: automaticSources?.results ?? [],
+              audit: reportEditor.audit(task.id, reportEditorSources(task)),
+            });
+          }
+
+          const result = await reportEditor.propose({
+            ...editInput,
+            instruction: plan.editInstruction ?? instruction,
+            ...(automaticSources
+              ? { sourceIds: automaticSources.results.filter((item) => item.fetchStatus === "fetched").map((item) => item.id) }
+              : sourceIds.length ? { sourceIds: [...new Set(sourceIds)] } : {}),
           });
           return sendJson(response, 201, {
+            kind: "proposal",
+            intent: plan.intent,
             ...result,
+            sources: automaticSources?.results ?? [],
             audit: reportEditor.audit(task.id, reportEditorSources(task)),
           });
         } catch (error) {
@@ -962,10 +1055,73 @@ async function searchReportSources(
   return { results };
 }
 
+async function researchReportSources(
+  serviceUrl: string,
+  input: { query?: string; urls: string[]; retrievers: string[]; limit: number },
+): Promise<{
+  sources: Array<{
+    provider: string;
+    title: string;
+    url: string;
+    snippet?: string;
+    content?: string;
+    fetchStatus: "fetched" | "failed";
+    fetchError?: string;
+  }>;
+}> {
+  const response = await fetch(new URL("/editor/research", serviceUrl), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    signal: AbortSignal.timeout(90_000),
+  });
+  const payload = await response.json() as { detail?: unknown; sources?: unknown };
+  if (!response.ok) {
+    throw new Error(typeof payload.detail === "string" ? payload.detail : `source research returned ${response.status}`);
+  }
+  if (!Array.isArray(payload.sources)) throw new Error("source research returned an invalid source list");
+  const sources = payload.sources.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const item = value as Record<string, unknown>;
+    if (
+      typeof item.provider !== "string" ||
+      typeof item.title !== "string" ||
+      typeof item.url !== "string" ||
+      (item.fetchStatus !== "fetched" && item.fetchStatus !== "failed")
+    ) return [];
+    const fetchStatus = item.fetchStatus as "fetched" | "failed";
+    return [{
+      provider: item.provider,
+      title: item.title,
+      url: item.url,
+      ...(typeof item.snippet === "string" ? { snippet: item.snippet } : {}),
+      ...(typeof item.content === "string" ? { content: item.content } : {}),
+      fetchStatus,
+      ...(typeof item.fetchError === "string" ? { fetchError: item.fetchError } : {}),
+    }];
+  });
+  return { sources };
+}
+
 function rebaseResearchProfilePath(path: string): string {
   return path === "$"
     ? "$.researchProfile"
     : `$.researchProfile${path.slice(1)}`;
+}
+
+function contiguousTargetBlockIds(
+  document: { blocks: Array<{ id: string }> },
+  requested: string[],
+): string[] {
+  if (!requested.length) return [];
+  const indexes = [...new Set(requested.flatMap((id) => {
+    const index = document.blocks.findIndex((block) => block.id === id);
+    return index < 0 ? [] : [index];
+  }))].sort((left, right) => left - right);
+  if (!indexes.length || indexes.some((value, index) => index > 0 && value !== indexes[index - 1]! + 1)) {
+    return [];
+  }
+  return indexes.map((index) => document.blocks[index]!.id);
 }
 
 export async function inspectRuntimeReadiness(
@@ -1187,8 +1343,11 @@ function integerEditorOffset(value: unknown): number | undefined {
     : undefined;
 }
 
-function reportEditorSources(task: { citations?: Array<{ title: string; url: string }> }) {
-  return task.citations ?? [];
+function reportEditorSources(task: { citations?: Array<{ id?: string | number; title: string; url: string }> }) {
+  return (task.citations ?? []).map((citation, index) => ({
+    ...citation,
+    referenceId: citation.id ?? index + 1,
+  }));
 }
 
 function isCompletedReportTask(task: { status: string; output?: string }): task is { status: "completed" | "completed_with_warnings"; output: string } {

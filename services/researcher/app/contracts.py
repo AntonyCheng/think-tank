@@ -149,3 +149,32 @@ class EditorSearchResponse(BaseModel):
 
     results: list[EditorSearchResult]
     summary: dict[str, Any]
+
+
+class EditorResearchRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    query: str | None = Field(default=None, max_length=4_000)
+    urls: list[str] = Field(default_factory=list, max_length=8)
+    retrievers: list[ResearchRetriever] = Field(min_length=1, max_length=5)
+    limit: int = Field(default=5, ge=1, le=8)
+
+
+class EditorResearchSource(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    provider: str
+    title: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    snippet: str | None = None
+    content: str | None = None
+    fetch_status: Literal["fetched", "failed"] = Field(alias="fetchStatus")
+    fetch_error: str | None = Field(alias="fetchError", default=None)
+
+
+class EditorResearchResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    query: str | None = None
+    sources: list[EditorResearchSource]
+    summary: dict[str, Any]

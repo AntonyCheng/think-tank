@@ -11,6 +11,7 @@ import {
 } from "../src/report-document-store.js";
 import {
   InMemoryReportEditorStore,
+  OpenAIReportEditorModel,
   ReportEditorService,
   SqliteReportEditorStore,
   type ReportEditorModel,
@@ -49,7 +50,7 @@ test("applies only the proposed block and keeps an auditable conversation", asyn
   assert.equal(applied.document.version, 2);
   assert.deepEqual(
     service.conversations(document.taskId, block.id)[0]?.messages.map((message) => message.role),
-    ["user", "event", "assistant", "event"],
+    ["user", "assistant", "event"],
   );
 });
 
@@ -96,6 +97,65 @@ test("keeps the replacement out of the conversation and carries prior turns forw
   });
   assert.deepEqual(lastInput?.conversationHistory?.map((message) => message.role), ["user", "assistant"]);
   assert.equal(lastInput?.conversationHistory?.[1]?.content, "我已完成修改，右侧已经生成预览。");
+});
+
+test("answers a conversational message without creating an edit operation", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  const service = new ReportEditorService(documents, store, {
+    async plan() {
+      return { intent: "chat", urls: [], targetBlockIds: [] };
+    },
+    async answer() {
+      return "可以，我们可以继续讨论这份报告。";
+    },
+    async rewrite() {
+      throw new Error("rewrite must not be called for chat");
+    },
+  });
+  const document = documents.getOrCreate("report-editor-chat", markdown);
+  const plan = await service.planMessage({
+    taskId: document.taskId,
+    scope: "document",
+    blockIds: [],
+    documentVersion: document.version,
+    instruction: "你能和我聊聊吗？",
+  });
+  assert.equal(plan.intent, "chat");
+  const answer = await service.answerMessage({
+    taskId: document.taskId,
+    scope: "document",
+    blockIds: [],
+    documentVersion: document.version,
+    instruction: "你能和我聊聊吗？",
+  });
+  assert.equal(answer.summary, "可以，我们可以继续讨论这份报告。");
+  assert.equal(service.operations(document.taskId).length, 0);
+  assert.deepEqual(
+    service.conversations(document.taskId, "document")[0]?.messages.map((message) => message.role),
+    ["user", "assistant"],
+  );
+});
+
+test("rejects nested structured output instead of treating it as report markdown", async () => {
+  const editorModel = new OpenAIReportEditorModel(
+    { model: "test", api_key: "test", base_url: "https://example.com/v1" } as never,
+    {
+      async chat() {
+        return {
+          content: JSON.stringify({
+            replacementMarkdown: JSON.stringify({ replacementMarkdown: "corrupt report" }),
+            reply: "done",
+          }),
+          usage: { input_tokens: 0, output_tokens: 0 },
+        };
+      },
+    } as never,
+  );
+  await assert.rejects(
+    () => editorModel.rewrite({ blockMarkdown: markdown, instruction: "Change it." }),
+    /nested structured response/u,
+  );
 });
 
 test("rejects a stale proposal instead of overwriting a newer block", async () => {
@@ -306,6 +366,27 @@ test("supports contiguous multi-block and explicit whole-document scopes", async
   assert.equal(wholeApplied.document.currentMarkdown, "# Revised title\n\nFirst paragraph.\n\nSecond paragraph.");
 });
 
+test("performs exact whole-document replacements without calling the model", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  const document = documents.getOrCreate("report-editor-deterministic", markdown);
+  const service = new ReportEditorService(documents, store, {
+    async rewrite() {
+      throw new Error("the model must not be called for an exact replacement");
+    },
+  });
+  const proposal = await service.propose({
+    taskId: document.taskId,
+    scope: "document",
+    documentVersion: document.version,
+    instruction: "把标题修改为“Revised title”",
+  });
+  assert.equal(
+    proposal.operation.replacementMarkdown,
+    "# Revised title\n\nFirst paragraph.\n\nSecond paragraph.",
+  );
+});
+
 test("chunks a large whole-document edit while applying one previewed version", async () => {
   const documents = new InMemoryReportDocumentStore();
   const store = new InMemoryReportEditorStore();
@@ -314,9 +395,15 @@ test("chunks a large whole-document edit while applying one previewed version", 
   ).join("\n\n");
   const document = documents.getOrCreate("report-editor-chunked", largeMarkdown);
   let calls = 0;
+  let active = 0;
+  let maximumActive = 0;
   const service = new ReportEditorService(documents, store, {
     async rewrite(input) {
       calls += 1;
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
       return { replacementMarkdown: input.blockMarkdown, reply: "Preview ready." };
     },
   });
@@ -330,6 +417,7 @@ test("chunks a large whole-document edit while applying one previewed version", 
   const applied = service.apply(document.taskId, proposal.operation.id);
 
   assert.ok(calls > 1);
+  assert.ok(maximumActive > 1);
   assert.equal(applied.document.currentMarkdown, largeMarkdown);
   assert.equal(applied.document.version, 2);
 });
@@ -392,7 +480,7 @@ test("persists conversations and restores content through a recorded undo", asyn
     assert.equal(undone.document.currentMarkdown, markdown);
     assert.equal(undone.document.version, 3);
     assert.equal(store.getOperation(applied.operation.id)?.undoneOperationId, undone.operation.id);
-    assert.equal(service.conversations(document.taskId, block.id)[0]?.messages.length, 6);
+    assert.equal(service.conversations(document.taskId, block.id)[0]?.messages.length, 5);
   } finally {
     store.close();
     documents.close();

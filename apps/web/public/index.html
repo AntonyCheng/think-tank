@@ -264,14 +264,6 @@
                   </div>
                 </div>
                 <div id="report-editor-conversation" class="report-editor-conversation" aria-live="polite"></div>
-                <section id="report-editor-search" class="report-editor-search">
-                  <form id="report-editor-search-form" class="report-editor-search-form">
-                    <label class="sr-only" for="report-editor-search-query">联网补充资料</label>
-                    <input id="report-editor-search-query" type="search" placeholder="检索可补充的公开资料" maxlength="4000" />
-                    <button id="report-editor-search-submit" class="ghost-button" type="submit">检索</button>
-                  </form>
-                  <div id="report-editor-search-results" class="report-editor-search-results"></div>
-                </section>
                 <div id="report-editor-proposal" class="report-editor-proposal" hidden>
                   <span>修改预览</span>
                   <p>右侧已经显示本次修改效果，确认后将保存到报告。</p>
@@ -281,8 +273,8 @@
                   </div>
                 </div>
                 <form id="report-editor-form" class="report-editor-form">
-                  <label class="sr-only" for="report-editor-instruction">告诉 AI 你想怎么修改</label>
-                  <textarea id="report-editor-instruction" rows="3" required placeholder="告诉 AI 你想怎么修改，例如：把这一段写得更简洁，或补充英国通胀的影响"></textarea>
+                  <label class="sr-only" for="report-editor-instruction">和 AI 对话</label>
+                  <textarea id="report-editor-instruction" rows="3" required placeholder="询问报告内容，或告诉 AI 需要查什么、修改什么"></textarea>
                   <div class="report-editor-actions">
                     <button id="report-editor-submit" type="submit">发送</button>
                     <button id="report-editor-undo" class="ghost-button" type="button" hidden>撤销最近修改</button>

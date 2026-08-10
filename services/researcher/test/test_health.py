@@ -9,6 +9,7 @@ from app.retriever_runtime import (
     RetrieverCapability,
     RetrieverCatalog,
 )
+from app.source_access import MaterializedSource, MaterializedSourceSet
 
 
 def test_health() -> None:
@@ -180,3 +181,45 @@ def test_editor_search_uses_only_configured_retrievers(monkeypatch) -> None:
     assert response.json()["results"][0]["url"] == (
         "https://example.com/statistics"
     )
+
+
+def test_editor_research_reads_the_page_body(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "build_retriever_catalog",
+        lambda _environment: RetrieverCatalog(
+            retrievers=(RetrieverCapability(
+                id="duckduckgo",
+                label="DuckDuckGo",
+                category="web",
+                credential_required=False,
+                timeout_ms=20_000,
+            ),),
+            max_retrievers=1,
+        ),
+    )
+
+    class Materializer:
+        async def materialize(self, urls):
+            url = urls[0]
+            return MaterializedSourceSet((MaterializedSource(
+                requested_url=url,
+                canonical_url=url,
+                title="Harbin profile",
+                media_type="text/html",
+                text="Harbin is introduced through its history and ice tourism.",
+                byte_size=128,
+            ),), 128)
+
+    monkeypatch.setattr(main, "default_source_materializer", Materializer)
+    response = TestClient(app).post(
+        "/editor/research",
+        json={
+            "urls": ["https://example.com/harbin"],
+            "retrievers": ["duckduckgo"],
+        },
+    )
+    assert response.status_code == 200
+    source = response.json()["sources"][0]
+    assert source["fetchStatus"] == "fetched"
+    assert "ice tourism" in source["content"]
