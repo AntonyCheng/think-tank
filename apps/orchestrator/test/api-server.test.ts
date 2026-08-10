@@ -13,6 +13,11 @@ import {
   type ResearchTaskSnapshot,
 } from "../src/research-tasks.js";
 import { InMemoryResearchTaskStore } from "../src/research-task-store.js";
+import { InMemoryReportDocumentStore } from "../src/report-document-store.js";
+import {
+  InMemoryReportEditorStore,
+  ReportEditorService,
+} from "../src/report-editor.js";
 import { RuntimeSettingsStore } from "../src/settings-store.js";
 import type {
   ResearchCapabilityProvider,
@@ -189,6 +194,197 @@ test("lists paginated task history without returning report contents", async (t)
   assert.equal(warningResponse.status, 200);
   const warnings = await warningResponse.json() as { items: Array<{ id: string }> };
   assert.deepEqual(warnings.items.map((item) => item.id), ["history-warning"]);
+});
+
+test("creates a stable report document for a completed task", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot: ResearchTaskSnapshot = {
+    id: "report-document-api-task",
+    topic: "report document",
+    status: "completed",
+    createdAt: "2026-08-04T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
+    output: "# Title\n\nFirst paragraph.\n\nSecond paragraph.",
+  };
+  store.create(snapshot, { type: "task.completed", data: {} });
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }), store);
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const first = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/report-document`)
+    .then((response) => response.json()) as {
+      taskId: string;
+      version: number;
+      createdAt: string;
+      baselineMarkdown: string;
+      currentMarkdown: string;
+      blocks: Array<{ id: string; text: string }>;
+    };
+  assert.equal(first.taskId, snapshot.id);
+  assert.equal(first.version, 1);
+  assert.equal(first.baselineMarkdown, snapshot.output);
+  assert.equal(first.currentMarkdown, snapshot.output);
+  assert.deepEqual(first.blocks.map((block) => block.id), [
+    "heading-1",
+    "paragraph-1",
+    "paragraph-2",
+  ]);
+
+  const second = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/report-document`)
+    .then((response) => response.json()) as { createdAt: string };
+  assert.equal(second.createdAt, first.createdAt);
+});
+
+test("creates and applies a version-protected local report edit through the API", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot: ResearchTaskSnapshot = {
+    id: "report-editor-api-task",
+    topic: "report editor",
+    status: "completed",
+    createdAt: "2026-08-04T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
+    output: "# Title\n\nFirst paragraph.\n\nSecond paragraph.",
+  };
+  store.create(snapshot, { type: "task.completed", data: {} });
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }), store);
+  const reportDocuments = new InMemoryReportDocumentStore();
+  const reportEditor = new ReportEditorService(
+    reportDocuments,
+    new InMemoryReportEditorStore(),
+    { async rewrite() { return "Revised first paragraph."; } },
+  );
+  const server = createApiServer(
+    manager,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    reportDocuments,
+    reportEditor,
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const document = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/report-document`)
+    .then((response) => response.json()) as {
+      version: number;
+      blocks: Array<{ id: string; fingerprint: string }>;
+    };
+  const block = document.blocks.find((item) => item.id === "paragraph-1")!;
+  const proposalResponse = await fetch(
+    `${baseUrl}/api/tasks/${snapshot.id}/report-editor/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        blockId: block.id,
+        documentVersion: document.version,
+        originalFingerprint: block.fingerprint,
+        instruction: "Revise this paragraph.",
+      }),
+    },
+  );
+  assert.equal(proposalResponse.status, 201);
+  const proposal = await proposalResponse.json() as {
+    operation: { id: string; state: string };
+  };
+  assert.equal(proposal.operation.state, "proposed");
+
+  const appliedResponse = await fetch(
+    `${baseUrl}/api/tasks/${snapshot.id}/report-editor/operations/${proposal.operation.id}/apply`,
+    { method: "POST" },
+  );
+  assert.equal(appliedResponse.status, 200);
+  const applied = await appliedResponse.json() as {
+    document: { currentMarkdown: string; version: number };
+  };
+  assert.equal(applied.document.currentMarkdown, "# Title\n\nRevised first paragraph.\n\nSecond paragraph.");
+  assert.equal(applied.document.version, 2);
+
+  const conversations = await fetch(
+    `${baseUrl}/api/tasks/${snapshot.id}/report-editor/conversations?blockId=paragraph-1`,
+  ).then((response) => response.json()) as {
+    conversations: Array<{ messages: Array<{ role: string }> }>;
+  };
+  assert.deepEqual(conversations.conversations[0]?.messages.map((message) => message.role), [
+    "user", "event", "assistant", "event",
+  ]);
+});
+
+test("saves an explicit manual report edit through the API", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot: ResearchTaskSnapshot = {
+    id: "report-editor-manual-api-task",
+    topic: "manual report editor",
+    status: "completed",
+    createdAt: "2026-08-04T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
+    output: "# Title\n\nFirst paragraph.\n\nSecond paragraph.",
+  };
+  store.create(snapshot, { type: "task.completed", data: {} });
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }), store);
+  const reportDocuments = new InMemoryReportDocumentStore();
+  const reportEditor = new ReportEditorService(
+    reportDocuments,
+    new InMemoryReportEditorStore(),
+    { async rewrite() { return "unused"; } },
+  );
+  const server = createApiServer(manager, undefined, undefined, undefined, undefined, reportDocuments, reportEditor);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const document = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/report-document`)
+    .then((response) => response.json()) as {
+      version: number;
+      blocks: Array<{ id: string; fingerprint: string }>;
+    };
+  const block = document.blocks.find((item) => item.id === "paragraph-2")!;
+
+  const replacementMarkdown = [
+    "Manually revised second paragraph.",
+    "",
+    "Expanded report detail. ".repeat(4_000),
+  ].join("\n");
+  assert.ok(Buffer.byteLength(JSON.stringify({ replacementMarkdown })) > 64 * 1024);
+
+  const response = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/report-editor/manual-save`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scope: "blocks",
+      blockIds: [block.id],
+      documentVersion: document.version,
+      originalFingerprint: block.fingerprint,
+      replacementMarkdown,
+    }),
+  });
+  assert.equal(response.status, 201);
+  const saved = await response.json() as {
+    operation: { origin: string; state: string };
+    document: { currentMarkdown: string; version: number };
+  };
+  assert.equal(saved.operation.origin, "manual");
+  assert.equal(saved.operation.state, "applied");
+  assert.equal(saved.document.version, 2);
+  assert.equal(saved.document.currentMarkdown, `# Title\n\nFirst paragraph.\n\n${replacementMarkdown}`);
 });
 
 test("deletes a completed history task and rejects active tasks", async (t) => {

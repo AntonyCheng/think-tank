@@ -132,3 +132,51 @@ def test_capabilities_exposes_safe_retriever_catalog(monkeypatch) -> None:
         ],
         "maxRetrievers": 2,
     }
+
+
+def test_editor_search_uses_only_configured_retrievers(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "build_retriever_catalog",
+        lambda _environment: RetrieverCatalog(
+            retrievers=(
+                RetrieverCapability(
+                    id="duckduckgo",
+                    label="DuckDuckGo",
+                    category="web",
+                    credential_required=False,
+                    timeout_ms=20_000,
+                ),
+            ),
+            max_retrievers=1,
+        ),
+    )
+
+    async def search(query, retrievers, *, limit, timeout_ms):
+        assert query == "UK inflation"
+        assert retrievers == ("duckduckgo",)
+        assert limit == 8
+        assert timeout_ms == 20_000
+        return [
+            {
+                "provider": "duckduckgo",
+                "title": "Official statistics",
+                "url": "https://example.com/statistics",
+                "snippet": "Latest release",
+            }
+        ], {"configured": ["duckduckgo"]}
+
+    monkeypatch.setattr(main, "search_editor_sources", search)
+
+    response = TestClient(app).post(
+        "/search",
+        json={
+            "query": "UK inflation",
+            "retrievers": ["duckduckgo"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["url"] == (
+        "https://example.com/statistics"
+    )

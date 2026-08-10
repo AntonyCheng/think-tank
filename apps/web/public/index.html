@@ -244,9 +244,52 @@
                   <button id="copy-button" class="ghost-button" type="button">
                     复制报告
                   </button>
+                  <button id="report-edit-button" class="ghost-button" type="button" hidden>
+                    编辑报告
+                  </button>
                 </div>
               </div>
               <p id="report-evidence-policy" class="report-evidence-policy" hidden></p>
+              <p id="report-editor-status" class="report-editor-status" hidden></p>
+              <div id="report-editor-panel-slot"></div>
+              <section id="report-editor-panel" class="report-editor-panel" hidden>
+                <div class="report-editor-panel-heading">
+                  <div>
+                    <span class="panel-kicker">AI 编辑助手</span>
+                    <h4>和报告对话</h4>
+                  </div>
+                  <div class="report-editor-scope-actions">
+                    <span id="report-editor-scope" class="report-editor-scope"></span>
+                    <button id="report-editor-document-scope" class="ghost-button" type="button">整篇报告</button>
+                  </div>
+                </div>
+                <div id="report-editor-conversation" class="report-editor-conversation" aria-live="polite"></div>
+                <section id="report-editor-search" class="report-editor-search">
+                  <form id="report-editor-search-form" class="report-editor-search-form">
+                    <label class="sr-only" for="report-editor-search-query">联网补充资料</label>
+                    <input id="report-editor-search-query" type="search" placeholder="检索可补充的公开资料" maxlength="4000" />
+                    <button id="report-editor-search-submit" class="ghost-button" type="submit">检索</button>
+                  </form>
+                  <div id="report-editor-search-results" class="report-editor-search-results"></div>
+                </section>
+                <div id="report-editor-proposal" class="report-editor-proposal" hidden>
+                  <span>修改预览</span>
+                  <p>右侧已经显示本次修改效果，确认后将保存到报告。</p>
+                  <div class="report-editor-proposal-actions">
+                    <button id="report-editor-apply" type="button">应用修改</button>
+                    <button id="report-editor-reject" class="ghost-button" type="button">暂不修改</button>
+                  </div>
+                </div>
+                <form id="report-editor-form" class="report-editor-form">
+                  <label class="sr-only" for="report-editor-instruction">告诉 AI 你想怎么修改</label>
+                  <textarea id="report-editor-instruction" rows="3" required placeholder="告诉 AI 你想怎么修改，例如：把这一段写得更简洁，或补充英国通胀的影响"></textarea>
+                  <div class="report-editor-actions">
+                    <button id="report-editor-submit" type="submit">发送</button>
+                    <button id="report-editor-undo" class="ghost-button" type="button" hidden>撤销最近修改</button>
+                  </div>
+                  <p id="report-editor-error" class="form-error" role="alert" hidden></p>
+                </form>
+              </section>
               <form id="input-form" class="input-card" hidden>
                 <span class="panel-kicker">需要补充信息</span>
                 <label id="input-prompt" for="input-answer">
@@ -295,6 +338,41 @@
           </div>
         </section>
       </main>
+
+      <dialog id="report-editor-dialog" class="report-editor-dialog">
+        <div class="report-editor-workbench">
+          <nav class="report-editor-mobile-tabs" aria-label="编辑器视图">
+            <button id="report-editor-mobile-chat" type="button" aria-pressed="true">对话</button>
+            <button id="report-editor-mobile-report" class="ghost-button" type="button" aria-pressed="false">报告</button>
+          </nav>
+          <section id="report-editor-left" class="report-editor-left"></section>
+          <section class="report-editor-right">
+            <header class="report-editor-right-header">
+              <div>
+                <span class="panel-kicker">报告编辑</span>
+                <h3 id="report-editor-title">最终研究报告</h3>
+                <p id="report-editor-preview-status" class="report-editor-preview-status"></p>
+                <p id="report-editor-audit" class="report-editor-audit" hidden></p>
+              </div>
+              <div class="report-editor-header-actions">
+                <button id="report-editor-versions" class="ghost-button" type="button">版本记录</button>
+                <button id="report-editor-manual-edit" class="ghost-button" type="button">手动编辑</button>
+                <button id="report-editor-manual-save" type="button" hidden>保存修改</button>
+                <button id="report-editor-manual-cancel" class="ghost-button" type="button" hidden>放弃修改</button>
+                <button id="report-editor-dialog-close" class="ghost-button" type="button">退出编辑</button>
+              </div>
+            </header>
+            <section id="report-editor-version-review" class="report-editor-version-review" hidden>
+              <div class="report-editor-version-review-heading">
+                <strong>报告版本</strong>
+                <button id="report-editor-version-current" class="ghost-button" type="button">返回当前版本</button>
+              </div>
+              <div id="report-editor-version-list" class="report-editor-version-list"></div>
+            </section>
+            <article id="report-editor-report" class="report report-editor-report"></article>
+          </section>
+        </div>
+      </dialog>
 
       <footer>
         <span>从一个问题，到一支团队，再到一份可信报告。</span>

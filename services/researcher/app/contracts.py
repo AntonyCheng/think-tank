@@ -125,3 +125,27 @@ class ResearchResponse(BaseModel):
     )
     cost: float | dict[str, Any] | None
     events: list[ResearchEvent]
+
+
+class EditorSearchRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    query: str = Field(min_length=1, max_length=4_000)
+    retrievers: list[ResearchRetriever] = Field(min_length=1, max_length=5)
+    limit: int = Field(default=8, ge=1, le=20)
+
+
+class EditorSearchResult(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    provider: ResearchRetriever
+    title: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    snippet: str | None = None
+
+
+class EditorSearchResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    results: list[EditorSearchResult]
+    summary: dict[str, Any]

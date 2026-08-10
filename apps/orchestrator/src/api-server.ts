@@ -1,6 +1,7 @@
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -31,8 +32,25 @@ import {
 } from "./gptr-capabilities.js";
 import { replaceEnvironmentValue } from "./environment-file.js";
 import { TaskDocumentStore } from "./document-store.js";
+import {
+  InMemoryReportDocumentStore,
+  ReportDocumentConflictError,
+  SqliteReportTransactionRunner,
+  SqliteReportDocumentStore,
+  type ReportDocumentStore,
+} from "./report-document-store.js";
+import {
+  InMemoryReportEditorStore,
+  OpenAIReportEditorModel,
+  ReportEditorService,
+  SqliteReportEditorStore,
+  UnavailableReportEditorModel,
+} from "./report-editor.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
+// Full-document report edits contain the complete Markdown document. Keep a
+// generous transport limit for this endpoint without weakening other APIs.
+const REPORT_EDITOR_BODY_BYTES = 16 * 1024 * 1024;
 const require = createRequire(import.meta.url);
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const markdownItRoot = resolve(
@@ -129,6 +147,14 @@ export function createApiServer(
       new HttpResearchCapabilityProvider(),
     ),
   environmentFilePath = resolve(moduleDirectory, "../../../.env"),
+  reportDocuments: ReportDocumentStore = new InMemoryReportDocumentStore(),
+  reportEditor = new ReportEditorService(
+    reportDocuments,
+    new InMemoryReportEditorStore(),
+    settings
+      ? new OpenAIReportEditorModel(settings.getRuntimeSettings().planner)
+      : new UnavailableReportEditorModel(),
+  ),
 ) {
   const documents = new TaskDocumentStore();
   return createServer(async (request, response) => {
@@ -304,6 +330,359 @@ export function createApiServer(
       }
 
       if (
+        request.method === "GET" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-document" &&
+        segments.length === 4
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (
+          !task.output ||
+          !["completed", "completed_with_warnings"].includes(task.status)
+        ) {
+          return sendJson(response, 409, {
+            error: "report document is only available after completion",
+          });
+        }
+        const document = reportDocuments.getOrCreate(task.id, task.output);
+        return sendJson(response, 200, {
+          ...document,
+          audit: reportEditor.audit(task.id, reportEditorSources(task)),
+        });
+      }
+
+      if (
+        request.method === "GET" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-document" &&
+        segments[4] === "versions" &&
+        segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report versions are only available after completion" });
+        }
+        reportDocuments.getOrCreate(task.id, task.output!);
+        return sendJson(response, 200, { versions: reportDocuments.listVersions(task.id) });
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-document" &&
+        segments[4] === "restore" &&
+        segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report versions are only available after completion" });
+        }
+        const body = await readJsonBody(request);
+        const version = positiveEditorVersion(body.version);
+        const documentVersion = positiveEditorVersion(body.documentVersion);
+        if (!version || !documentVersion) return sendJson(response, 422, { error: "version and documentVersion are required" });
+        reportDocuments.getOrCreate(task.id, task.output!);
+        try {
+          const result = reportEditor.restoreVersion({
+            taskId: task.id,
+            version,
+            expectedVersion: documentVersion,
+          });
+          return sendJson(response, 201, {
+            ...result,
+            audit: reportEditor.audit(task.id, reportEditorSources(task)),
+          });
+        } catch (error) {
+          if (error instanceof ReportDocumentConflictError) {
+            return sendJson(response, 409, { error: error.message, document: reportDocuments.get(task.id) });
+          }
+          return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      if (
+        request.method === "GET" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-editor" &&
+        segments[4] === "conversations" &&
+        segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report editor is only available after completion" });
+        }
+        const blockId = url.searchParams.get("blockId")?.trim() || undefined;
+        return sendJson(response, 200, {
+          conversations: reportEditor.conversations(task.id, blockId),
+          operations: reportEditor.operations(task.id, blockId),
+        });
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-editor" &&
+        segments[4] === "search" &&
+        segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report editor is only available after completion" });
+        }
+        const body = await readJsonBody(request);
+        const query = requiredEditorString(body.query, "query");
+        const scopeKey = requiredEditorString(body.scopeKey, "scopeKey") ?? "document";
+        if (!query || query.length > 4_000 || scopeKey.length > 4_000) {
+          return sendJson(response, 422, { error: "query and scopeKey are required" });
+        }
+        const catalog = settings
+          ? await loadRetrieverCatalog(settings, researcherServiceUrl(), capabilityProvider)
+          : undefined;
+        const retrievers = catalog
+          ? catalog.retrievers.slice(0, catalog.maxRetrievers).map((item) => item.id)
+          : ["duckduckgo"];
+        try {
+          const results = await searchReportSources(researcherServiceUrl(), {
+            query,
+            retrievers,
+            limit: 8,
+          });
+          return sendJson(response, 201, reportEditor.recordSearch({
+            taskId: task.id,
+            scopeKey,
+            query,
+            retrievers,
+            results: results.results,
+          }));
+        } catch (error) {
+          return sendJson(response, 502, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-editor" &&
+        segments[4] === "search" &&
+        segments[5] &&
+        segments[6] === "select" &&
+        segments.length === 7
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report editor is only available after completion" });
+        }
+        const body = await readJsonBody(request);
+        const resultIds = Array.isArray(body.resultIds)
+          ? body.resultIds.filter((value): value is string => typeof value === "string" && value.trim() !== "").map((value) => value.trim())
+          : [];
+        return sendJson(response, 200, {
+          results: reportEditor.selectSearchResults(task.id, segments[5], resultIds),
+        });
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-editor" &&
+        segments[4] === "messages" &&
+        segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report editor is only available after completion" });
+        }
+        const body = await readJsonBody(request);
+        const scope = body.scope === "document"
+          ? "document"
+          : body.scope === "text" ? "text" : "blocks";
+        const requestedBlockIds = Array.isArray(body.blockIds)
+          ? body.blockIds.filter((value): value is string => typeof value === "string" && value.trim() !== "").map((value) => value.trim())
+          : [];
+        const blockId = requiredEditorString(body.blockId, "blockId");
+        const blockIds = scope === "document"
+          ? []
+          : [...new Set(requestedBlockIds.length ? requestedBlockIds : blockId ? [blockId] : [])];
+        const originalFingerprint = requiredEditorString(body.originalFingerprint, "originalFingerprint");
+        const instruction = requiredEditorString(body.instruction, "instruction");
+        const documentVersion = positiveEditorVersion(body.documentVersion);
+        const rangeStart = integerEditorOffset(body.rangeStart);
+        const rangeEnd = integerEditorOffset(body.rangeEnd);
+        const originalText = typeof body.originalText === "string" ? body.originalText : undefined;
+        const sourceIds = Array.isArray(body.sourceIds)
+          ? body.sourceIds.filter((value): value is string => typeof value === "string" && value.trim() !== "").map((value) => value.trim())
+          : [];
+        if (((scope === "blocks" || scope === "text") && !blockIds.length) ||
+          (scope === "text" && (rangeStart === undefined || rangeEnd === undefined || !originalText)) ||
+          !instruction || !documentVersion) {
+          return sendJson(response, 422, {
+            error: "scope, documentVersion, and instruction are required; blocks scope needs blockIds",
+          });
+        }
+        const document = reportDocuments.getOrCreate(task.id, task.output!);
+        try {
+          const result = await reportEditor.propose({
+            taskId: task.id,
+            scope,
+            blockIds,
+            documentVersion,
+            originalFingerprint,
+            ...(scope === "text" ? { rangeStart, rangeEnd, originalText } : {}),
+            instruction,
+            ...(sourceIds.length ? { sourceIds: [...new Set(sourceIds)] } : {}),
+            ...(typeof body.conversationId === "string" && body.conversationId.trim()
+              ? { conversationId: body.conversationId.trim() }
+              : {}),
+          });
+          return sendJson(response, 201, {
+            ...result,
+            audit: reportEditor.audit(task.id, reportEditorSources(task)),
+          });
+        } catch (error) {
+          if (error instanceof ReportDocumentConflictError) {
+            return sendJson(response, 409, { error: error.message, document });
+          }
+          return sendJson(response, 422, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-editor" &&
+        segments[4] === "manual-save" &&
+        segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report editor is only available after completion" });
+        }
+        const body = await readJsonBody(request, REPORT_EDITOR_BODY_BYTES);
+        const scope = body.scope === "document"
+          ? "document"
+          : body.scope === "text" ? "text" : "blocks";
+        const requestedBlockIds = Array.isArray(body.blockIds)
+          ? body.blockIds.filter((value): value is string => typeof value === "string" && value.trim() !== "").map((value) => value.trim())
+          : [];
+        const documentVersion = positiveEditorVersion(body.documentVersion);
+        const replacementMarkdown = typeof body.replacementMarkdown === "string"
+          ? body.replacementMarkdown
+          : undefined;
+        const rangeStart = integerEditorOffset(body.rangeStart);
+        const rangeEnd = integerEditorOffset(body.rangeEnd);
+        const originalText = typeof body.originalText === "string" ? body.originalText : undefined;
+        if (((scope === "blocks" || scope === "text") && !requestedBlockIds.length) ||
+          (scope === "text" && (rangeStart === undefined || rangeEnd === undefined || !originalText)) ||
+          !documentVersion || replacementMarkdown === undefined) {
+          return sendJson(response, 422, {
+            error: "scope, documentVersion, replacementMarkdown, and blockIds for block scope are required",
+          });
+        }
+        reportDocuments.getOrCreate(task.id, task.output!);
+        try {
+          const result = reportEditor.saveManual({
+            taskId: task.id,
+            scope,
+            blockIds: scope === "document" ? [] : [...new Set(requestedBlockIds)],
+            documentVersion,
+            originalFingerprint: requiredEditorString(body.originalFingerprint, "originalFingerprint"),
+            ...(scope === "text" ? { rangeStart, rangeEnd, originalText } : {}),
+            replacementMarkdown,
+          });
+          return sendJson(response, 201, {
+            ...result,
+            audit: reportEditor.audit(task.id, reportEditorSources(task)),
+          });
+        } catch (error) {
+          if (error instanceof ReportDocumentConflictError) {
+            return sendJson(response, 409, {
+              error: error.message,
+              document: reportDocuments.get(task.id),
+            });
+          }
+          return sendJson(response, 422, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-editor" &&
+        segments[4] === "operations" &&
+        segments[5] &&
+        ["apply", "reject", "undo"].includes(segments[6] ?? "") &&
+        segments.length === 7
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report editor is only available after completion" });
+        }
+        reportDocuments.getOrCreate(task.id, task.output!);
+        try {
+          if (segments[6] === "apply") {
+            const result = reportEditor.apply(task.id, segments[5]);
+            return sendJson(response, 200, {
+              ...result,
+              audit: reportEditor.audit(task.id, reportEditorSources(task)),
+            });
+          }
+          if (segments[6] === "reject") {
+            return sendJson(response, 200, {
+              operation: reportEditor.reject(task.id, segments[5]),
+            });
+          }
+          const result = reportEditor.undo(task.id, segments[5]);
+          return sendJson(response, 200, {
+            ...result,
+            audit: reportEditor.audit(task.id, reportEditorSources(task)),
+          });
+        } catch (error) {
+          if (error instanceof ReportDocumentConflictError) {
+            return sendJson(response, 409, {
+              error: error.message,
+              document: reportDocuments.get(task.id),
+            });
+          }
+          return sendJson(response, 422, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (
         request.method === "DELETE" &&
         segments[0] === "api" &&
         segments[1] === "tasks" &&
@@ -318,6 +697,8 @@ export function createApiServer(
           });
         }
         await documents.deleteTask(task.id);
+        reportEditor.deleteTask(task.id);
+        reportDocuments.delete(task.id);
         const result = manager.delete(task.id);
         if (result !== "deleted") {
           return sendJson(response, 404, { error: "task not found" });
@@ -522,11 +903,15 @@ export function createApiServer(
               error: "report is not ready for export",
             });
           }
+          const currentDocument = reportDocuments.get(task.id);
           return proxyReportExport(
             response,
             researcherServiceUrl(),
             exportFormat,
-            task,
+            {
+              ...task,
+              output: currentDocument?.currentMarkdown ?? task.output,
+            },
           );
         }
       }
@@ -546,6 +931,35 @@ async function loadRetrieverCatalog(
 ): Promise<RetrieverCatalog> {
   const timeoutMs = settings.getRuntimeSettings().gptrHealthTimeoutMs;
   return provider.getCatalog(serviceUrl, timeoutMs);
+}
+
+async function searchReportSources(
+  serviceUrl: string,
+  input: { query: string; retrievers: string[]; limit: number },
+): Promise<{ results: Array<{ provider: string; title: string; url: string; snippet?: string }> }> {
+  const response = await fetch(new URL("/search", serviceUrl), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    signal: AbortSignal.timeout(35_000),
+  });
+  const payload = await response.json() as { detail?: unknown; results?: unknown };
+  if (!response.ok) {
+    throw new Error(typeof payload.detail === "string" ? payload.detail : `search returned ${response.status}`);
+  }
+  if (!Array.isArray(payload.results)) throw new Error("search returned an invalid result list");
+  const results = payload.results.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const item = value as Record<string, unknown>;
+    if (typeof item.provider !== "string" || typeof item.title !== "string" || typeof item.url !== "string") return [];
+    return [{
+      provider: item.provider,
+      title: item.title,
+      url: item.url,
+      ...(typeof item.snippet === "string" ? { snippet: item.snippet } : {}),
+    }];
+  });
+  return { results };
 }
 
 function rebaseResearchProfilePath(path: string): string {
@@ -755,6 +1169,32 @@ function optionalApiKey(value: unknown): string | undefined {
   return value;
 }
 
+function requiredEditorString(value: unknown, _field: string): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized ? normalized : undefined;
+}
+
+function positiveEditorVersion(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function integerEditorOffset(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function reportEditorSources(task: { citations?: Array<{ title: string; url: string }> }) {
+  return task.citations ?? [];
+}
+
+function isCompletedReportTask(task: { status: string; output?: string }): task is { status: "completed" | "completed_with_warnings"; output: string } {
+  return Boolean(task.output) && ["completed", "completed_with_warnings"].includes(task.status);
+}
+
 function sendJson(
   response: ServerResponse,
   status: number,
@@ -812,6 +1252,15 @@ if (
   const taskStore = new SqliteResearchTaskStore(
     resolve(".think-tank", "data", "think-tank.sqlite"),
   );
+  const reportDatabasePath = resolve(".think-tank", "data", "think-tank.sqlite");
+  const reportDatabase = new DatabaseSync(reportDatabasePath);
+  const reportDocuments = new SqliteReportDocumentStore(reportDatabasePath, reportDatabase);
+  const reportEditor = new ReportEditorService(
+    reportDocuments,
+    new SqliteReportEditorStore(reportDatabasePath, reportDatabase),
+    new OpenAIReportEditorModel(settings.getRuntimeSettings().planner),
+    new SqliteReportTransactionRunner(reportDatabase),
+  );
   const manager = new ResearchTaskManager(
     (topic, onEvent, controls) =>
       runResearchTopic(topic, {
@@ -836,6 +1285,10 @@ if (
     manager,
     settings,
     () => settings.getRuntimeSettings().gptrServiceUrl,
+    undefined,
+    undefined,
+    reportDocuments,
+    reportEditor,
   );
   server.listen(port, host, async () => {
     process.stdout.write(`Think Tank API 已启动：http://${host}:${port}\n`);

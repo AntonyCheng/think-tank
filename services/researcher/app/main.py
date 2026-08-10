@@ -15,7 +15,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from dotenv import dotenv_values
 
-from .contracts import ResearchEvent, ResearchRequest, ResearchResponse
+from .contracts import (
+    EditorSearchRequest,
+    EditorSearchResponse,
+    ResearchEvent,
+    ResearchRequest,
+    ResearchResponse,
+)
+from .editor_search import search_editor_sources
 from . import research_worker
 from .report_processing import (
     collapse_repeated_report_blocks,
@@ -133,6 +140,34 @@ async def capabilities() -> dict[str, Any]:
         ],
         "maxRetrievers": catalog.max_retrievers,
     }
+
+
+@app.post("/search", response_model=EditorSearchResponse)
+async def search_editor_sources_endpoint(
+    request: EditorSearchRequest,
+) -> EditorSearchResponse:
+    try:
+        catalog = build_retriever_catalog(os.environ)
+        available = {item.id: item for item in catalog.retrievers}
+        requested = tuple(request.retrievers)
+        if len(set(requested)) != len(requested):
+            raise ValueError("Retrievers must not contain duplicates.")
+        if len(requested) > catalog.max_retrievers:
+            raise ValueError("Too many retrievers were requested.")
+        if any(retriever not in available for retriever in requested):
+            raise ValueError("A requested retriever is not available.")
+        timeout_ms = min(available[retriever].timeout_ms for retriever in requested)
+        results, summary = await search_editor_sources(
+            request.query.strip(),
+            requested,
+            limit=request.limit,
+            timeout_ms=timeout_ms,
+        )
+        return EditorSearchResponse(results=results, summary=summary)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/export/{export_format}")

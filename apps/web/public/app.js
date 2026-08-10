@@ -62,6 +62,42 @@ const failureTitle = document.querySelector("#failure-title");
 const failureMessage = document.querySelector("#failure-message");
 const copyButton = document.querySelector("#copy-button");
 const reportActions = document.querySelector("#report-actions");
+const reportEditButton = document.querySelector("#report-edit-button");
+const reportEditorStatus = document.querySelector("#report-editor-status");
+const reportEditorPanel = document.querySelector("#report-editor-panel");
+const reportEditorScope = document.querySelector("#report-editor-scope");
+const reportEditorDocumentScope = document.querySelector("#report-editor-document-scope");
+const reportEditorPanelSlot = document.querySelector("#report-editor-panel-slot");
+const reportEditorDialog = document.querySelector("#report-editor-dialog");
+const reportEditorWorkbench = document.querySelector(".report-editor-workbench");
+const reportEditorLeft = document.querySelector("#report-editor-left");
+const reportEditorReport = document.querySelector("#report-editor-report");
+const reportEditorPreviewStatus = document.querySelector("#report-editor-preview-status");
+const reportEditorAudit = document.querySelector("#report-editor-audit");
+const reportEditorMobileChat = document.querySelector("#report-editor-mobile-chat");
+const reportEditorMobileReport = document.querySelector("#report-editor-mobile-report");
+const reportEditorDialogClose = document.querySelector("#report-editor-dialog-close");
+const reportEditorVersions = document.querySelector("#report-editor-versions");
+const reportEditorVersionReview = document.querySelector("#report-editor-version-review");
+const reportEditorVersionList = document.querySelector("#report-editor-version-list");
+const reportEditorVersionCurrent = document.querySelector("#report-editor-version-current");
+const reportEditorManualEdit = document.querySelector("#report-editor-manual-edit");
+const reportEditorManualSave = document.querySelector("#report-editor-manual-save");
+const reportEditorManualCancel = document.querySelector("#report-editor-manual-cancel");
+const reportEditorConversation = document.querySelector("#report-editor-conversation");
+const reportEditorSearch = document.querySelector("#report-editor-search");
+const reportEditorSearchForm = document.querySelector("#report-editor-search-form");
+const reportEditorSearchQuery = document.querySelector("#report-editor-search-query");
+const reportEditorSearchSubmit = document.querySelector("#report-editor-search-submit");
+const reportEditorSearchResults = document.querySelector("#report-editor-search-results");
+const reportEditorProposal = document.querySelector("#report-editor-proposal");
+const reportEditorForm = document.querySelector("#report-editor-form");
+const reportEditorInstruction = document.querySelector("#report-editor-instruction");
+const reportEditorSubmit = document.querySelector("#report-editor-submit");
+const reportEditorApply = document.querySelector("#report-editor-apply");
+const reportEditorReject = document.querySelector("#report-editor-reject");
+const reportEditorUndo = document.querySelector("#report-editor-undo");
+const reportEditorError = document.querySelector("#report-editor-error");
 const exportDocx = document.querySelector("#export-docx");
 const exportPdf = document.querySelector("#export-pdf");
 const exportMarkdown = document.querySelector("#export-markdown");
@@ -97,6 +133,7 @@ const settingsRetrieversHelp = document.querySelector(
   "#settings-retrievers-help",
 );
 const ACTIVE_TASK_STORAGE_KEY = "think-tank.active-task-id";
+const REPORT_EDITOR_DRAFT_PREFIX = "think-tank.report-editor-draft";
 
 const markdownRenderer = window.markdownit({
   html: false,
@@ -154,6 +191,23 @@ let activeTaskCreatedAt;
 let activeTaskFinishedAt;
 let activeInputRequest;
 let activeReportMarkdown = "";
+let reportDocument;
+let reportEditing = false;
+let selectedReportBlockId;
+let selectedReportBlockIds = [];
+let selectedReportTextRange;
+let reportEditorConversations = [];
+let reportEditorOperations = [];
+let selectedReportConversation;
+let proposedReportOperation;
+let reportEditorBusy = false;
+let reportEditorTransientMessage;
+let reportManualEditing = false;
+let reportDocumentVersions = [];
+let selectedReportVersion;
+let reportCitationAudit;
+let reportSearchSession;
+let reportSearchResults = [];
 let receivedEvents = 0;
 let researchActivityCount = 0;
 let sources = 0;
@@ -525,6 +579,411 @@ historyQuery.addEventListener("input", () => {
 });
 
 historyMore.addEventListener("click", () => loadHistory(false));
+
+reportEditButton.addEventListener("click", async () => {
+  if (!reportDocument) return;
+  reportEditing = !reportEditing;
+  selectedReportBlockId = undefined;
+  selectedReportBlockIds = [];
+  selectedReportTextRange = undefined;
+  reportEditorConversations = [];
+  reportEditorOperations = [];
+  reportSearchSession = undefined;
+  reportSearchResults = [];
+  selectedReportConversation = undefined;
+  proposedReportOperation = undefined;
+  reportEditorTransientMessage = undefined;
+  reportManualEditing = false;
+  reportDocumentVersions = [];
+  selectedReportVersion = undefined;
+  reportEditorVersionReview.hidden = true;
+  if (reportEditing) {
+    setReportEditorMobileView("chat");
+    reportEditorLeft.append(reportEditorPanel);
+    reportEditorDialog.showModal();
+    await loadReportEditorConversations();
+  } else {
+    reportEditorDialog.close();
+    reportEditorPanelSlot.append(reportEditorPanel);
+  }
+  renderReportDocument();
+});
+
+reportEditorDialogClose.addEventListener("click", () => {
+  if (!confirmDiscardManualDraft()) return;
+  reportEditing = false;
+  reportManualEditing = false;
+  selectedReportVersion = undefined;
+  reportEditorVersionReview.hidden = true;
+  reportEditorDialog.close();
+  reportEditorPanelSlot.append(reportEditorPanel);
+  renderReportDocument();
+});
+
+reportEditorDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  reportEditorDialogClose.click();
+});
+
+function setReportEditorMobileView(view) {
+  const showReport = view === "report";
+  reportEditorWorkbench.classList.toggle("mobile-report-visible", showReport);
+  reportEditorMobileChat.setAttribute("aria-pressed", String(!showReport));
+  reportEditorMobileReport.setAttribute("aria-pressed", String(showReport));
+}
+
+reportEditorMobileChat.addEventListener("click", () => setReportEditorMobileView("chat"));
+reportEditorMobileReport.addEventListener("click", () => setReportEditorMobileView("report"));
+
+async function selectReportBlockFromEvent(event) {
+  if (!reportEditing || reportManualEditing || event.target.closest("a")) return;
+  const block = event.target.closest("[data-report-block-id]");
+  if (!block) return;
+  const blockId = block.dataset.reportBlockId;
+  const currentIndex = reportDocument.blocks.findIndex((item) => item.id === blockId);
+  if (event.shiftKey && selectedReportBlockIds.length) {
+    const anchorIndex = reportDocument.blocks.findIndex((item) => item.id === selectedReportBlockIds[0]);
+    const start = Math.min(anchorIndex, currentIndex);
+    const end = Math.max(anchorIndex, currentIndex);
+    selectedReportBlockIds = reportDocument.blocks.slice(start, end + 1).map((item) => item.id);
+  } else {
+    selectedReportBlockIds = [blockId];
+  }
+  if (!selectedReportTextRange || selectedReportTextRange.blockId !== blockId) {
+    selectedReportTextRange = undefined;
+  }
+  selectedReportBlockId = selectedReportBlockIds[0];
+  proposedReportOperation = undefined;
+  reportEditorTransientMessage = undefined;
+  await loadReportEditorConversations();
+  renderReportDocument();
+}
+
+function captureReportTextSelection() {
+  if (!reportEditing || reportManualEditing || !reportDocument) return;
+  const selection = window.getSelection();
+  const selectedText = selection?.toString() || "";
+  if (!selection || !selectedText.trim() || selection.rangeCount === 0) return;
+  const anchorElement = selection.anchorNode instanceof Element
+    ? selection.anchorNode
+    : selection.anchorNode?.parentElement;
+  const focusElement = selection.focusNode instanceof Element
+    ? selection.focusNode
+    : selection.focusNode?.parentElement;
+  const anchorBlock = anchorElement?.closest("[data-report-block-id]");
+  const focusBlock = focusElement?.closest("[data-report-block-id]");
+  if (!anchorBlock || anchorBlock !== focusBlock) return;
+  const blockId = anchorBlock.dataset.reportBlockId;
+  const block = reportDocument.blocks.find((item) => item.id === blockId);
+  const content = anchorBlock.querySelector(".report-editor-block-content");
+  if (!block || !content) return;
+  const selectedStart = domTextOffset(content, selection.getRangeAt(0).startContainer, selection.getRangeAt(0).startOffset);
+  const selectedEnd = domTextOffset(content, selection.getRangeAt(0).endContainer, selection.getRangeAt(0).endOffset);
+  const start = Math.min(selectedStart, selectedEnd);
+  const markdownStart = block.markdown.indexOf(selectedText, Math.max(0, start - 2));
+  if (markdownStart < 0 || block.markdown.slice(markdownStart, markdownStart + selectedText.length) !== selectedText) {
+    showReportEditorError("这段文字无法安全映射到原始 Markdown，请改选完整段落。");
+    return;
+  }
+  selectedReportBlockIds = [block.id];
+  selectedReportBlockId = block.id;
+  selectedReportTextRange = {
+    blockId: block.id,
+    rangeStart: markdownStart,
+    rangeEnd: markdownStart + selectedText.length,
+    originalText: selectedText,
+  };
+  proposedReportOperation = undefined;
+  reportEditorTransientMessage = undefined;
+  void loadReportEditorConversations().then(() => renderReportDocument());
+}
+
+function domTextOffset(root, node, offset) {
+  const range = document.createRange();
+  range.selectNodeContents(root);
+  range.setEnd(node, offset);
+  return range.toString().length;
+}
+
+report.addEventListener("click", selectReportBlockFromEvent);
+reportEditorReport.addEventListener("click", selectReportBlockFromEvent);
+reportEditorReport.addEventListener("mouseup", captureReportTextSelection);
+
+async function selectReportBlockFromKeyboard(event) {
+  if (
+    !reportEditing ||
+    reportManualEditing ||
+    !["Enter", " "].includes(event.key) ||
+    !(event.target instanceof HTMLElement)
+  ) return;
+  const block = event.target.closest("[data-report-block-id]");
+  if (!block) return;
+  event.preventDefault();
+  selectedReportBlockIds = [block.dataset.reportBlockId];
+  selectedReportBlockId = selectedReportBlockIds[0];
+  selectedReportTextRange = undefined;
+  proposedReportOperation = undefined;
+  await loadReportEditorConversations();
+  renderReportDocument();
+}
+
+report.addEventListener("keydown", selectReportBlockFromKeyboard);
+reportEditorReport.addEventListener("keydown", selectReportBlockFromKeyboard);
+
+reportEditorManualEdit.addEventListener("click", () => {
+  if (!reportDocument || reportEditorBusy) return;
+  if (selectedReportVersion) {
+    showReportEditorError("请先返回当前版本，再进行编辑。");
+    return;
+  }
+  if (proposedReportOperation?.state === "proposed") {
+    showReportEditorError("请先应用或放弃右侧的 AI 修改预览，再进行手动编辑。");
+    return;
+  }
+  reportManualEditing = true;
+  reportEditorTransientMessage = undefined;
+  renderReportDocument();
+});
+
+reportEditorManualCancel.addEventListener("click", () => {
+  if (reportEditorBusy) return;
+  if (!confirmDiscardManualDraft()) return;
+  reportManualEditing = false;
+  renderReportDocument();
+});
+
+reportEditorManualSave.addEventListener("click", async () => {
+  if (!activeTaskId || !reportDocument || reportEditorBusy || !reportManualEditing) return;
+  const replacementMarkdown = document.querySelector("#report-editor-manual-markdown")?.value;
+  if (typeof replacementMarkdown !== "string") return;
+  const scope = selectedReportBlockIds.length ? "blocks" : "document";
+  const selectedBlock = selectedReportBlockIds.length === 1
+    ? reportDocument.blocks.find((item) => item.id === selectedReportBlockIds[0])
+    : undefined;
+  const currentMarkdown = manualEditorMarkdown();
+  if (replacementMarkdown === currentMarkdown) {
+    clearReportEditorDraft();
+    reportManualEditing = false;
+    renderReportDocument();
+    return;
+  }
+  setReportEditorBusy(true);
+  try {
+    const response = await fetch(`/api/tasks/${activeTaskId}/report-editor/manual-save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scope: selectedReportTextRange ? "text" : scope,
+        blockIds: selectedReportBlockIds,
+        ...(selectedBlock ? { originalFingerprint: selectedBlock.fingerprint } : {}),
+        ...(selectedReportTextRange ? selectedReportTextRange : {}),
+        documentVersion: reportDocument.version,
+        replacementMarkdown,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      if (response.status === 409 && result.document) {
+        reportDocument = result.document;
+        activeReportMarkdown = result.document.currentMarkdown;
+      }
+      throw new Error(result.error || "无法保存手动修改");
+    }
+    reportDocument = result.document;
+    activeReportMarkdown = result.document.currentMarkdown;
+    reportCitationAudit = result.audit;
+    selectedReportConversation = result.conversation;
+    clearReportEditorDraft();
+    reportManualEditing = false;
+    await loadReportEditorConversations();
+    renderReportDocument();
+  } catch (error) {
+    showReportEditorError(error instanceof Error ? error.message : String(error));
+  } finally {
+    setReportEditorBusy(false);
+  }
+});
+
+reportEditorVersions.addEventListener("click", async () => {
+  if (!activeTaskId || !reportDocument || reportEditorBusy) return;
+  reportEditorVersionReview.hidden = !reportEditorVersionReview.hidden;
+  if (reportEditorVersionReview.hidden) {
+    selectedReportVersion = undefined;
+    renderReportDocument();
+    return;
+  }
+  try {
+    const response = await fetch(`/api/tasks/${activeTaskId}/report-document/versions`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "无法读取报告版本");
+    reportDocumentVersions = result.versions || [];
+    renderReportDocument();
+  } catch (error) {
+    reportEditorVersionReview.hidden = true;
+    showReportEditorError(error instanceof Error ? error.message : String(error));
+  }
+});
+
+reportEditorVersionCurrent.addEventListener("click", () => {
+  selectedReportVersion = undefined;
+  renderReportDocument();
+});
+
+reportEditorVersionList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-report-version]");
+  if (!button || !reportDocument) return;
+  const version = Number(button.dataset.reportVersion);
+  const target = reportDocumentVersions.find((item) => item.version === version);
+  if (!target) return;
+  if (button.dataset.reportVersionAction === "view") {
+    selectedReportVersion = target.version === reportDocument.version ? undefined : target;
+    renderReportDocument();
+    return;
+  }
+  if (button.dataset.reportVersionAction !== "restore" || reportEditorBusy || target.version === reportDocument.version) return;
+  setReportEditorBusy(true);
+  try {
+    const response = await fetch(`/api/tasks/${activeTaskId}/report-document/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: target.version, documentVersion: reportDocument.version }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "无法恢复报告版本");
+    reportDocument = result.document;
+    activeReportMarkdown = result.document.currentMarkdown;
+    reportCitationAudit = result.audit;
+    selectedReportVersion = undefined;
+    const versionsResponse = await fetch(`/api/tasks/${activeTaskId}/report-document/versions`);
+    const versionsResult = await versionsResponse.json();
+    if (versionsResponse.ok) reportDocumentVersions = versionsResult.versions || [];
+    await loadReportEditorConversations();
+    renderReportDocument();
+  } catch (error) {
+    showReportEditorError(error instanceof Error ? error.message : String(error));
+  } finally {
+    setReportEditorBusy(false);
+  }
+});
+
+reportEditorSearchForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = reportEditorSearchQuery.value.trim();
+  if (!activeTaskId || !reportDocument || !query || reportEditorBusy) return;
+  setReportEditorBusy(true);
+  try {
+    const scopeKey = selectedReportBlockIds.length ? selectedReportBlockIds.join(",") : "document";
+    const response = await fetch(`/api/tasks/${activeTaskId}/report-editor/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, scopeKey }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "无法完成联网检索");
+    reportSearchSession = result.session;
+    reportSearchResults = result.results || [];
+    renderReportEditorPanel();
+  } catch (error) {
+    showReportEditorError(error instanceof Error ? error.message : String(error));
+  } finally {
+    setReportEditorBusy(false);
+  }
+});
+
+reportEditorSearchResults.addEventListener("change", async (event) => {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement) || input.type !== "checkbox" || !reportSearchSession || !activeTaskId) return;
+  const resultIds = [...reportEditorSearchResults.querySelectorAll("input[type=checkbox]:checked")]
+    .map((item) => item.dataset.reportSearchResultId)
+    .filter(Boolean);
+  try {
+    const response = await fetch(`/api/tasks/${activeTaskId}/report-editor/search/${reportSearchSession.id}/select`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resultIds }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "无法保存来源选择");
+    reportSearchResults = result.results || [];
+    renderReportEditorPanel();
+  } catch (error) {
+    input.checked = !input.checked;
+    showReportEditorError(error instanceof Error ? error.message : String(error));
+  }
+});
+
+reportEditorForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const instruction = reportEditorInstruction.value.trim();
+  if (!reportDocument || !activeTaskId || !instruction || reportManualEditing || selectedReportVersion) return;
+  const scope = selectedReportTextRange ? "text" : selectedReportBlockIds.length ? "blocks" : "document";
+  const selectedBlock = selectedReportBlockIds.length === 1
+    ? reportDocument.blocks.find((item) => item.id === selectedReportBlockIds[0])
+    : undefined;
+  setReportEditorBusy(true);
+  reportEditorTransientMessage = scope === "document"
+    ? "正在理解整篇报告的修改要求并生成建议…"
+    : `正在为选中的 ${selectedReportBlockIds.length} 个内容块生成修改建议…`;
+  renderReportEditorPanel();
+  try {
+    const response = await fetch(`/api/tasks/${activeTaskId}/report-editor/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scope,
+        blockIds: selectedReportBlockIds,
+        ...(selectedReportTextRange ? selectedReportTextRange : {}),
+        ...(selectedBlock ? { blockId: selectedBlock.id, originalFingerprint: selectedBlock.fingerprint } : {}),
+        documentVersion: reportDocument.version,
+        instruction,
+        ...(selectedReportSearchResultIds().length ? { sourceIds: selectedReportSearchResultIds() } : {}),
+        ...(selectedReportConversation ? { conversationId: selectedReportConversation.id } : {}),
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      if (response.status === 409 && result.document) {
+        reportDocument = result.document;
+        activeReportMarkdown = result.document.currentMarkdown;
+      }
+      throw new Error(result.error || "无法生成局部修改");
+    }
+    selectedReportConversation = result.conversation;
+    proposedReportOperation = result.operation;
+    reportCitationAudit = result.audit;
+    reportEditorInstruction.value = "";
+    reportEditorTransientMessage = undefined;
+    await loadReportEditorConversations();
+    renderReportDocument();
+  } catch (error) {
+    reportEditorTransientMessage = undefined;
+    showReportEditorError(error instanceof Error ? error.message : String(error));
+    await loadReportEditorConversations();
+    renderReportDocument();
+  } finally {
+    setReportEditorBusy(false);
+  }
+});
+
+reportEditorApply.addEventListener("click", () => applyReportOperation("apply"));
+reportEditorReject.addEventListener("click", () => applyReportOperation("reject"));
+reportEditorDocumentScope.addEventListener("click", async () => {
+  selectedReportBlockIds = [];
+  selectedReportBlockId = undefined;
+  proposedReportOperation = undefined;
+  await loadReportEditorConversations();
+  renderReportDocument();
+});
+reportEditorUndo.addEventListener("click", async () => {
+  const operation = reportEditorOperations.find((item) =>
+    item.state === "applied" && !item.undoneOperationId
+  );
+  if (!operation) return;
+  const previousProposal = proposedReportOperation;
+  proposedReportOperation = operation;
+  await applyReportOperation("undo");
+  if (proposedReportOperation === operation) proposedReportOperation = previousProposal;
+});
 
 historyList.addEventListener("click", async (event) => {
   const deleteButton = event.target.closest("button[data-delete-task-id]");
@@ -1201,12 +1660,14 @@ async function loadTask(taskId) {
     ) {
       activeReportMarkdown =
         task.output || "任务完成，但没有返回报告内容。";
-      report.innerHTML = markdownRenderer.render(activeReportMarkdown);
+      await loadReportDocument(task.id);
+      renderReportDocument();
       report.hidden = false;
       reportEmpty.hidden = true;
       failure.hidden = true;
       setExportLinks(task.id);
       reportActions.hidden = false;
+      reportEditButton.hidden = !reportDocument;
       updateReportEvidencePolicy(task.reportEvidencePolicy);
       updateQualityStates(task.contentAcceptance, task.evidenceQuality);
       showQualityWarnings(
@@ -1231,7 +1692,501 @@ async function loadTask(taskId) {
   }
 }
 
+async function loadReportDocument(taskId) {
+  try {
+    const response = await fetch(`/api/tasks/${taskId}/report-document`);
+    const document = await response.json();
+    if (!response.ok) throw new Error(document.error || "无法读取报告文档");
+    reportDocument = document;
+    activeReportMarkdown = document.currentMarkdown;
+    reportCitationAudit = document.audit;
+  } catch {
+    reportDocument = undefined;
+    reportEditing = false;
+    selectedReportBlockId = undefined;
+    selectedReportBlockIds = [];
+  }
+}
+
+function renderLegacyReportDocument() {
+  if (!reportEditing || !reportDocument) {
+    report.innerHTML = markdownRenderer.render(activeReportMarkdown);
+    reportEditButton.textContent = "编辑报告";
+    reportEditorStatus.hidden = true;
+    reportEditorPanel.hidden = true;
+    workspace.classList.remove("report-editing");
+    return;
+  }
+
+  report.replaceChildren();
+  workspace.classList.add("report-editing");
+  for (const block of reportDocument.blocks || []) {
+    const element = document.createElement("section");
+    element.className = "report-editor-block";
+    element.dataset.reportBlockId = block.id;
+    element.tabIndex = 0;
+    element.setAttribute("role", "button");
+    element.setAttribute("aria-pressed", String(selectedReportBlockIds.includes(block.id)));
+    if (selectedReportBlockIds.includes(block.id)) {
+      element.classList.add("selected");
+    }
+    const content = document.createElement("div");
+    content.className = "report-editor-block-content";
+    content.innerHTML = markdownRenderer.render(block.markdown);
+    element.append(content);
+    report.append(element);
+  }
+  reportEditButton.textContent = "退出编辑";
+  reportEditorStatus.hidden = false;
+  reportEditorStatus.textContent = selectedReportTextRange
+    ? `鏂囨。鐗堟湰 ${reportDocument.version} 路 宸查€変腑鏂囧瓧鑼冨洿`
+    : selectedReportBlockIds.length
+    ? `文档版本 ${reportDocument.version} · 已选中 ${selectedReportBlockIds.length} 个连续范围`
+    : `文档版本 ${reportDocument.version} · 当前范围为整篇报告`;
+  reportEditorPreviewStatus.textContent = proposedReportOperation?.state === "proposed"
+    ? "正在预览本次修改，尚未保存"
+    : `当前版本 ${reportDocument.version}`;
+  renderReportEditorPanel();
+}
+
+function selectedReportBlock() {
+  return (reportDocument?.blocks || []).find((block) => block.id === selectedReportBlockId);
+}
+
+// The editor uses a separate workbench so the report card never shares its grid with chat.
+function renderReportDocument() {
+  if (!reportEditing || !reportDocument) {
+    if (reportEditorDialog.open) reportEditorDialog.close();
+    reportEditorPanelSlot.append(reportEditorPanel);
+    report.hidden = false;
+    report.innerHTML = markdownRenderer.render(activeReportMarkdown);
+    reportEditButton.textContent = "编辑报告";
+    reportEditorStatus.hidden = true;
+    reportEditorPanel.hidden = true;
+    return;
+  }
+
+  report.hidden = true;
+  if (!reportEditorDialog.open) reportEditorDialog.showModal();
+  if (!reportEditorPanel.parentElement?.isSameNode(reportEditorLeft)) {
+    reportEditorLeft.append(reportEditorPanel);
+  }
+  reportEditorPanel.hidden = false;
+  reportEditorEditHeader();
+  renderReportBlocks(reportEditorReport, proposedReportOperation);
+}
+
+function reportEditorEditHeader() {
+  reportEditorPreviewStatus.textContent = proposedReportOperation?.state === "proposed"
+    ? "正在预览本次修改，尚未保存"
+    : selectedReportVersion
+      ? `正在审阅版本 ${selectedReportVersion.version}`
+    : reportManualEditing
+      ? "正在手动编辑，保存后生成新版本"
+    : `当前版本 ${reportDocument.version}`;
+  const auditWarnings = reportCitationAudit?.warnings || [];
+  reportEditorAudit.hidden = auditWarnings.length === 0;
+  reportEditorAudit.textContent = auditWarnings.length
+    ? `引用校验：${auditWarnings.join(" ")}`
+    : "";
+  reportEditorManualEdit.hidden = reportManualEditing;
+  reportEditorManualSave.hidden = !reportManualEditing;
+  reportEditorManualCancel.hidden = !reportManualEditing;
+  reportEditorVersions.setAttribute("aria-pressed", String(!reportEditorVersionReview.hidden));
+  reportEditorManualEdit.disabled = Boolean(selectedReportVersion) || reportEditorBusy;
+  reportEditButton.textContent = "退出编辑";
+  reportEditorStatus.hidden = false;
+  reportEditorStatus.textContent = selectedReportTextRange
+    ? `鏂囨。鐗堟湰 ${reportDocument.version} 路 宸查€変腑鏂囧瓧鑼冨洿`
+    : selectedReportBlockIds.length
+    ? `文档版本 ${reportDocument.version} · 已选中 ${selectedReportBlockIds.length} 个连续范围`
+    : `文档版本 ${reportDocument.version} · 当前范围为整篇报告`;
+  renderReportEditorPanel();
+  renderReportVersionReview();
+}
+
+function renderReportBlocks(target, previewOperation) {
+  target.replaceChildren();
+  const previewMarkdown = previewOperation ? reportPreviewMarkdown(previewOperation) : undefined;
+  const hasPreview = previewMarkdown !== undefined;
+  target.classList.toggle("previewing", hasPreview);
+  target.classList.toggle("manual-editing", reportManualEditing);
+  if (selectedReportVersion) {
+    target.innerHTML = markdownRenderer.render(selectedReportVersion.markdown);
+    return;
+  }
+  if (reportManualEditing) {
+    const scope = selectedReportBlockIds.length ? "已选内容范围" : "整篇报告";
+    const hint = document.createElement("p");
+    hint.className = "report-editor-manual-hint";
+    hint.textContent = `${scope}将以 Markdown 保存；引用链接和格式会一并保留。`;
+    const editor = document.createElement("textarea");
+    editor.id = "report-editor-manual-markdown";
+    editor.className = "report-editor-manual-markdown";
+    editor.value = reportEditorDraftMarkdown() ?? manualEditorMarkdown();
+    editor.addEventListener("input", () => saveReportEditorDraft(editor.value));
+    editor.setAttribute("aria-label", "手动编辑报告内容");
+    target.append(hint, editor);
+    return;
+  }
+  if (hasPreview) {
+    renderReportPreview(target, previewOperation, previewMarkdown);
+    return;
+  }
+  for (const block of reportDocument.blocks || []) {
+    const element = document.createElement("section");
+    element.className = "report-editor-block";
+    element.dataset.reportBlockId = block.id;
+    element.tabIndex = 0;
+    element.setAttribute("role", "button");
+    element.setAttribute("aria-pressed", String(selectedReportBlockIds.includes(block.id)));
+    if (selectedReportBlockIds.includes(block.id)) element.classList.add("selected");
+    const content = document.createElement("div");
+    content.className = "report-editor-block-content";
+    content.innerHTML = markdownRenderer.render(block.markdown);
+    element.append(content);
+    target.append(element);
+  }
+}
+
+function renderReportPreview(target, operation, previewMarkdown) {
+  const comparison = document.createElement("section");
+  comparison.className = "report-editor-diff";
+  const heading = document.createElement("p");
+  heading.className = "report-editor-diff-heading";
+  heading.textContent = "修改范围对比";
+  const columns = document.createElement("div");
+  columns.className = "report-editor-diff-columns";
+  for (const [label, markdown, variant] of [
+    ["原内容", operation.originalMarkdown, "before"],
+    ["建议内容", operation.replacementMarkdown, "after"],
+  ]) {
+    const column = document.createElement("section");
+    column.className = `report-editor-diff-column ${variant}`;
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const content = document.createElement("div");
+    content.innerHTML = markdownRenderer.render(markdown || "*(已删除)*");
+    column.append(title, content);
+    columns.append(column);
+  }
+  comparison.append(heading, columns);
+  const preview = document.createElement("section");
+  preview.className = "report-editor-rendered-preview";
+  preview.innerHTML = markdownRenderer.render(previewMarkdown);
+  target.append(comparison, preview);
+}
+
+function renderReportVersionReview() {
+  if (reportEditorVersionReview.hidden) return;
+  reportEditorVersionList.replaceChildren();
+  if (!reportDocumentVersions.length) {
+    const empty = document.createElement("p");
+    empty.className = "report-editor-empty";
+    empty.textContent = "尚未读取到可审阅版本。";
+    reportEditorVersionList.append(empty);
+    return;
+  }
+  for (const version of reportDocumentVersions) {
+    const item = document.createElement("article");
+    item.className = "report-editor-version-item";
+    const summary = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `版本 ${version.version}${version.version === reportDocument.version ? " · 当前" : ""}`;
+    const time = document.createElement("span");
+    time.textContent = new Date(version.createdAt).toLocaleString();
+    summary.append(title, time);
+    const actions = document.createElement("div");
+    const view = document.createElement("button");
+    view.type = "button";
+    view.className = "ghost-button";
+    view.dataset.reportVersion = String(version.version);
+    view.dataset.reportVersionAction = "view";
+    view.textContent = version.version === reportDocument.version ? "查看当前" : "查看";
+    actions.append(view);
+    if (version.version !== reportDocument.version) {
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.dataset.reportVersion = String(version.version);
+      restore.dataset.reportVersionAction = "restore";
+      restore.textContent = "恢复此版本";
+      actions.append(restore);
+    }
+    item.append(summary, actions);
+    reportEditorVersionList.append(item);
+  }
+}
+
+function manualEditorMarkdown() {
+  if (!reportDocument) return "";
+  if (selectedReportTextRange) return selectedReportTextRange.originalText;
+  if (!selectedReportBlockIds.length) return reportDocument.currentMarkdown;
+  const firstBlock = reportDocument.blocks.find((block) => block.id === selectedReportBlockIds[0]);
+  const lastBlock = reportDocument.blocks.find((block) => block.id === selectedReportBlockIds.at(-1));
+  if (!firstBlock || !lastBlock) return "";
+  return reportDocument.currentMarkdown.slice(firstBlock.sourceStart, lastBlock.sourceEnd);
+}
+
+function reportEditorDraftScope() {
+  if (!reportDocument) return undefined;
+  return JSON.stringify({
+    version: reportDocument.version,
+    scope: selectedReportTextRange ? "text" : selectedReportBlockIds.length ? "blocks" : "document",
+    blockIds: selectedReportBlockIds,
+    rangeStart: selectedReportTextRange?.rangeStart,
+    rangeEnd: selectedReportTextRange?.rangeEnd,
+  });
+}
+
+function reportEditorDraftKey() {
+  const scope = reportEditorDraftScope();
+  return activeTaskId && scope ? `${REPORT_EDITOR_DRAFT_PREFIX}:${activeTaskId}:${scope}` : undefined;
+}
+
+function reportEditorDraftMarkdown() {
+  const key = reportEditorDraftKey();
+  if (!key) return undefined;
+  try {
+    const draft = JSON.parse(localStorage.getItem(key) || "null");
+    return typeof draft?.markdown === "string" ? draft.markdown : undefined;
+  } catch {
+    localStorage.removeItem(key);
+    return undefined;
+  }
+}
+
+function saveReportEditorDraft(markdown) {
+  const key = reportEditorDraftKey();
+  if (!key || typeof markdown !== "string") return;
+  if (markdown === manualEditorMarkdown()) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, JSON.stringify({ markdown, updatedAt: new Date().toISOString() }));
+}
+
+function clearReportEditorDraft() {
+  const key = reportEditorDraftKey();
+  if (key) localStorage.removeItem(key);
+}
+
+function confirmDiscardManualDraft() {
+  if (!reportManualEditing) return true;
+  const draft = reportEditorDraftMarkdown();
+  if (draft === undefined || draft === manualEditorMarkdown()) return true;
+  return window.confirm("手动编辑尚未保存，确定放弃这些修改吗？");
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!reportManualEditing || reportEditorDraftMarkdown() === undefined) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+
+function reportPreviewMarkdown(operation) {
+  if (!reportDocument || operation?.state !== "proposed") return undefined;
+  if (operation.scope === "document") return operation.replacementMarkdown;
+  if (operation.scope === "text") {
+    const block = reportDocument.blocks.find((item) => item.id === operation.blockIds[0]);
+    if (!block || operation.rangeStart === undefined || operation.rangeEnd === undefined) return undefined;
+    const start = block.sourceStart + operation.rangeStart;
+    const end = block.sourceStart + operation.rangeEnd;
+    return [
+      reportDocument.currentMarkdown.slice(0, start),
+      operation.replacementMarkdown,
+      reportDocument.currentMarkdown.slice(end),
+    ].join("");
+  }
+  const firstBlock = reportDocument.blocks.find((block) => block.id === operation.blockIds[0]);
+  const lastBlock = reportDocument.blocks.find(
+    (block) => block.id === operation.blockIds.at(-1),
+  );
+  if (!firstBlock || !lastBlock) return undefined;
+  return [
+    reportDocument.currentMarkdown.slice(0, firstBlock.sourceStart),
+    operation.replacementMarkdown,
+    reportDocument.currentMarkdown.slice(lastBlock.sourceEnd),
+  ].join("");
+}
+
+async function loadReportEditorConversations() {
+  if (!activeTaskId || !reportEditing) return;
+  const scopeKey = selectedReportBlockIds.length ? selectedReportBlockIds.join(",") : "document";
+  try {
+    const response = await fetch(
+      `/api/tasks/${activeTaskId}/report-editor/conversations?blockId=${encodeURIComponent(scopeKey)}`,
+    );
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "无法读取编辑对话");
+    reportEditorConversations = result.conversations || [];
+    reportEditorOperations = result.operations || [];
+    const pendingOperation = reportEditorOperations.find((item) => item.state === "proposed");
+    if (!proposedReportOperation || !reportEditorOperations.some((item) => item.id === proposedReportOperation.id)) {
+      proposedReportOperation = pendingOperation;
+    }
+    if (selectedReportConversation) {
+      selectedReportConversation = reportEditorConversations.find(
+        (item) => item.id === selectedReportConversation.id,
+      ) || reportEditorConversations[0];
+    } else {
+      selectedReportConversation = reportEditorConversations[0];
+    }
+  } catch (error) {
+    reportEditorConversations = [];
+    reportEditorOperations = [];
+    selectedReportConversation = undefined;
+    showReportEditorError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function renderReportEditorPanel() {
+  reportEditorPanel.hidden = false;
+  reportEditorScope.textContent = selectedReportTextRange
+    ? "宸查€変腑鏂囧瓧 路 浠呬慨鏀硅鑼冨洿"
+    : selectedReportBlockIds.length
+    ? `已选 ${selectedReportBlockIds.length} 段 · 仅修改此范围`
+    : "整篇报告 · 可修改全文";
+  reportEditorConversation.replaceChildren();
+  const conversation = selectedReportConversation;
+  if (!conversation?.messages?.length) {
+    const empty = document.createElement("p");
+    empty.className = "report-editor-empty";
+    empty.textContent = "此处还没有编辑记录。";
+    reportEditorConversation.append(empty);
+  } else {
+    for (const message of conversation.messages) {
+      const item = document.createElement("article");
+      item.className = `report-editor-message ${message.role}`;
+      const label = document.createElement("span");
+      label.textContent = message.role === "user"
+        ? "你"
+        : message.role === "assistant" ? "AI 助手" : "状态";
+      const content = document.createElement("div");
+      content.textContent = reportEditorMessageText(message);
+      item.append(label, content);
+      reportEditorConversation.append(item);
+    }
+  }
+  if (reportEditorTransientMessage) {
+    const item = document.createElement("article");
+    item.className = "report-editor-message event pending";
+    const label = document.createElement("span");
+    label.textContent = "编辑助手";
+    const content = document.createElement("div");
+    content.textContent = reportEditorTransientMessage;
+    item.append(label, content);
+    reportEditorConversation.append(item);
+    reportEditorConversation.scrollTop = reportEditorConversation.scrollHeight;
+  }
+  renderReportSearch();
+  const showProposal = proposedReportOperation?.state === "proposed";
+  reportEditorProposal.hidden = !showProposal;
+  reportEditorApply.hidden = !showProposal;
+  reportEditorReject.hidden = !showProposal;
+  const undoableOperation = reportEditorOperations.find((item) =>
+    item.state === "applied" && !item.undoneOperationId
+  );
+  reportEditorUndo.hidden = !undoableOperation || showProposal;
+  reportEditorForm.hidden = reportManualEditing || Boolean(selectedReportVersion);
+  setReportEditorBusy(reportEditorBusy);
+}
+
+function selectedReportSearchResultIds() {
+  return reportSearchResults.filter((result) => result.selected).map((result) => result.id);
+}
+
+function renderReportSearch() {
+  reportEditorSearch.hidden = reportManualEditing || Boolean(selectedReportVersion);
+  reportEditorSearchResults.replaceChildren();
+  if (!reportSearchResults.length) return;
+  for (const result of reportSearchResults) {
+    const item = document.createElement("label");
+    item.className = "report-editor-search-result";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(result.selected);
+    checkbox.dataset.reportSearchResultId = result.id;
+    checkbox.disabled = reportEditorBusy;
+    const content = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = result.title;
+    const meta = document.createElement("small");
+    meta.textContent = result.snippet || result.url;
+    content.append(title, meta);
+    item.append(checkbox, content);
+    reportEditorSearchResults.append(item);
+  }
+}
+
+function reportEditorMessageText(message) {
+  if (message.role === "assistant" && message.content.length > 280) {
+    return "修改预览已经生成，详细内容请查看右侧报告。";
+  }
+  return message.content;
+}
+
+async function applyReportOperation(action) {
+  if (!activeTaskId || !proposedReportOperation || reportEditorBusy) return;
+  setReportEditorBusy(true);
+  try {
+    const response = await fetch(
+      `/api/tasks/${activeTaskId}/report-editor/operations/${proposedReportOperation.id}/${action}`,
+      { method: "POST" },
+    );
+    const result = await response.json();
+    if (!response.ok) {
+      if (response.status === 409 && result.document) {
+        reportDocument = result.document;
+        activeReportMarkdown = result.document.currentMarkdown;
+        reportCitationAudit = result.audit;
+      }
+      throw new Error(result.error || "无法更新局部修改");
+    }
+    if (result.document) {
+      reportDocument = result.document;
+      activeReportMarkdown = result.document.currentMarkdown;
+      reportCitationAudit = result.audit;
+    }
+    proposedReportOperation = undefined;
+    await loadReportEditorConversations();
+    renderReportDocument();
+  } catch (error) {
+    showReportEditorError(error instanceof Error ? error.message : String(error));
+  } finally {
+    setReportEditorBusy(false);
+  }
+}
+
+function setReportEditorBusy(busy) {
+  reportEditorBusy = busy;
+  reportEditorSubmit.disabled = busy;
+  reportEditorApply.disabled = busy;
+  reportEditorReject.disabled = busy;
+  reportEditorUndo.disabled = busy;
+  reportEditorInstruction.disabled = busy;
+  reportEditorManualEdit.disabled = busy;
+  reportEditorManualSave.disabled = busy;
+  reportEditorManualCancel.disabled = busy;
+  reportEditorSearchQuery.disabled = busy;
+  reportEditorSearchSubmit.disabled = busy;
+  for (const checkbox of reportEditorSearchResults.querySelectorAll("input[type=checkbox]")) {
+    checkbox.disabled = busy;
+  }
+  if (busy) reportEditorError.hidden = true;
+}
+
+function showReportEditorError(message) {
+  reportEditorError.textContent = message;
+  reportEditorError.hidden = false;
+}
+
 function resetWorkspace(topic) {
+  if (reportEditorDialog.open) reportEditorDialog.close();
+  reportEditorPanelSlot.append(reportEditorPanel);
+  reportEditing = false;
+  reportManualEditing = false;
+  selectedReportVersion = undefined;
+  reportEditorVersionReview.hidden = true;
   workspace.hidden = false;
   taskTopic.textContent = topic;
   timeline.replaceChildren();
@@ -1262,6 +2217,20 @@ function resetWorkspace(topic) {
   contentAcceptanceState.textContent = "等待中";
   evidenceQualityState.textContent = "等待中";
   activeReportMarkdown = "";
+  reportDocument = undefined;
+  reportCitationAudit = undefined;
+  reportSearchSession = undefined;
+  reportSearchResults = [];
+  reportEditing = false;
+  selectedReportBlockId = undefined;
+  selectedReportBlockIds = [];
+  reportEditorConversations = [];
+  reportEditorOperations = [];
+  selectedReportConversation = undefined;
+  proposedReportOperation = undefined;
+  reportEditorPanel.hidden = true;
+  reportEditButton.hidden = true;
+  reportEditorStatus.hidden = true;
   report.replaceChildren();
   report.hidden = true;
   reportEvidencePolicy.hidden = true;
