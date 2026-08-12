@@ -154,6 +154,7 @@ export interface ReportEditorModel {
   rewrite(input: ReportEditorModelInput): Promise<string | ReportEditorRewrite>;
   plan?(input: ReportAssistantPlanInput): Promise<ReportAssistantPlan>;
   answer?(input: ReportEditorModelInput): Promise<string>;
+  streamAnswer?(input: ReportEditorModelInput, signal?: AbortSignal): AsyncIterable<string>;
 }
 
 export class OpenAIReportEditorModel implements ReportEditorModel {
@@ -202,26 +203,59 @@ export class OpenAIReportEditorModel implements ReportEditorModel {
 
   async answer(input: ReportEditorModelInput): Promise<string> {
     const result = await this.#connector.chat(
-      [
-        "You are a conversational assistant for a completed research report.",
-        "Answer naturally in the user's language. Do not rewrite or modify the report.",
-        "When web sources are provided, answer only from their readable content and cite them with Markdown links.",
-        "State clearly when a page could not be read or the available evidence is insufficient.",
-        "Do not mention internal routing, JSON, writable scopes, or modification proposals.",
-      ].join("\n"),
-      [
-        `Relevant report content:\n${boundedAnswerContext(input.blockMarkdown)}`,
-        input.conversationHistory?.length
-          ? `Conversation:\n${input.conversationHistory.map((item) => `${item.role}: ${item.content}`).join("\n")}`
-          : "",
-        sourcePrompt(input.sources),
-        `User message:\n${input.instruction}`,
-      ].filter(Boolean).join("\n\n"),
+      answerSystemPrompt(),
+      answerUserPrompt(input),
       this.#config,
     );
     const answer = result.content.trim();
     if (!answer) throw new Error("AI did not return an answer");
     return answer;
+  }
+
+  async *streamAnswer(input: ReportEditorModelInput, signal?: AbortSignal): AsyncIterable<string> {
+    const baseUrl = this.#config.base_url;
+    if (!baseUrl) throw new Error("report conversation requires configured model settings");
+    const response = await fetch(
+      new URL("chat/completions", `${baseUrl.replace(/\/+$/u, "")}/`),
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.#config.api_key}`,
+        },
+        body: JSON.stringify({
+          model: this.#config.model,
+          stream: true,
+          messages: [
+            { role: "system", content: answerSystemPrompt() },
+            { role: "user", content: answerUserPrompt(input) },
+          ],
+        }),
+        signal,
+      },
+    );
+    if (!response.ok) throw new Error(`report answer stream failed: ${await response.text()}`);
+    if (!response.body) throw new Error("report answer stream did not include a response body");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const events = buffer.split(/\r?\n\r?\n/u);
+      buffer = events.pop() ?? "";
+      for (const event of events) {
+        const data = event.split(/\r?\n/u)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim())
+          .join("\n");
+        if (!data || data === "[DONE]") continue;
+        const payload = JSON.parse(data) as { choices?: Array<{ delta?: { content?: unknown } }> };
+        const delta = payload.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta) yield delta;
+      }
+      if (done) break;
+    }
   }
 
   async rewrite(input: ReportEditorModelInput): Promise<ReportEditorRewrite> {
@@ -890,44 +924,66 @@ export class ReportEditorService {
     sources?: ReportSearchResult[];
     fixedReply?: string;
   }): Promise<{ conversation: ReportConversation; document: ReportDocument; summary: string }> {
-    const { document, range } = this.#requireCurrentScope(input);
-    const scopeKey = input.scope === "document" ? "document" : range.blockIds.join(",");
-    const conversation = this.#resolveConversation(input.taskId, scopeKey, input.conversationId);
-    const conversationHistory = this.store.listMessages(conversation.id)
-      .filter((message): message is ReportMessage & { role: "user" | "assistant" } =>
-        message.role === "user" || message.role === "assistant")
-      .slice(-10)
-      .map((message) => ({ role: message.role, content: message.content }));
-    this.store.addMessage({
-      conversationId: conversation.id,
-      taskId: input.taskId,
-      blockId: scopeKey,
-      role: "user",
-      content: input.instruction,
-      documentVersion: document.version,
-      blockFingerprint: reportMarkdownFingerprint(range.markdown),
-    });
+    const prepared = this.#prepareAnswerMessage(input);
     let summary = input.fixedReply?.trim();
     if (!summary) {
       if (!this.model.answer) throw new Error("report conversation requires configured model settings");
       summary = (await this.model.answer({
-        blockMarkdown: range.markdown,
+        blockMarkdown: prepared.range.markdown,
         instruction: input.instruction,
-        conversationHistory,
+        conversationHistory: prepared.conversationHistory,
         sources: input.sources,
       })).trim();
     }
     if (!summary) throw new Error("AI did not return an answer");
-    this.store.addMessage({
-      conversationId: conversation.id,
-      taskId: input.taskId,
-      blockId: scopeKey,
-      role: "assistant",
-      content: summary,
-      documentVersion: document.version,
-      blockFingerprint: reportMarkdownFingerprint(range.markdown),
-    });
-    return { conversation, document, summary };
+    this.#completeAnswerMessage(prepared, input, summary);
+    return { conversation: prepared.conversation, document: prepared.document, summary };
+  }
+
+  async *streamAnswerMessage(input: {
+    taskId: string;
+    scope: "blocks" | "document" | "text";
+    blockIds: string[];
+    rangeStart?: number;
+    rangeEnd?: number;
+    documentVersion: number;
+    originalFingerprint?: string;
+    originalText?: string;
+    instruction: string;
+    conversationId?: string;
+    sources?: ReportSearchResult[];
+    fixedReply?: string;
+    signal?: AbortSignal;
+  }): AsyncIterable<{ type: "delta"; content: string } | { type: "done"; conversation: ReportConversation; document: ReportDocument; summary: string }> {
+    const prepared = this.#prepareAnswerMessage(input);
+    let summary = input.fixedReply?.trim() ?? "";
+    if (summary) {
+      yield { type: "delta", content: summary };
+    } else if (this.model.streamAnswer) {
+      for await (const content of this.model.streamAnswer({
+        blockMarkdown: prepared.range.markdown,
+        instruction: input.instruction,
+        conversationHistory: prepared.conversationHistory,
+        sources: input.sources,
+      }, input.signal)) {
+        if (!content) continue;
+        summary += content;
+        yield { type: "delta", content };
+      }
+    } else {
+      if (!this.model.answer) throw new Error("report conversation requires configured model settings");
+      summary = (await this.model.answer({
+        blockMarkdown: prepared.range.markdown,
+        instruction: input.instruction,
+        conversationHistory: prepared.conversationHistory,
+        sources: input.sources,
+      })).trim();
+      if (summary) yield { type: "delta", content: summary };
+    }
+    summary = summary.trim();
+    if (!summary) throw new Error("AI did not return an answer");
+    this.#completeAnswerMessage(prepared, input, summary);
+    yield { type: "done", conversation: prepared.conversation, document: prepared.document, summary };
   }
 
   async propose(input: {
@@ -1298,6 +1354,71 @@ export class ReportEditorService {
     };
   }
 
+  #prepareAnswerMessage(input: {
+    taskId: string;
+    scope: "blocks" | "document" | "text";
+    blockIds: string[];
+    rangeStart?: number;
+    rangeEnd?: number;
+    documentVersion: number;
+    originalFingerprint?: string;
+    originalText?: string;
+    instruction: string;
+    conversationId?: string;
+  }): {
+    document: ReportDocument;
+    range: ReturnType<typeof reportScopeRange>;
+    conversation: ReportConversation;
+    scopeKey: string;
+    conversationHistory: Array<{ role: "user" | "assistant"; content: string }>;
+  } {
+    const { document, range } = this.#requireCurrentScope(input);
+    const scopeKey = input.scope === "document" ? "document" : range.blockIds.join(",");
+    const conversation = this.#resolveConversation(input.taskId, scopeKey, input.conversationId);
+    return {
+      document,
+      range,
+      conversation,
+      scopeKey,
+      conversationHistory: this.#conversationHistory(input.taskId, conversation.id),
+    };
+  }
+
+  #completeAnswerMessage(
+    prepared: {
+      document: ReportDocument;
+      range: ReturnType<typeof reportScopeRange>;
+      conversation: ReportConversation;
+      scopeKey: string;
+    },
+    input: {
+      taskId: string;
+      documentVersion: number;
+      instruction: string;
+    },
+    summary: string,
+  ): void {
+    const fingerprint = reportMarkdownFingerprint(prepared.range.markdown);
+    this.store.addMessage({
+      conversationId: prepared.conversation.id,
+      taskId: input.taskId,
+      blockId: prepared.scopeKey,
+      role: "user",
+      content: input.instruction,
+      documentVersion: input.documentVersion,
+      blockFingerprint: fingerprint,
+    });
+    this.store.addMessage({
+      conversationId: prepared.conversation.id,
+      taskId: input.taskId,
+      blockId: prepared.scopeKey,
+      role: "assistant",
+      content: summary,
+      documentVersion: input.documentVersion,
+      blockFingerprint: fingerprint,
+    });
+  }
+
   #requireCurrentScope(input: {
     taskId: string;
     scope: "blocks" | "document" | "text";
@@ -1471,6 +1592,29 @@ function sourcePrompt(sources: ReportEditorModelInput["sources"]): string {
       source.content ? boundedSourceContent(source.content) : source.snippet ?? "[Page body could not be read]",
     ].join("\n")),
   ].join("\n\n");
+}
+
+function answerSystemPrompt(): string {
+  return [
+    "You are the conversation assistant for a research-report editor.",
+    "Answer the user's question from the provided report context, conversation, and readable sources.",
+    "Do not claim that a report change was made and do not propose edits unless explicitly asked in a separate editing flow.",
+    "Use the user's language. Give a concise, useful answer with 3 to 5 numbered conclusions when appropriate.",
+    "Each conclusion should be one or two sentences. Do not repeat the report verbatim or write a full report.",
+    "Use Markdown only when it improves clarity. Preserve URLs and citations from readable sources when they support a factual claim.",
+  ].join("\n");
+}
+
+function answerUserPrompt(input: ReportEditorModelInput): string {
+  return [
+    "Report context:",
+    boundedAnswerContext(input.blockMarkdown),
+    input.conversationHistory?.length
+      ? `Conversation history:\n${input.conversationHistory.map((message) => `${message.role}: ${message.content}`).join("\n")}`
+      : "",
+    sourcePrompt(input.sources),
+    `User message:\n${input.instruction}`,
+  ].filter(Boolean).join("\n\n");
 }
 
 function boundedSourceContent(value: string): string {

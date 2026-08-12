@@ -4,7 +4,7 @@
 
 - `apps/orchestrator/src/` contains the TypeScript API, AO workflow integration, GPTR connector, citation normalization, settings, and task lifecycle.
 - `apps/orchestrator/test/` contains Node test-runner suites named `*.test.ts`.
-- `apps/web/public/` is the dependency-light frontend (`index.html`, `app.js`, and `styles.css`) served by the API.
+- `apps/web/src/` contains the React, Vite, TypeScript, Ant Design, and Ant Design X frontend; `apps/web/dist/` is the generated production bundle served by the API.
 - `services/researcher/app/` contains the FastAPI GPTR adapter and document exporter; `services/researcher/test/` contains Pytest tests.
 - `services/researcher/assets/fonts/` holds the licensed PDF font asset.
 - `scripts/` contains acceptance tooling; executable tests and source code are the current behavioral reference.

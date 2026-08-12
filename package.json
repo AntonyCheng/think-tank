@@ -7,12 +7,14 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace @think-tank/orchestrator",
+    "build": "npm run build --workspace @think-tank/orchestrator && npm run web:build",
+    "web:dev": "npm run dev --workspace @think-tank/web",
+    "web:build": "npm run build --workspace @think-tank/web",
     "test": "npm run test --workspace @think-tank/orchestrator",
     "typecheck": "npm run typecheck --workspace @think-tank/orchestrator",
     "test:acceptance": "node scripts/acceptance.mjs",
     "spike": "node --env-file-if-exists=.env --import tsx apps/orchestrator/src/spike.ts",
-    "api": "node --env-file-if-exists=.env --import tsx apps/orchestrator/src/api-server.ts"
+    "api": "npm run web:build && node --env-file-if-exists=.env --import tsx apps/orchestrator/src/api-server.ts"
   },
   "engines": {
     "node": ">=22.5.0"

@@ -37,6 +37,20 @@ test("stores task-isolated camel-case records readable by the researcher", async
   );
 });
 
+test("copies task documents into an independent retry task", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "think-tank-documents-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new TaskDocumentStore(root);
+  const original = await store.save("source-task", "notes.txt", Buffer.from("retry me"));
+
+  const copiedIds = await store.copyTask("source-task", "retry-task");
+  const copied = await store.list("retry-task");
+
+  assert.equal(copied.length, 1);
+  assert.notEqual(copied[0]?.documentId, original.documentId);
+  assert.equal(copiedIds.get(original.documentId), copied[0]?.documentId);
+});
+
 test("enforces per-file, task-size, and document-count limits", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "think-tank-documents-"));
   t.after(() => rm(root, { recursive: true, force: true }));

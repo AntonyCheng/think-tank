@@ -148,6 +148,28 @@ export class TaskDocumentStore {
       .sort((left, right) => left.documentId.localeCompare(right.documentId));
   }
 
+  async copyTask(sourceTaskId: string, targetTaskId: string): Promise<Map<string, string>> {
+    assertIdentifier(sourceTaskId, "source task");
+    assertIdentifier(targetTaskId, "target task");
+    const copiedIds = new Map<string, string>();
+    const sourceDocuments = await this.list(sourceTaskId);
+    try {
+      for (const document of sourceDocuments) {
+        const content = await readFile(resolve(
+          this.#taskRoot(sourceTaskId),
+          document.documentId,
+          `content.${storageExtension(document.mediaType)}`,
+        ));
+        const copied = await this.save(targetTaskId, document.displayName, content);
+        copiedIds.set(document.documentId, copied.documentId);
+      }
+      return copiedIds;
+    } catch (error) {
+      await this.deleteTask(targetTaskId);
+      throw error;
+    }
+  }
+
   async deleteTask(taskId: string): Promise<void> {
     assertIdentifier(taskId, "task");
     await rm(this.#taskRoot(taskId), { recursive: true, force: true });

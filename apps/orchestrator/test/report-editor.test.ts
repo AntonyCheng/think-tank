@@ -137,6 +137,42 @@ test("answers a conversational message without creating an edit operation", asyn
   );
 });
 
+test("streams a complete conversational answer before persisting it", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  const service = new ReportEditorService(documents, store, {
+    async rewrite() {
+      throw new Error("rewrite must not be called for chat");
+    },
+    async *streamAnswer() {
+      yield "第一";
+      yield "条";
+    },
+  });
+  const document = documents.getOrCreate("report-editor-stream", markdown);
+  const events = [] as Array<{ type: string; content?: string; summary?: string }>;
+  for await (const event of service.streamAnswerMessage({
+    taskId: document.taskId,
+    scope: "document",
+    blockIds: [],
+    documentVersion: document.version,
+    instruction: "给我一个结论。",
+  })) {
+    events.push(event.type === "delta"
+      ? event
+      : { type: event.type, summary: event.summary });
+  }
+  assert.deepEqual(events, [
+    { type: "delta", content: "第一" },
+    { type: "delta", content: "条" },
+    { type: "done", summary: "第一条" },
+  ]);
+  assert.deepEqual(
+    service.conversations(document.taskId, "document")[0]?.messages.map((message) => [message.role, message.content]),
+    [["user", "给我一个结论。"], ["assistant", "第一条"]],
+  );
+});
+
 test("rejects nested structured output instead of treating it as report markdown", async () => {
   const editorModel = new OpenAIReportEditorModel(
     { model: "test", api_key: "test", base_url: "https://example.com/v1" } as never,

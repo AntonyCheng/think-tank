@@ -70,6 +70,7 @@ test("queues a research task and preserves its event history", async () => {
           id: "research",
           name: "Research expert",
           role: "research/analyst",
+          task: "Research the market.",
           type: "expert",
           dependsOn: [],
           mode: "standard",

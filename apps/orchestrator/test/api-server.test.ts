@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -52,6 +52,99 @@ const readyCapabilityProvider: ResearchCapabilityProvider = {
     return readyRetrieverCatalog;
   },
 };
+
+test("lists the Chinese AO agent directory with only presentation metadata", async (t) => {
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }));
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as AddressInfo).port;
+
+  const response = await fetch(`http://127.0.0.1:${port}/api/agents`);
+  assert.equal(response.status, 200);
+  const payload = await response.json() as { agents: Array<Record<string, unknown>> };
+  assert.equal(payload.agents.length, 267);
+  assert.deepEqual(Object.keys(payload.agents[0] ?? {}).sort(), ["emoji", "id", "name"]);
+  assert.ok(payload.agents.every((agent) => typeof agent.name === "string" && agent.name.length > 0));
+  assert.ok(payload.agents.every((agent) => typeof agent.emoji === "string" && agent.emoji.length > 0));
+});
+
+test("returns redacted failure diagnostics without exposing raw diagnostic data", async (t) => {
+  const manager = new ResearchTaskManager(async (_topic, onEvent) => {
+    const timestamp = new Date().toISOString();
+    onEvent({
+      type: "research.diagnostic",
+      timestamp,
+      diagnostic: {
+        timestamp,
+        aoStepId: "workflow_composition",
+        researchRunId: "workflow-composition",
+        rawType: "workflow.response_extraction",
+        rawStage: "response_extraction",
+        data: { message: "authorization: hidden-token" },
+        truncated: false,
+      },
+    });
+    throw new Error("workflow composition failed");
+  });
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as AddressInfo).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const created = await fetch(`${baseUrl}/api/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic: "diagnostic test" }),
+  });
+  const task = await created.json() as { id: string };
+  await waitFor(async () => (await fetch(`${baseUrl}/api/tasks/${task.id}`)).json().then((value: { status: string }) => value.status === "failed"));
+
+  const response = await fetch(`${baseUrl}/api/tasks/${task.id}/diagnostics`);
+  assert.equal(response.status, 200);
+  const payload = await response.json() as { diagnostics: Array<Record<string, unknown>> };
+  assert.equal(payload.diagnostics.length, 1);
+  assert.deepEqual(Object.keys(payload.diagnostics[0] ?? {}).sort(), ["id", "message", "stage", "timestamp"]);
+  assert.equal(payload.diagnostics[0]?.message, "authorization: [redacted]");
+});
+
+test("restarts a failed task as a new research session", async (t) => {
+  let runs = 0;
+  const manager = new ResearchTaskManager(async () => {
+    runs += 1;
+    throw new Error("workflow composition failed");
+  });
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as AddressInfo).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const created = await fetch(`${baseUrl}/api/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic: "retry the failed workflow" }),
+  }).then((response) => response.json()) as { id: string };
+  await waitFor(async () => (await fetch(`${baseUrl}/api/tasks/${created.id}`))
+    .json().then((task: { status: string }) => task.status === "failed"));
+
+  const response = await fetch(`${baseUrl}/api/tasks/${created.id}/retry`, {
+    method: "POST",
+  });
+  assert.equal(response.status, 202);
+  const retry = await response.json() as { id: string; topic: string };
+  assert.notEqual(retry.id, created.id);
+  assert.equal(retry.topic, "retry the failed workflow");
+  await waitFor(async () => runs >= 2);
+});
 
 test("submits, observes, and retrieves a completed research task", async (t) => {
   const manager = new ResearchTaskManager(async (_topic, onEvent) => {
@@ -695,7 +788,10 @@ test("proxies completed reports to the export service", async (t) => {
   );
   assert.equal(response.status, 200);
   assert.equal(await response.text(), "%PDF-test");
-  assert.match(response.headers.get("content-disposition") ?? "", /\.pdf/u);
+  assert.match(
+    response.headers.get("content-disposition") ?? "",
+    /filename="research-report-v1\.pdf"; filename\*=UTF-8''%E7%A0%94%E7%A9%B6%E6%8A%A5%E5%91%8A_v1_\d{8}-\d{4}\.pdf/u,
+  );
   assert.deepEqual(JSON.parse(receivedBody), {
     taskId: created.id,
     title: "export topic",
@@ -703,14 +799,34 @@ test("proxies completed reports to the export service", async (t) => {
   });
 });
 
-test("serves the same-origin research interface and rejects unknown assets", async (t) => {
+test("serves the React build entry and rejects unknown assets", async (t) => {
   const manager = new ResearchTaskManager(async () => {
     throw new Error("runner should not be called");
   });
-  const server = createApiServer(manager);
+  const webRoot = await mkdtemp(join(tmpdir(), "think-tank-web-"));
+  await mkdir(join(webRoot, "assets"), { recursive: true });
+  await writeFile(
+    join(webRoot, "index.html"),
+    "<!doctype html><title>智研AI助手</title><script type=\"module\" src=\"/assets/index-test.js\"></script>",
+  );
+  await writeFile(join(webRoot, "assets", "index-test.js"), "console.log('智研AI助手');");
+  await writeFile(join(webRoot, "assets", "index-test.css"), ".app-shell { color: #20252b; }");
+  const server = createApiServer(
+    manager,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    webRoot,
+  );
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  t.after(() => server.close());
+  t.after(async () => {
+    server.close();
+    await rm(webRoot, { recursive: true, force: true });
+  });
   const port = (server.address() as AddressInfo).port;
   const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -718,135 +834,22 @@ test("serves the same-origin research interface and rejects unknown assets", asy
   assert.equal(page.status, 200);
   assert.match(page.headers.get("content-type") ?? "", /text\/html/u);
   const pageText = await page.text();
-  assert.match(pageText, /AI 智囊团/u);
-  assert.match(pageText, /组队 → 研究 → 可观测 → 报告/u);
-  assert.match(pageText, /id="research-elapsed"/u);
-  assert.match(pageText, /id="research-cost"/u);
-  assert.match(pageText, /检索来源（去重）/u);
-  assert.match(
-    pageText,
-    /id="event-count"[^>]*>\s*0 个执行节点 · 0 条研究事件/u,
-  );
-  assert.doesNotMatch(
-    pageText,
-    /Agency Orchestrator|GPT Researcher|\bAO\b|GPTR/u,
-  );
-  assert.match(pageText, /\/vendor\/markdown-it\.min\.js/u);
-  assert.match(pageText, /<article id="report"/u);
-  assert.match(pageText, /id="content-acceptance-state"/u);
-  assert.match(pageText, /id="evidence-quality-state"/u);
-  assert.match(pageText, /id="content-warning-list"/u);
-  assert.match(pageText, /id="evidence-quality-metrics"/u);
-  assert.match(pageText, /id="evidence-warning-list"/u);
-  assert.match(pageText, /id="source-mode"/u);
-  assert.match(pageText, /仅指定 URL/u);
-  assert.match(pageText, /指定 URL \+ Web 补充/u);
-  assert.match(pageText, /href="\/favicon\.ico\?v=20260729"/u);
-  assert.match(pageText, /sizes="32x32"/u);
-  assert.match(pageText, /rel="apple-touch-icon"/u);
+  assert.match(pageText, /智研AI助手/u);
+  assert.match(pageText, /\/assets\/index-test\.js/u);
+  assert.doesNotMatch(pageText, /AI 智囊团|markdown-it\.min|app\.js/u);
 
-  const logo = await fetch(
-    `${baseUrl}/assets/ai-think-tank-logo.png`,
-  );
-  assert.equal(logo.status, 200);
-  assert.equal(logo.headers.get("content-type"), "image/png");
-  assert.ok((await logo.arrayBuffer()).byteLength > 1_000);
-
-  const favicon = await fetch(`${baseUrl}/favicon.ico`);
-  assert.equal(favicon.status, 200);
-  assert.equal(favicon.headers.get("content-type"), "image/x-icon");
-  assert.ok((await favicon.arrayBuffer()).byteLength > 1_000);
-
-  const tabIcon = await fetch(`${baseUrl}/assets/favicon-32x32.png`);
-  assert.equal(tabIcon.status, 200);
-  assert.equal(tabIcon.headers.get("content-type"), "image/png");
-  assert.ok((await tabIcon.arrayBuffer()).byteLength > 500);
-
-  const styles = await fetch(`${baseUrl}/styles.css`);
-  assert.equal(styles.status, 200);
-  assert.match(styles.headers.get("content-type") ?? "", /text\/css/u);
-  const stylesText = await styles.text();
-  assert.match(stylesText, /\[hidden\]\s*\{[\s\S]*display:\s*none/u);
-  assert.match(
-    stylesText,
-    /\.timeline-panel\s*\{[\s\S]*height:[\s\S]*overflow:\s*hidden/u,
-  );
-  assert.match(
-    stylesText,
-    /height:\s*clamp\(720px,\s*86vh,\s*980px\)/u,
-  );
-  assert.match(
-    stylesText,
-    /\.timeline\s*\{[\s\S]*overflow-y:\s*auto/u,
-  );
-  assert.match(
-    stylesText,
-    /\.research-activity-list\s*\{[\s\S]*max-height:[\s\S]*overflow-y:\s*auto/u,
-  );
-
-  const script = await fetch(`${baseUrl}/app.js`);
+  const script = await fetch(`${baseUrl}/assets/index-test.js`);
   assert.equal(script.status, 200);
   const scriptText = await script.text();
-  assert.match(scriptText, /EventSource/u);
-  assert.match(scriptText, /task\.completed_with_warnings/u);
-  assert.match(scriptText, /contentAcceptance/u);
-  assert.match(scriptText, /evidenceQuality/u);
-  assert.match(scriptText, /markdownit/u);
-  assert.match(scriptText, /markdownRenderer\.render/u);
-  assert.match(scriptText, /html:\s*false/u);
-  assert.match(scriptText, /validateLink/u);
-  assert.match(scriptText, /citation-ref/u);
-  assert.match(scriptText, /label\.slice\(1,\s*-1\)/u);
-  assert.match(scriptText, /\^https\?:/u);
-  assert.match(scriptText, /localStorage/u);
-  assert.match(scriptText, /restoreActiveTask/u);
-  assert.match(scriptText, /lastEventId/u);
-  assert.match(scriptText, /gptr\.progress/u);
-  assert.match(scriptText, /research\.progress/u);
-  assert.match(scriptText, /research\.activity/u);
-  assert.match(scriptText, /research\.completed/u);
-  assert.match(scriptText, /research\.failed/u);
-  assert.match(scriptText, /researchRuns\.get\(progress\.researchRunId\)/u);
-  assert.match(scriptText, /buildResearchProfile/u);
-  assert.match(scriptText, /includeDomains/u);
-  assert.match(scriptText, /updateResearchTelemetry/u);
-  assert.match(
-    scriptText,
-    /updateResearchTelemetry\(\s*task\.researchTelemetry,\s*isTerminalStatus\(task\.status\)/u,
-  );
-  assert.match(scriptText, /function updateTimelineCounter/u);
-  assert.match(scriptText, /个执行节点/u);
-  assert.match(scriptText, /条研究事件/u);
-  assert.match(scriptText, /function upsertResearchActivity/u);
-  assert.match(scriptText, /aria-expanded/u);
-  assert.match(scriptText, /taskUniqueSourceCount/u);
-  assert.match(scriptText, /reportedCostRuns/u);
-  assert.match(scriptText, /scraping_images:\s*"筛选图片"/u);
-  assert.match(scriptText, /research_step_finalized:\s*"完成研究步骤"/u);
-  assert.doesNotMatch(
-    scriptText,
-    /`GPTR · \$\{humanizeStage\(stage\)\}`/u,
-  );
-  assert.doesNotMatch(scriptText, /GPTR 完成一轮证据研究/u);
-  assert.doesNotMatch(scriptText, /AO 开始编排研究团队|AO 需要补充信息/u);
-  assert.match(scriptText, /task\.needs_input/u);
-  assert.match(scriptText, /task\.canceled/u);
-  assert.match(scriptText, /\/ready/u);
-  assert.match(scriptText, /cancel-button/u);
-  assert.match(scriptText, /input-form/u);
-  assert.match(scriptText, /settings-form/u);
-  assert.doesNotMatch(scriptText, /item\.scrollIntoView/u);
-  assert.match(scriptText, /timeline\.scrollTop\s*=\s*timeline\.scrollHeight/u);
+  assert.match(scriptText, /智研AI助手/u);
 
-  const markdownIt = await fetch(
-    `${baseUrl}/vendor/markdown-it.min.js`,
-  );
-  assert.equal(markdownIt.status, 200);
-  assert.match(
-    markdownIt.headers.get("content-type") ?? "",
-    /text\/javascript/u,
-  );
-  assert.match(await markdownIt.text(), /markdownit/u);
+  const styles = await fetch(`${baseUrl}/assets/index-test.css`);
+  assert.equal(styles.status, 200);
+  assert.match(styles.headers.get("content-type") ?? "", /text\/css/u);
+
+  const historyRoute = await fetch(`${baseUrl}/tasks/example`);
+  assert.equal(historyRoute.status, 200);
+  assert.equal(await historyRoute.text(), pageText);
 
   const missing = await fetch(`${baseUrl}/not-a-real-asset.js`);
   assert.equal(missing.status, 404);

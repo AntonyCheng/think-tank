@@ -12,6 +12,7 @@ export interface WorkflowPlanStep {
   id: string;
   name: string;
   role: string;
+  task: string;
   type: "expert" | "human_input" | "approval";
   dependsOn: string[];
   mode?: ResearchMode;
@@ -19,8 +20,8 @@ export interface WorkflowPlanStep {
 }
 
 /**
- * Produces the small, non-sensitive workflow view sent to task clients.
- * Workflow instructions, prompts, model settings, and credentials stay server-side.
+ * Produces the task plan displayed to research clients. Runtime configuration,
+ * model settings, and credentials stay server-side.
  */
 export function projectWorkflowPlan(
   workflow: WorkflowDefinition,
@@ -33,6 +34,7 @@ export function projectWorkflowPlan(
       id: step.id,
       name: step.name?.trim() || step.id,
       role: step.role?.trim() || "",
+      task: step.task.trim(),
       type: step.type === "human_input"
         ? "human_input"
         : step.type === "approval"

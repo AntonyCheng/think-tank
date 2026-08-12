@@ -12,6 +12,7 @@ import {
 import { applyCurrentEvidenceQualityTargets } from "./evidence-quality.js";
 import {
   InMemoryResearchTaskStore,
+  type StoredResearchDiagnostic,
   type ResearchTaskEventDraft,
   type ResearchTaskStore,
 } from "./research-task-store.js";
@@ -314,6 +315,10 @@ export class ResearchTaskManager {
       ...snapshot,
       output: formatCitationReport(snapshot.output, snapshot.citations),
     };
+  }
+
+  diagnostics(id: string): StoredResearchDiagnostic[] {
+    return this.#store.loadDiagnostics(id);
   }
 
   listHistory(input: {

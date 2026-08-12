@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
+import { parseWorkflow } from "agency-orchestrator";
 
 import {
   assertCheckpointCompatible,
@@ -20,6 +21,7 @@ import { RuntimeSettingsStore } from "./settings-store.js";
 import {
   ResearchProfileError,
   resolveResearchProfile,
+  type ResearchProfile,
 } from "./research-profile.js";
 import {
   currentResearchProfileEnvironment,
@@ -31,6 +33,8 @@ import {
   type RetrieverCatalog,
 } from "./gptr-capabilities.js";
 import { replaceEnvironmentValue } from "./environment-file.js";
+import { loadAgentCatalog } from "./agent-catalog.js";
+import { agentsDirForLanguage } from "./ao-runtime.js";
 import { TaskDocumentStore } from "./document-store.js";
 import {
   InMemoryReportDocumentStore,
@@ -51,92 +55,8 @@ const MAX_BODY_BYTES = 64 * 1024;
 // Full-document report edits contain the complete Markdown document. Keep a
 // generous transport limit for this endpoint without weakening other APIs.
 const REPORT_EDITOR_BODY_BYTES = 16 * 1024 * 1024;
-const require = createRequire(import.meta.url);
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-const markdownItRoot = resolve(
-  dirname(require.resolve("markdown-it/package.json")),
-  "dist",
-);
-const webRoots = process.env.WEB_ROOT
-  ? [resolve(process.env.WEB_ROOT)]
-  : [
-      resolve(moduleDirectory, "../../web/public"),
-      resolve(moduleDirectory, "../../../web/public"),
-    ];
-const staticAssets = new Map([
-  [
-    "/",
-    {
-      file: "index.html",
-      type: "text/html; charset=utf-8",
-      roots: webRoots,
-    },
-  ],
-  [
-    "/styles.css",
-    {
-      file: "styles.css",
-      type: "text/css; charset=utf-8",
-      roots: webRoots,
-    },
-  ],
-  [
-    "/app.js",
-    {
-      file: "app.js",
-      type: "text/javascript; charset=utf-8",
-      roots: webRoots,
-    },
-  ],
-  [
-    "/assets/ai-think-tank-logo.png",
-    {
-      file: "assets/ai-think-tank-logo.png",
-      type: "image/png",
-      roots: webRoots,
-    },
-  ],
-  [
-    "/favicon.ico",
-    {
-      file: "assets/favicon.ico",
-      type: "image/x-icon",
-      roots: webRoots,
-    },
-  ],
-  [
-    "/assets/favicon-16x16.png",
-    {
-      file: "assets/favicon-16x16.png",
-      type: "image/png",
-      roots: webRoots,
-    },
-  ],
-  [
-    "/assets/favicon-32x32.png",
-    {
-      file: "assets/favicon-32x32.png",
-      type: "image/png",
-      roots: webRoots,
-    },
-  ],
-  [
-    "/assets/apple-touch-icon.png",
-    {
-      file: "assets/apple-touch-icon.png",
-      type: "image/png",
-      roots: webRoots,
-    },
-  ],
-  [
-    "/vendor/markdown-it.min.js",
-    {
-      file: "markdown-it.min.js",
-      type: "text/javascript; charset=utf-8",
-      roots: [markdownItRoot],
-    },
-  ],
-]);
+const defaultWebRoot = resolve(moduleDirectory, "../../web/dist");
 
 export function createApiServer(
   manager: ResearchTaskManager,
@@ -155,23 +75,15 @@ export function createApiServer(
       ? new OpenAIReportEditorModel(settings.getRuntimeSettings().planner)
       : new UnavailableReportEditorModel(),
   ),
+  webRoot = process.env.WEB_ROOT
+    ? resolve(process.env.WEB_ROOT)
+    : defaultWebRoot,
 ) {
   const documents = new TaskDocumentStore();
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
       const segments = url.pathname.split("/").filter(Boolean);
-
-      const asset = staticAssets.get(url.pathname);
-      if (request.method === "GET" && asset) {
-        const content = await readStaticAsset(asset.file, asset.roots);
-        response.writeHead(200, {
-          "Content-Type": asset.type,
-          "Cache-Control": "no-cache",
-        });
-        response.end(content);
-        return;
-      }
 
       if (request.method === "GET" && url.pathname === "/health") {
         return sendJson(response, 200, { status: "ok" });
@@ -187,6 +99,26 @@ export function createApiServer(
           readiness.status === "ready" ? 200 : 503,
           readiness,
         );
+      }
+
+      if (request.method === "GET" && !url.pathname.startsWith("/api/")) {
+        const asset = await readWebAsset(webRoot, url.pathname);
+        if (asset) {
+          response.writeHead(200, {
+            "Content-Type": contentTypeFor(asset.file),
+            "Cache-Control": asset.file === "index.html"
+              ? "no-cache"
+              : "public, max-age=31536000, immutable",
+          });
+          response.end(asset.content);
+          return;
+        }
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/agents") {
+        return sendJson(response, 200, {
+          agents: await loadAgentCatalog(agentsDirForLanguage("zh")),
+        });
       }
 
       if (
@@ -370,6 +302,131 @@ export function createApiServer(
         }
         reportDocuments.getOrCreate(task.id, task.output!);
         return sendJson(response, 200, { versions: reportDocuments.listVersions(task.id) });
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "report-editor" &&
+        segments[4] === "messages" &&
+        segments[5] === "stream" &&
+        segments.length === 6
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) {
+          return sendJson(response, 409, { error: "report editor is only available after completion" });
+        }
+        const body = await readJsonBody(request, REPORT_EDITOR_BODY_BYTES);
+        const scope: "document" | "text" | "blocks" = body.scope === "document"
+          ? "document"
+          : body.scope === "text" ? "text" : "blocks";
+        const requestedBlockIds = Array.isArray(body.blockIds)
+          ? body.blockIds.filter((value): value is string => typeof value === "string" && value.trim() !== "").map((value) => value.trim())
+          : [];
+        const blockId = requiredEditorString(body.blockId, "blockId");
+        const blockIds = scope === "document"
+          ? []
+          : [...new Set(requestedBlockIds.length ? requestedBlockIds : blockId ? [blockId] : [])];
+        const originalFingerprint = requiredEditorString(body.originalFingerprint, "originalFingerprint");
+        const instruction = requiredEditorString(body.instruction, "instruction");
+        const documentVersion = positiveEditorVersion(body.documentVersion);
+        const rangeStart = integerEditorOffset(body.rangeStart);
+        const rangeEnd = integerEditorOffset(body.rangeEnd);
+        const originalText = typeof body.originalText === "string" ? body.originalText : undefined;
+        if (((scope === "blocks" || scope === "text") && !blockIds.length) ||
+          (scope === "text" && (rangeStart === undefined || rangeEnd === undefined || !originalText)) ||
+          !instruction || !documentVersion) {
+          return sendJson(response, 422, {
+            error: "scope, documentVersion, and instruction are required; blocks scope needs blockIds",
+          });
+        }
+
+        const document = reportDocuments.getOrCreate(task.id, task.output);
+        const commonInput = {
+          taskId: task.id,
+          scope,
+          blockIds,
+          documentVersion,
+          originalFingerprint,
+          ...(scope === "text" ? { rangeStart, rangeEnd, originalText } : {}),
+          instruction,
+          ...(typeof body.conversationId === "string" && body.conversationId.trim()
+            ? { conversationId: body.conversationId.trim() }
+            : {}),
+        };
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        response.on("close", abort);
+        response.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+        response.flushHeaders();
+        try {
+          writeSse(response, "status", { message: "正在理解问题" });
+          const plan = await reportEditor.planMessage(commonInput);
+          if (plan.intent === "edit" || plan.intent === "edit_with_research") {
+            writeSse(response, "fallback", {});
+            response.end();
+            return;
+          }
+
+          let sources: ReturnType<ReportEditorService["recordSearch"]>["results"] | undefined;
+          if (plan.intent === "research") {
+            writeSse(response, "status", { message: "正在检索资料" });
+            const catalog = settings
+              ? await loadRetrieverCatalog(settings, researcherServiceUrl(), capabilityProvider)
+              : undefined;
+            const retrievers = catalog
+              ? catalog.retrievers.slice(0, catalog.maxRetrievers).map((item) => item.id)
+              : ["duckduckgo"];
+            const researched = await researchReportSources(researcherServiceUrl(), {
+              query: plan.query ?? (plan.urls.length ? undefined : instruction),
+              urls: plan.urls,
+              retrievers,
+              limit: 5,
+            });
+            const recorded = reportEditor.recordSearch({
+              taskId: task.id,
+              scopeKey: scope === "document" ? "document" : blockIds.join(","),
+              query: plan.query ?? instruction,
+              retrievers,
+              results: researched.sources,
+            });
+            const readableIds = recorded.results
+              .filter((source) => source.fetchStatus === "fetched")
+              .map((source) => source.id);
+            reportEditor.selectSearchResults(task.id, recorded.session.id, readableIds);
+            sources = recorded.results;
+          }
+
+          for await (const event of reportEditor.streamAnswerMessage({
+            ...commonInput,
+            ...(plan.intent === "clarify" && plan.reply ? { fixedReply: plan.reply } : {}),
+            ...(sources ? { sources } : {}),
+            signal: controller.signal,
+          })) {
+            if (event.type === "delta") writeSse(response, "delta", { content: event.content });
+            else writeSse(response, "done", {
+              conversationId: event.conversation.id,
+              documentVersion: event.document.version,
+            });
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            writeSse(response, "error", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        } finally {
+          response.off("close", abort);
+          if (!response.writableEnded) response.end();
+        }
+        return;
       }
 
       if (
@@ -842,6 +899,47 @@ export function createApiServer(
         segments[0] === "api" &&
         segments[1] === "tasks" &&
         segments[2] &&
+        segments[3] === "retry" &&
+        segments.length === 4
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (![
+          "failed",
+          "canceled",
+        ].includes(task.status)) {
+          return sendJson(response, 409, {
+            error: "only failed or canceled tasks can be restarted",
+          });
+        }
+
+        const retryTaskId = randomUUID();
+        try {
+          const documentIds = await documents.copyTask(task.id, retryTaskId);
+          const researchProfile = task.researchProfile
+            ? remapRetryDocumentIds(task.researchProfile, documentIds)
+            : undefined;
+          const retry = manager.submit(task.topic, {
+            taskId: retryTaskId,
+            ...(researchProfile === undefined ? {} : { researchProfile }),
+            ...(task.researchCapabilities === undefined
+              ? {}
+              : { researchCapabilities: task.researchCapabilities }),
+          });
+          return sendJson(response, 202, retry);
+        } catch (error) {
+          await documents.deleteTask(retryTaskId);
+          return sendJson(response, 422, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
         segments[3] === "resume" && segments.length === 4
       ) {
         const task = manager.get(segments[2]);
@@ -970,7 +1068,7 @@ export function createApiServer(
         }
 
         if (segments.length === 3) {
-          return sendJson(response, 200, task);
+          return sendJson(response, 200, enrichLegacyWorkflowPlan(task));
         }
         if (segments.length === 4 && segments[3] === "events") {
           return streamEvents(
@@ -980,6 +1078,19 @@ export function createApiServer(
             task.status,
             request.headers["last-event-id"],
           );
+        }
+        if (segments.length === 4 && segments[3] === "diagnostics") {
+          return sendJson(response, 200, {
+            diagnostics: manager.diagnostics(taskId).flatMap((diagnostic) => {
+              const message = diagnosticMessage(diagnostic.data.message);
+              return message ? [{
+                id: diagnostic.id,
+                timestamp: diagnostic.timestamp,
+                stage: diagnostic.rawStage,
+                message,
+              }] : [];
+            }),
+          });
         }
         const exportFormat = segments[4];
         if (
@@ -1004,6 +1115,7 @@ export function createApiServer(
             {
               ...task,
               output: currentDocument?.currentMarkdown ?? task.output,
+              reportVersion: currentDocument?.version,
             },
           );
         }
@@ -1024,6 +1136,15 @@ async function loadRetrieverCatalog(
 ): Promise<RetrieverCatalog> {
   const timeoutMs = settings.getRuntimeSettings().gptrHealthTimeoutMs;
   return provider.getCatalog(serviceUrl, timeoutMs);
+}
+
+function diagnosticMessage(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  return value
+    .replace(/\b(api[_-]?key|authorization|token)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/giu, "$1: [redacted]")
+    .replace(/\bsk-[a-z0-9_-]+/giu, "[redacted]")
+    .trim()
+    .slice(0, 600);
 }
 
 async function searchReportSources(
@@ -1109,6 +1230,50 @@ function rebaseResearchProfilePath(path: string): string {
     : `$.researchProfile${path.slice(1)}`;
 }
 
+function remapRetryDocumentIds(
+  profile: ResearchProfile,
+  documentIds: ReadonlyMap<string, string>,
+): ResearchProfile {
+  const source = profile.source;
+  if (source.mode !== "local" && source.mode !== "hybrid") return profile;
+  const remappedIds = source.documentIds.map((documentId) => {
+    const copiedId = documentIds.get(documentId);
+    if (!copiedId) throw new Error("本地文档未能复制，无法重新发起研究。");
+    return copiedId;
+  });
+  return {
+    ...profile,
+    source: { ...source, documentIds: remappedIds },
+  };
+}
+
+function enrichLegacyWorkflowPlan<T extends {
+  workflowPath?: string;
+  workflowPlan?: { steps: Array<{ id: string; task: string }> };
+}>(task: T): T {
+  if (!task.workflowPlan || task.workflowPlan.steps.every((step) => typeof step.task === "string" && step.task.trim())) return task;
+  if (!task.workflowPath) return task;
+  const workflowRoot = resolve(".think-tank", "workflows");
+  const workflowPath = resolve(task.workflowPath);
+  const candidate = relative(workflowRoot, workflowPath);
+  if (!candidate || candidate.startsWith("..") || isAbsolute(candidate)) return task;
+  try {
+    const tasksById = new Map(parseWorkflow(workflowPath).steps.map((step) => [step.id, step.task.trim()]));
+    return {
+      ...task,
+      workflowPlan: {
+        ...task.workflowPlan,
+        steps: task.workflowPlan.steps.map((step) => ({
+          ...step,
+          task: step.task || tasksById.get(step.id) || "",
+        })),
+      },
+    };
+  } catch {
+    return task;
+  }
+}
+
 function contiguousTargetBlockIds(
   document: { blocks: Array<{ id: string }> },
   requested: string[],
@@ -1183,7 +1348,7 @@ async function proxyReportExport(
   response: ServerResponse,
   serviceUrl: string,
   exportFormat: string,
-  task: { id: string; topic: string; output?: string },
+  task: { id: string; topic: string; output?: string; reportVersion?: number },
 ): Promise<void> {
   const upstream = await fetch(
     `${serviceUrl.replace(/\/+$/u, "")}/export/${exportFormat}`,
@@ -1207,26 +1372,86 @@ async function proxyReportExport(
   response.writeHead(200, {
     "Content-Type": upstream.headers.get("content-type") ??
       "application/octet-stream",
-    "Content-Disposition": upstream.headers.get("content-disposition") ??
-      `attachment; filename="think-tank-report.${exportFormat}"`,
+    "Content-Disposition": reportExportContentDisposition(
+      task.reportVersion,
+      exportFormat,
+    ),
     "Cache-Control": "no-store",
   });
   response.end(Buffer.from(await upstream.arrayBuffer()));
 }
 
-async function readStaticAsset(
-  file: string,
-  roots: readonly string[],
-): Promise<Buffer> {
-  let lastError: unknown;
-  for (const root of roots) {
-    try {
-      return await readFile(resolve(root, file));
-    } catch (error) {
-      lastError = error;
-    }
+function reportExportContentDisposition(
+  version: number | undefined,
+  format: string,
+): string {
+  const documentVersion = version && version > 0 ? version : 1;
+  const extension = format === "markdown" ? "md" : format;
+  const timestamp = exportFilenameTimestamp();
+  const filename = `研究报告_v${documentVersion}_${timestamp}.${extension}`;
+  const fallback = `research-report-v${documentVersion}.${extension}`;
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+function exportFilenameTimestamp(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date).reduce<Record<string, string>>((result, part) => {
+    if (part.type !== "literal") result[part.type] = part.value;
+    return result;
+  }, {});
+  return `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}`;
+}
+
+async function readWebAsset(
+  root: string,
+  pathname: string,
+): Promise<{ file: string; content: Buffer } | undefined> {
+  let file: string;
+  try {
+    file = pathname === "/"
+      ? "index.html"
+      : decodeURIComponent(pathname).replace(/^\/+/, "");
+  } catch {
+    return undefined;
   }
-  throw lastError;
+  if (!file || file.includes("\0")) return undefined;
+  const resolved = resolve(root, file);
+  const fromRoot = relative(root, resolved);
+  if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) return undefined;
+  try {
+    return { file, content: await readFile(resolved) };
+  } catch {
+    if (!extname(file) && !file.startsWith("api/")) {
+      try {
+        return { file: "index.html", content: await readFile(resolve(root, "index.html")) };
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+}
+
+function contentTypeFor(file: string): string {
+  const extension = extname(file).toLowerCase();
+  return {
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".ico": "image/x-icon",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+  }[extension] ?? "application/octet-stream";
 }
 
 function streamEvents(
@@ -1363,6 +1588,10 @@ function sendJson(
     "Content-Type": "application/json; charset=utf-8",
   });
   response.end(JSON.stringify(body));
+}
+
+function writeSse(response: ServerResponse, event: string, body: unknown): void {
+  response.write(`event: ${event}\ndata: ${JSON.stringify(body)}\n\n`);
 }
 
 function validStepId(value: unknown): string | undefined {
