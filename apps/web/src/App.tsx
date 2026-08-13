@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Popover } from "antd";
 import { Sender } from "@ant-design/x";
 import { HistoryOutlined, PlusOutlined, SettingOutlined } from "@ant-design/icons";
@@ -109,6 +109,28 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
   const [source, setSource] = useState<ResearchSourceConfig>(defaultSource);
+  const welcomeTitleRef = useRef<HTMLSpanElement>(null);
+  const welcomeTitleAiRef = useRef<HTMLSpanElement>(null);
+
+  const syncWelcomeTitleLine = () => {
+    const title = welcomeTitleRef.current;
+    const ai = welcomeTitleAiRef.current;
+    if (!title || !ai) return;
+    const titleBounds = title.getBoundingClientRect();
+    const aiBounds = ai.getBoundingClientRect();
+    title.style.setProperty("--ai-line-left", `${(aiBounds.left - titleBounds.left).toFixed(1)}px`);
+    title.style.setProperty("--ai-line-width", `${aiBounds.width.toFixed(1)}px`);
+  };
+
+  useEffect(() => {
+    if (session.phase !== "idle") return;
+    const frame = window.requestAnimationFrame(syncWelcomeTitleLine);
+    window.addEventListener("resize", syncWelcomeTitleLine);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", syncWelcomeTitleLine);
+    };
+  }, [session.phase]);
 
   useEffect(() => {
     const restoreFromHash = () => {
@@ -192,8 +214,28 @@ export function App() {
       </header>
 
       <section className="welcome-stage">
-        <div className="welcome-copy">
-          <h1>把问题交给智研AI助手</h1>
+        <div
+          className="welcome-copy welcome-copy-interactive"
+          onPointerLeave={(event) => {
+            const style = event.currentTarget.style;
+            style.setProperty("--title-x", "0px");
+            style.setProperty("--title-y", "0px");
+            style.setProperty("--copy-x", "0px");
+            style.setProperty("--copy-y", "0px");
+          }}
+          onPointerMove={(event) => {
+            syncWelcomeTitleLine();
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const pointerX = ((event.clientX - bounds.left) / bounds.width - 0.5) * 2;
+            const pointerY = ((event.clientY - bounds.top) / bounds.height - 0.5) * 2;
+            const style = event.currentTarget.style;
+            style.setProperty("--title-x", `${(pointerX * 3).toFixed(1)}px`);
+            style.setProperty("--title-y", `${(pointerY * 3).toFixed(1)}px`);
+            style.setProperty("--copy-x", `${(pointerX * 1.5).toFixed(1)}px`);
+            style.setProperty("--copy-y", `${(pointerY * 1.5).toFixed(1)}px`);
+          }}
+        >
+          <h1 className="welcome-title"><span className="welcome-title-content" ref={welcomeTitleRef}>把问题交给智研<span className="welcome-title-ai" ref={welcomeTitleAiRef}>AI</span>助手</span></h1>
           <p>从一个问题开始，自动组建专家团队、检索证据并交付研究报告。</p>
         </div>
         <section className="composer-frame" aria-label="开始研究">

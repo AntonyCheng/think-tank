@@ -50,27 +50,35 @@ textarea:focus-visible {
 }
 
 .brand-mark {
-  display: grid;
+  display: block;
   width: 34px;
   height: 34px;
-  place-items: center;
-  border-radius: 10px;
-  color: #ffffff;
-  background: #20252b;
-  font-size: 15px;
-  font-weight: 750;
+  object-fit: contain;
 }
 
-.brand-copy strong,
-.brand-copy span {
+.brand-copy {
+  text-align: left;
+}
+
+.brand-copy > strong,
+.brand-copy > span {
   display: block;
 }
 
-.brand-copy strong {
+.brand-copy > strong {
   font-size: 15px;
 }
 
-.brand-copy span {
+.brand-ai {
+  color: #1677ff;
+  background: linear-gradient(90deg, #176ff2 0%, #11bfe2 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 750;
+}
+
+.brand-copy > span {
   margin-top: 2px;
   color: #7a8490;
   font-size: 12px;
@@ -107,7 +115,17 @@ textarea:focus-visible {
   text-align: center;
 }
 
+.welcome-copy-interactive {
+  --title-x: 0px;
+  --title-y: 0px;
+  --copy-x: 0px;
+  --copy-y: 0px;
+  position: relative;
+}
+
 .welcome-copy h1 {
+  position: relative;
+  z-index: 1;
   margin: 0 0 10px;
   color: #20252b;
   font-size: clamp(32px, 5vw, 52px);
@@ -115,14 +133,81 @@ textarea:focus-visible {
   letter-spacing: 0;
 }
 
+.welcome-title {
+  animation: welcome-title-enter 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.welcome-title-content {
+  --ai-line-left: 50%;
+  --ai-line-width: 2em;
+  position: relative;
+  display: inline-block;
+  translate: var(--title-x) var(--title-y);
+  transition: translate 180ms ease-out;
+}
+
+.welcome-title-content::after {
+  position: absolute;
+  bottom: -9px;
+  left: var(--ai-line-left);
+  width: var(--ai-line-width);
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(90deg, #176ff2, #13c3df);
+  box-shadow: 0 1px 5px rgb(19 195 223 / 24%);
+  content: "";
+  transition: left 260ms cubic-bezier(0.22, 1, 0.36, 1), width 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.welcome-title-ai {
+  display: inline-block;
+  color: #1677ff;
+  background: linear-gradient(105deg, #176ff2 15%, #0da8ed 55%, #14c4df 85%);
+  background-size: 180% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: welcome-ai-glow 4s ease-in-out 1.2s infinite;
+  font-weight: 750;
+}
+
 .welcome-copy p {
+  position: relative;
+  z-index: 1;
   margin: 0;
   color: #697582;
   font-size: 16px;
   line-height: 1.7;
+  animation: welcome-copy-enter 420ms cubic-bezier(0.22, 1, 0.36, 1) 100ms both;
+  translate: var(--copy-x) var(--copy-y);
+  transition: translate 180ms ease-out;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .welcome-copy-interactive:hover .welcome-title-content::after {
+    left: 0;
+    width: 100%;
+  }
+}
+
+@keyframes welcome-title-enter {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes welcome-copy-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes welcome-ai-glow {
+  0%, 82%, 100% { background-position: 0% 50%; filter: brightness(1); }
+  90% { background-position: 100% 50%; filter: brightness(1.16); }
 }
 
 .composer-frame {
+  position: relative;
+  z-index: 2;
   padding: 10px 10px 0;
   border: 1px solid #dfe4e9;
   border-radius: 16px;

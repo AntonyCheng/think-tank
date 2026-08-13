@@ -3,9 +3,7 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  // The legacy static frontend remains outside the build while migration is
-  // being verified. React owns every production asset from src/.
-  publicDir: false,
+  publicDir: "public",
   server: {
     port: 5173,
     proxy: {
