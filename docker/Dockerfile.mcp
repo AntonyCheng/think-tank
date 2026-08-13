@@ -1,0 +1,22 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app/mcp-server
+
+COPY mcp-server/requirements.txt ./requirements.txt
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt
+
+COPY mcp-server/*.py ./
+RUN mkdir -p /app/mcp-server/artifacts
+
+EXPOSE 7010
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=5 \
+  CMD python -c "import socket; connection=socket.create_connection(('127.0.0.1', 7010), 3); connection.close()"
+
+CMD ["python", "server.py"]
+

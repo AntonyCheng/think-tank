@@ -157,20 +157,20 @@ export interface ReportEditorModel {
   streamAnswer?(input: ReportEditorModelInput, signal?: AbortSignal): AsyncIterable<string>;
 }
 
-export class OpenAIReportEditorModel implements ReportEditorModel {
-  readonly #connector: LLMConnector;
-  readonly #config: LLMConfig;
+type ReportEditorModelConfig = LLMConfig | (() => LLMConfig);
 
-  constructor(config: LLMConfig, connector?: LLMConnector) {
-    this.#config = config;
-    this.#connector = connector ?? new OpenAICompatibleConnector({
-      apiKey: config.api_key,
-      baseUrl: config.base_url,
-    });
+export class OpenAIReportEditorModel implements ReportEditorModel {
+  readonly #connector?: LLMConnector;
+  readonly #config: () => LLMConfig;
+
+  constructor(config: ReportEditorModelConfig, connector?: LLMConnector) {
+    this.#config = typeof config === "function" ? config : () => config;
+    this.#connector = connector;
   }
 
   async plan(input: ReportAssistantPlanInput): Promise<ReportAssistantPlan> {
-    const result = await this.#connector.chat(
+    const { config, connector } = this.#runtime();
+    const result = await connector.chat(
       [
         "You route messages for an AI research-report workspace.",
         "Return one strict JSON object with: intent, query, urls, reply, editInstruction, targetBlockIds.",
@@ -196,16 +196,17 @@ export class OpenAIReportEditorModel implements ReportEditorModel {
           : "",
         `User message:\n${input.instruction}`,
       ].filter(Boolean).join("\n\n"),
-      this.#config,
+      config,
     );
     return parseAssistantPlan(result.content, input.instruction);
   }
 
   async answer(input: ReportEditorModelInput): Promise<string> {
-    const result = await this.#connector.chat(
+    const { config, connector } = this.#runtime();
+    const result = await connector.chat(
       answerSystemPrompt(),
       answerUserPrompt(input),
-      this.#config,
+      config,
     );
     const answer = result.content.trim();
     if (!answer) throw new Error("AI did not return an answer");
@@ -213,7 +214,8 @@ export class OpenAIReportEditorModel implements ReportEditorModel {
   }
 
   async *streamAnswer(input: ReportEditorModelInput, signal?: AbortSignal): AsyncIterable<string> {
-    const baseUrl = this.#config.base_url;
+    const config = this.#config();
+    const baseUrl = config.base_url;
     if (!baseUrl) throw new Error("report conversation requires configured model settings");
     const response = await fetch(
       new URL("chat/completions", `${baseUrl.replace(/\/+$/u, "")}/`),
@@ -221,10 +223,10 @@ export class OpenAIReportEditorModel implements ReportEditorModel {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${this.#config.api_key}`,
+          Authorization: `Bearer ${config.api_key}`,
         },
         body: JSON.stringify({
-          model: this.#config.model,
+          model: config.model,
           stream: true,
           messages: [
             { role: "system", content: answerSystemPrompt() },
@@ -259,7 +261,8 @@ export class OpenAIReportEditorModel implements ReportEditorModel {
   }
 
   async rewrite(input: ReportEditorModelInput): Promise<ReportEditorRewrite> {
-    const result = await this.#connector.chat(
+    const { config, connector } = this.#runtime();
+    const result = await connector.chat(
       [
         "You edit exactly one writable Markdown scope in a research report.",
         "Return a JSON object with exactly these fields: replacementMarkdown and reply.",
@@ -284,11 +287,22 @@ export class OpenAIReportEditorModel implements ReportEditorModel {
           : "",
         sourcePrompt(input.sources),
       ].filter(Boolean).join("\n"),
-      this.#config,
+      config,
     );
     const parsed = parseRewriteResult(result.content.trim());
     const replacement = removeMarkdownFence(parsed.replacementMarkdown);
     return { replacementMarkdown: replacement, reply: parsed.reply };
+  }
+
+  #runtime(): { config: LLMConfig; connector: LLMConnector } {
+    const config = this.#config();
+    return {
+      config,
+      connector: this.#connector ?? new OpenAICompatibleConnector({
+        apiKey: config.api_key,
+        baseUrl: config.base_url,
+      }),
+    };
   }
 }
 

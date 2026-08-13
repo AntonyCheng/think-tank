@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { once } from "node:events";
 import test from "node:test";
 
 import {
@@ -171,6 +174,70 @@ test("streams a complete conversational answer before persisting it", async () =
     service.conversations(document.taskId, "document")[0]?.messages.map((message) => [message.role, message.content]),
     [["user", "给我一个结论。"], ["assistant", "第一条"]],
   );
+});
+
+test("uses the latest model settings for each streamed report answer", async (t) => {
+  const requests: Array<{
+    path: string;
+    authorization: string | undefined;
+    model: unknown;
+  }> = [];
+  const upstream = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+      model?: unknown;
+    };
+    requests.push({
+      path: request.url ?? "",
+      authorization: request.headers.authorization,
+      model: body.model,
+    });
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(
+      'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n' +
+        "data: [DONE]\n\n",
+    );
+  });
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  t.after(() => upstream.close());
+  const port = (upstream.address() as AddressInfo).port;
+  let config = {
+    model: "old-model",
+    api_key: "old-key",
+    base_url: `http://127.0.0.1:${port}/old/v1`,
+  } as never;
+  const editorModel = new OpenAIReportEditorModel(() => config);
+  const input = {
+    blockMarkdown: markdown,
+    instruction: "Summarize the report.",
+  };
+
+  for await (const _delta of editorModel.streamAnswer(input)) {
+    // Drain the first response before changing settings.
+  }
+  config = {
+    model: "new-model",
+    api_key: "new-key",
+    base_url: `http://127.0.0.1:${port}/new/v1`,
+  } as never;
+  for await (const _delta of editorModel.streamAnswer(input)) {
+    // Drain the second response so all request assertions are deterministic.
+  }
+
+  assert.deepEqual(requests, [
+    {
+      path: "/old/v1/chat/completions",
+      authorization: "Bearer old-key",
+      model: "old-model",
+    },
+    {
+      path: "/new/v1/chat/completions",
+      authorization: "Bearer new-key",
+      model: "new-model",
+    },
+  ]);
 });
 
 test("rejects nested structured output instead of treating it as report markdown", async () => {

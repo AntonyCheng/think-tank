@@ -30,7 +30,9 @@ export async function replaceEnvironmentValues(
     if (!(error instanceof Error) || !isMissingFile(error)) throw error;
   }
 
-  let next = current;
+  // Keep dotenv files unambiguous across Windows and Linux. A lone CR can
+  // make Docker Compose merge the following variable into the current value.
+  let next = current.replace(/\r\n?|\n/gu, "\n");
   for (const [name, value] of entries) {
     const line = `${name}=${JSON.stringify(value.trim())}`;
     const expression = new RegExp(`^\\s*${name}\\s*=.*$`, "mu");

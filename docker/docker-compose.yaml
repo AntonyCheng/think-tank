@@ -1,0 +1,98 @@
+name: thinktank
+
+services:
+  thinktank-web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    image: thinktank-web:local
+    container_name: thinktank-web
+    init: true
+    restart: unless-stopped
+    depends_on:
+      thinktank-api:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+    networks:
+      - thinktank_network
+
+  thinktank-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    image: thinktank-api:local
+    container_name: thinktank-api
+    init: true
+    restart: unless-stopped
+    depends_on:
+      thinktank-researcher:
+        condition: service_healthy
+    env_file:
+      - ./data/config/runtime/runtime.env
+      - ./data/config/api/api.env
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: "3000"
+      GPTR_SERVICE_URL: http://thinktank-researcher:8010
+      LOCAL_DOCUMENTS_ROOT: /app/.think-tank/documents
+      RUNTIME_ENV_FILE: /app/config/runtime.env
+      WEB_ROOT: /app/empty-web
+    expose:
+      - "3000"
+    volumes:
+      - ./data/app:/app/.think-tank
+      - ./data/config/runtime:/app/config
+    networks:
+      - thinktank_network
+
+  thinktank-researcher:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.researcher
+    image: thinktank-researcher:local
+    container_name: thinktank-researcher
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./data/config/runtime/runtime.env
+    environment:
+      LOCAL_DOCUMENTS_ROOT: /app/.think-tank/documents
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    expose:
+      - "8010"
+    volumes:
+      - ./data/app/documents:/app/.think-tank/documents:ro
+      - ./data/researcher/exports:/app/.think-tank/exports
+    networks:
+      - thinktank_network
+
+  thinktank-mcp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mcp
+    image: thinktank-mcp:local
+    container_name: thinktank-mcp
+    init: true
+    restart: unless-stopped
+    depends_on:
+      thinktank-api:
+        condition: service_healthy
+    env_file:
+      - ./data/config/mcp/mcp.env
+    environment:
+      MCP_TRANSPORT: streamable-http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "7010"
+      THINK_TANK_API_URL: http://thinktank-api:3000
+    ports:
+      - "7010:7010"
+    volumes:
+      - ./data/mcp/artifacts:/app/mcp-server/artifacts
+    networks:
+      - thinktank_network
+
+networks:
+  thinktank_network:
+    name: thinktank_network
+    driver: bridge

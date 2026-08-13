@@ -226,7 +226,14 @@ def _run_http() -> None:
     app.add_route("/downloads/{token}", download, methods=["GET"])
     app.add_middleware(ApiKeyMiddleware)
     log.info("MCP HTTP listening at %s/mcp?api_key=***", config.MCP_PUBLIC_BASE_URL)
-    uvicorn.run(app, host=config.MCP_HOST, port=config.MCP_PORT)
+    # The MCP key is carried in the query string, so the default access log
+    # must stay disabled to keep credentials out of container logs.
+    uvicorn.run(
+        app,
+        host=config.MCP_HOST,
+        port=config.MCP_PORT,
+        access_log=False,
+    )
 
 
 def main() -> None:

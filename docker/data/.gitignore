@@ -1,0 +1,7 @@
+# data 下只提交目录骨架和配置模板，运行数据及实际密钥均不提交。
+*
+!*/
+!.gitignore
+!*.example
+!.gitkeep
+

@@ -6,6 +6,11 @@ dist/
 .env
 .env.local
 data/
+!docker/data/
+!docker/data/**/
+!docker/data/.gitignore
+!docker/data/**/*.example
+!docker/data/**/.gitkeep
 ao-output/
 workflows/generated/
 *.log

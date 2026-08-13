@@ -83,13 +83,17 @@ export function createApiServer(
     new CachedResearchCapabilityProvider(
       new HttpResearchCapabilityProvider(),
     ),
-  environmentFilePath = resolve(moduleDirectory, "../../../.env"),
+  environmentFilePath = process.env.RUNTIME_ENV_FILE
+    ? resolve(process.env.RUNTIME_ENV_FILE)
+    : resolve(moduleDirectory, "../../../.env"),
   reportDocuments: ReportDocumentStore = new InMemoryReportDocumentStore(),
   reportEditor = new ReportEditorService(
     reportDocuments,
     new InMemoryReportEditorStore(),
     settings
-      ? new OpenAIReportEditorModel(settings.getRuntimeSettings().planner)
+      ? new OpenAIReportEditorModel(
+          () => settings.getRuntimeSettings().planner,
+        )
       : new UnavailableReportEditorModel(),
   ),
   webRoot = process.env.WEB_ROOT
@@ -1859,7 +1863,9 @@ if (
   const reportEditor = new ReportEditorService(
     reportDocuments,
     new SqliteReportEditorStore(reportDatabasePath, reportDatabase),
-    new OpenAIReportEditorModel(settings.getRuntimeSettings().planner),
+    new OpenAIReportEditorModel(
+      () => settings.getRuntimeSettings().planner,
+    ),
     new SqliteReportTransactionRunner(reportDatabase),
   );
   const manager = new ResearchTaskManager(
