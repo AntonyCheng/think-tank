@@ -5,6 +5,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.web
+      args:
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}
     image: thinktank-web:local
     container_name: thinktank-web
     init: true
@@ -21,6 +23,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.api
+      args:
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}
     image: thinktank-api:local
     container_name: thinktank-api
     init: true
@@ -50,6 +54,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.researcher
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
     image: thinktank-researcher:local
     container_name: thinktank-researcher
     init: true
@@ -71,6 +77,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.mcp
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
     image: thinktank-mcp:local
     container_name: thinktank-mcp
     init: true

@@ -1,15 +1,21 @@
+# syntax=docker/dockerfile:1.7
+
 FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /app
 
 COPY services/researcher/requirements.txt services/researcher/requirements.txt
-RUN python -m pip install --upgrade pip \
-    && python -m pip install -r services/researcher/requirements.txt
+RUN --mount=type=cache,id=thinktank-pip,target=/root/.cache/pip,sharing=locked \
+    python -m pip install \
+      --index-url "${PIP_INDEX_URL}" \
+      -r services/researcher/requirements.txt
 
 COPY services/researcher/app services/researcher/app
 COPY services/researcher/assets services/researcher/assets

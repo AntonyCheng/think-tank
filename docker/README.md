@@ -81,6 +81,28 @@ docker compose -f docker\docker-compose.yaml up -d --build
 
 首次构建会下载 Node、Python、Nginx、Playwright Chromium 以及项目依赖，Researcher 镜像会明显大于其他镜像。
 
+默认使用清华 PyPI 镜像和 npmmirror，并通过 BuildKit 缓存 pip、npm 下载内容。后续依赖清单不变时 Docker 会直接复用镜像层；依赖发生变化时也会优先复用已下载的软件包。不要在日常更新时使用 `docker builder prune`，否则这些构建缓存会被清除。
+
+如需临时切换为官方源，可在当前终端覆盖构建参数后再构建：
+
+Linux：
+
+```bash
+export PIP_INDEX_URL=https://pypi.org/simple
+export NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+docker compose -f docker/docker-compose.yaml build
+```
+
+PowerShell：
+
+```powershell
+$env:PIP_INDEX_URL = "https://pypi.org/simple"
+$env:NPM_CONFIG_REGISTRY = "https://registry.npmjs.org"
+docker compose -f docker\docker-compose.yaml build
+```
+
+以上优化只加速项目依赖。`node`、`python`、`nginx` 和 `mcr.microsoft.com/playwright` 等基础镜像仍由对应镜像仓库下载；若基础镜像本身很慢，需要为服务器 Docker daemon 配置可信的镜像加速器，或将这些基础镜像同步到私有仓库。
+
 查看日志：
 
 ```powershell

@@ -1,14 +1,20 @@
+# syntax=docker/dockerfile:1.7
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /app/mcp-server
 
 COPY mcp-server/requirements.txt ./requirements.txt
-RUN python -m pip install --upgrade pip \
-    && python -m pip install -r requirements.txt
+RUN --mount=type=cache,id=thinktank-pip,target=/root/.cache/pip,sharing=locked \
+    python -m pip install \
+      --index-url "${PIP_INDEX_URL}" \
+      -r requirements.txt
 
 COPY mcp-server/*.py ./
 RUN mkdir -p /app/mcp-server/artifacts
@@ -19,4 +25,3 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=5 \
   CMD python -c "import socket; connection=socket.create_connection(('127.0.0.1', 7010), 3); connection.close()"
 
 CMD ["python", "server.py"]
-
