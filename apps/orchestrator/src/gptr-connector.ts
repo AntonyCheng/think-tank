@@ -42,6 +42,7 @@ export interface GptrConnectorOptions {
   smartLlm?: string;
   embedding?: string;
   embeddingBaseUrl?: string;
+  embeddingApiKey?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   cleanupGraceMs?: number;
@@ -206,6 +207,7 @@ export class GptrConnector implements LLMConnector {
       smartLlm: this.#options.smartLlm,
       embedding: this.#options.embedding,
       embeddingBaseUrl: this.#options.embeddingBaseUrl,
+      embeddingApiKey: this.#options.embeddingApiKey,
     };
 
     let heartbeat: NodeJS.Timeout | undefined;

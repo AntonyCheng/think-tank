@@ -28,6 +28,7 @@ export interface EditableRuntimeSettings {
 export interface PublicRuntimeSettings extends EditableRuntimeSettings {
   retriever: ResearchRetriever;
   apiKeyConfigured: boolean;
+  embeddingApiKeyConfigured: boolean;
 }
 
 export interface RetrieverSelectionConstraints {
@@ -71,6 +72,7 @@ export class RuntimeSettingsStore {
       retriever: runtime.retriever,
       concurrency: runtime.concurrency,
       apiKeyConfigured: Boolean(runtime.planner.api_key),
+      embeddingApiKeyConfigured: Boolean(runtime.gptrEmbeddingApiKey),
     };
   }
 
@@ -81,12 +83,45 @@ export class RuntimeSettingsStore {
     this.#baseEnv.OPENAI_API_KEY = apiKey.trim();
   }
 
+  setEmbeddingApiKey(apiKey: string): void {
+    if (!apiKey.trim()) {
+      throw new Error("Embedding API Key must not be empty.");
+    }
+    this.#baseEnv.GPTR_EMBEDDING_API_KEY = apiKey.trim();
+  }
+
+  preview(
+    input: Record<string, unknown>,
+    secrets: { apiKey?: string; embeddingApiKey?: string } = {},
+    constraints?: RetrieverSelectionConstraints,
+  ): RuntimeSettings {
+    const candidate = this.#candidate(input);
+    assertRetrieverSelection(candidate.retrievers, constraints);
+    return settingsFromEnv({
+      ...this.#mergedEnv(candidate),
+      ...(secrets.apiKey ? { OPENAI_API_KEY: secrets.apiKey } : {}),
+      ...(secrets.embeddingApiKey
+        ? { GPTR_EMBEDDING_API_KEY: secrets.embeddingApiKey }
+        : {}),
+    });
+  }
+
   update(
     input: Record<string, unknown>,
     constraints?: RetrieverSelectionConstraints,
   ): PublicRuntimeSettings {
+    const candidate = this.#candidate(input);
+    assertRetrieverSelection(candidate.retrievers, constraints);
+    // Reuse the same validation and normalization as task execution.
+    settingsFromEnv(this.#mergedEnv(candidate));
+    this.#overrides = candidate;
+    this.#persist();
+    return this.getPublicSettings();
+  }
+
+  #candidate(input: Record<string, unknown>): EditableRuntimeSettings {
     const current = this.getPublicSettings();
-    const candidate: EditableRuntimeSettings = {
+    return {
       openaiBaseUrl: stringValue(
         input.openaiBaseUrl,
         current.openaiBaseUrl,
@@ -123,13 +158,6 @@ export class RuntimeSettingsStore {
         ? current.concurrency
         : Number(input.concurrency),
     };
-
-    assertRetrieverSelection(candidate.retrievers, constraints);
-    // Reuse the same validation and normalization as task execution.
-    settingsFromEnv(this.#mergedEnv(candidate));
-    this.#overrides = candidate;
-    this.#persist();
-    return this.getPublicSettings();
   }
 
   #mergedEnv(

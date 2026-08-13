@@ -52,6 +52,10 @@ class ResearchRequest(BaseModel):
         alias="embeddingBaseUrl",
         default=None,
     )
+    embedding_api_key: str | None = Field(
+        alias="embeddingApiKey",
+        default=None,
+    )
 
 
 class ResearchEvent(BaseModel):

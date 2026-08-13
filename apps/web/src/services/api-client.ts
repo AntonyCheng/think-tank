@@ -4,7 +4,12 @@ import type {
   ResearchTaskDiagnostic,
   ResearchTaskSnapshot,
 } from "../domain/task";
-import type { RuntimeSettings, RuntimeSettingsUpdate } from "../domain/settings";
+import type {
+  RuntimeSettings,
+  RuntimeSettingsSaveResult,
+  RuntimeSettingsUpdate,
+  SettingsPreflightCheck,
+} from "../domain/settings";
 import type { AgentCatalogEntry } from "../domain/agent";
 import { TASK_EVENT_TYPES, type TaskEvent, type TaskEventType } from "../domain/research-events";
 
@@ -86,12 +91,40 @@ export function getRuntimeSettings(): Promise<RuntimeSettings> {
   return requestJson<RuntimeSettings>("/api/settings");
 }
 
-export function updateRuntimeSettings(input: RuntimeSettingsUpdate): Promise<RuntimeSettings> {
-  return requestJson<RuntimeSettings>("/api/settings", {
-    method: "PUT",
+export function updateRuntimeSettings(input: RuntimeSettingsUpdate): Promise<RuntimeSettingsSaveResult> {
+  return requestSettingsSave("/api/settings", input, "PUT");
+}
+
+export function preflightRuntimeSettings(
+  input: RuntimeSettingsUpdate,
+  scope: "models" | "embedding" | "retrievers",
+): Promise<SettingsPreflightCheck[]> {
+  return requestSettingsSave("/api/settings/preflight", { ...input, scope }, "POST")
+    .then((result) => result.checks);
+}
+
+async function requestSettingsSave(
+  url: string,
+  input: RuntimeSettingsUpdate & { scope?: string },
+  method: "POST" | "PUT",
+): Promise<RuntimeSettingsSaveResult> {
+  const response = await fetch(url, {
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+  const payload = await response.json().catch(() => ({})) as RuntimeSettingsSaveResult & {
+    error?: string;
+    checks?: SettingsPreflightCheck[];
+  };
+  if (!response.ok) {
+    const error = new Error(payload.error || `请求失败（${response.status}）`) as Error & {
+      checks?: SettingsPreflightCheck[];
+    };
+    error.checks = payload.checks;
+    throw error;
+  }
+  return payload;
 }
 
 export function answerResearchInput(taskId: string, requestId: string, answer: string) {

@@ -285,6 +285,7 @@ async def run_research(
 
         web_policy = requested_web_policy
         llm_base_url = os.getenv("OPENAI_BASE_URL")
+        llm_api_key = os.getenv("OPENAI_API_KEY")
         if request.embedding_base_url:
             # GPTR 0.16.0's custom embedding provider reads OPENAI_BASE_URL
             # while it constructs Memory. Capture the embedding client with
@@ -292,6 +293,11 @@ async def run_research(
             os.environ["OPENAI_BASE_URL"] = (
                 request.embedding_base_url.rstrip("/")
             )
+        embedding_api_key = (
+            request.embedding_api_key or os.getenv("GPTR_EMBEDDING_API_KEY")
+        )
+        if embedding_api_key:
+            os.environ["OPENAI_API_KEY"] = embedding_api_key
         try:
             researcher_kwargs = {
                 "query": query,
@@ -321,6 +327,10 @@ async def run_research(
                 os.environ.pop("OPENAI_BASE_URL", None)
             else:
                 os.environ["OPENAI_BASE_URL"] = llm_base_url
+            if llm_api_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = llm_api_key
 
         retriever_runtime = None
         retriever_event_tasks: list[asyncio.Task[None]] = []

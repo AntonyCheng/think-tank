@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @think-tank/orchestrator && npm run web:build",
-    "web:dev": "npm run dev --workspace @think-tank/web",
+    "web:dev": "npm --workspace @think-tank/web run dev --",
     "web:build": "npm run build --workspace @think-tank/web",
     "test": "npm run test --workspace @think-tank/orchestrator",
     "typecheck": "npm run typecheck --workspace @think-tank/orchestrator",

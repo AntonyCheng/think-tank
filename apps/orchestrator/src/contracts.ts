@@ -32,6 +32,7 @@ export interface ResearchRequest {
   smartLlm?: string;
   embedding?: string;
   embeddingBaseUrl?: string;
+  embeddingApiKey?: string;
 }
 
 export interface ResearchEvent {

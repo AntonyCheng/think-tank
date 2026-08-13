@@ -68,6 +68,7 @@ export function createRuntimeConnector(
     smartLlm: settings.gptrSmartLlm,
     embedding: settings.gptrEmbedding,
     embeddingBaseUrl: settings.gptrEmbeddingBaseUrl,
+    embeddingApiKey: settings.gptrEmbeddingApiKey,
     signal,
     timeoutMs: settings.gptrResearchTimeoutMs,
     cleanupGraceMs: settings.gptrCleanupGraceMs,

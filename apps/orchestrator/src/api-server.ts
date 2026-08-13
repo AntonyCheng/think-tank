@@ -32,7 +32,13 @@ import {
   type ResearchCapabilityProvider,
   type RetrieverCatalog,
 } from "./gptr-capabilities.js";
-import { replaceEnvironmentValue } from "./environment-file.js";
+import { replaceEnvironmentValues } from "./environment-file.js";
+import {
+  preflightRuntimeSettings,
+  type SettingsPreflightCheck,
+  type SettingsPreflightScope,
+} from "./settings-preflight.js";
+import type { RuntimeSettings } from "./settings.js";
 import { loadAgentCatalog } from "./agent-catalog.js";
 import { agentsDirForLanguage } from "./ao-runtime.js";
 import { TaskDocumentStore } from "./document-store.js";
@@ -78,6 +84,11 @@ export function createApiServer(
   webRoot = process.env.WEB_ROOT
     ? resolve(process.env.WEB_ROOT)
     : defaultWebRoot,
+  settingsPreflight: (
+    candidate: RuntimeSettings,
+    scope?: SettingsPreflightScope,
+  ) => Promise<SettingsPreflightCheck[]> = (candidate, scope) =>
+    preflightRuntimeSettings(candidate, fetch, scope),
 ) {
   const documents = new TaskDocumentStore();
   return createServer(async (request, response) => {
@@ -140,6 +151,40 @@ export function createApiServer(
 
       if (
         settings &&
+        request.method === "POST" &&
+        url.pathname === "/api/settings/preflight"
+      ) {
+        const body = await readJsonBody(request);
+        const catalog = await loadRetrieverCatalog(
+          settings,
+          researcherServiceUrl(),
+          capabilityProvider,
+        );
+        try {
+          const scope = parsePreflightScope(body.scope);
+          const candidate = settings.preview(
+            body,
+            {
+              apiKey: optionalApiKey(body.apiKey),
+              embeddingApiKey: optionalApiKey(body.embeddingApiKey),
+            },
+            {
+              retrievers: catalog.retrievers.map((item) => item.id),
+              maxRetrievers: catalog.maxRetrievers,
+            },
+          );
+          const checks = await settingsPreflight(candidate, scope);
+          logSettingsPreflight(scope, checks);
+          return sendJson(response, 200, { checks });
+        } catch (error) {
+          return sendJson(response, 422, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (
+        settings &&
         request.method === "PUT" &&
         url.pathname === "/api/settings"
       ) {
@@ -151,13 +196,34 @@ export function createApiServer(
         );
         try {
           const apiKey = optionalApiKey(body.apiKey);
-          if (apiKey) {
-            await replaceEnvironmentValue(
-              environmentFilePath,
-              "OPENAI_API_KEY",
-              apiKey,
-            );
-            settings.setApiKey(apiKey);
+          const embeddingApiKey = optionalApiKey(body.embeddingApiKey);
+          const candidate = settings.preview(
+            body,
+            { apiKey, embeddingApiKey },
+            {
+              retrievers: catalog.retrievers.map((item) => item.id),
+              maxRetrievers: catalog.maxRetrievers,
+            },
+          );
+          const checks = await settingsPreflight(candidate);
+          logSettingsPreflight("all", checks);
+          const failedChecks = checks.filter((check) => check.status === "failed");
+          if (failedChecks.length) {
+            return sendJson(response, 422, {
+              error: preflightFailureMessage(failedChecks),
+              checks,
+            });
+          }
+          const environmentValues = {
+            ...(apiKey ? { OPENAI_API_KEY: apiKey } : {}),
+            ...(embeddingApiKey
+              ? { GPTR_EMBEDDING_API_KEY: embeddingApiKey }
+              : {}),
+          };
+          await replaceEnvironmentValues(environmentFilePath, environmentValues);
+          if (apiKey) settings.setApiKey(apiKey);
+          if (embeddingApiKey) {
+            settings.setEmbeddingApiKey(embeddingApiKey);
           }
           return sendJson(response, 200, {
             ...settings.update(body, {
@@ -166,6 +232,7 @@ export function createApiServer(
             }),
             retrieverCapabilities: catalog.retrievers,
             maxRetrievers: catalog.maxRetrievers,
+            checks,
           });
         } catch (error) {
           return sendJson(response, 422, {
@@ -1127,6 +1194,34 @@ export function createApiServer(
       return sendJson(response, 400, { error: message });
     }
   });
+}
+
+function preflightFailureMessage(checks: readonly SettingsPreflightCheck[]): string {
+  return `连接检测未通过：${checks.map((check) =>
+    `${check.label}${check.detail ? `（${check.detail}）` : ""}`
+  ).join("；")}`;
+}
+
+function parsePreflightScope(value: unknown): SettingsPreflightScope {
+  if (
+    value === undefined ||
+    value === "all" ||
+    value === "models" ||
+    value === "embedding" ||
+    value === "retrievers"
+  ) return value ?? "all";
+  throw new Error("检测范围无效。");
+}
+
+function logSettingsPreflight(
+  scope: SettingsPreflightScope,
+  checks: readonly SettingsPreflightCheck[],
+): void {
+  process.stdout.write(`${JSON.stringify({
+    event: "settings.preflight",
+    scope,
+    checks,
+  })}\n`);
 }
 
 async function loadRetrieverCatalog(

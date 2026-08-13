@@ -452,6 +452,84 @@ textarea:focus-visible {
   margin-bottom: 18px;
 }
 
+.settings-test-group {
+  margin-bottom: 18px;
+  padding-top: 4px;
+  border-top: 1px solid #eef0f3;
+}
+
+.settings-test-group-heading {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  color: #20252b;
+  font-size: 14px;
+}
+
+.settings-test-group-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-test-summary {
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.settings-test-summary.is-passed { color: #389e0d; }
+.settings-test-summary.is-failed { color: #cf1322; }
+
+.settings-field-check {
+  display: flex;
+  gap: 6px;
+  margin: -14px 0 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-field-check > .anticon {
+  flex: 0 0 auto;
+}
+
+.settings-field-check.is-passed { color: #389e0d; }
+.settings-field-check.is-failed { color: #cf1322; }
+
+.settings-field-check details {
+  flex-basis: 100%;
+  min-width: 0;
+  color: #6f7782;
+}
+
+.settings-field-check summary {
+  color: #5b6f82;
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings-field-check pre {
+  max-height: 132px;
+  margin: 6px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid #e5e9ee;
+  background: #f8fafc;
+  color: #3f4b57;
+  font-family: var(--font-mono, Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.settings-test-group .ant-form-item:last-child {
+  margin-bottom: 4px;
+}
+
 .workspace-shell {
   display: flex;
   height: 100dvh;

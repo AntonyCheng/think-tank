@@ -35,6 +35,7 @@ MANAGED_ENVIRONMENT = (
     "PUBMED_DB",
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
+    "GPTR_EMBEDDING_API_KEY",
     "FAST_LLM",
     "SMART_LLM",
     "STRATEGIC_LLM",
@@ -326,6 +327,8 @@ def _run_engine_process(
                 for name, value in environment.items()
                 if value and name.endswith(("_API_KEY", "_TOKEN", "_SECRET"))
             ]
+            if request.embedding_api_key:
+                secrets.append(request.embedding_api_key)
             messages.put({
                 "type": "error",
                 "status": status_code,

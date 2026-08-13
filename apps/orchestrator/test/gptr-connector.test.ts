@@ -113,6 +113,7 @@ test("maps an AO chat call to a GPT Researcher request", async () => {
     smartLlm: "openai:smart-model",
     embedding: "openai:embedding-model",
     embeddingBaseUrl: "https://embeddings.example/v1/",
+    embeddingApiKey: "embedding-secret",
     evidenceLedger,
     onResearchEvent: (event, invocation) => {
       invocationTimes ??= {
@@ -160,6 +161,7 @@ test("maps an AO chat call to a GPT Researcher request", async () => {
     smartLlm: "openai:smart-model",
     embedding: "openai:embedding-model",
     embeddingBaseUrl: "https://embeddings.example/v1/",
+    embeddingApiKey: "embedding-secret",
   });
   assert.match(receivedUrl, /\/research\/stream$/u);
   assert.deepEqual(progress, [{

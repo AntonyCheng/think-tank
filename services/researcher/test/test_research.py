@@ -16,10 +16,12 @@ from app.source_access import (
 class FakeResearcher:
     init_kwargs: dict[str, Any] = {}
     init_openai_base_url: str | None = None
+    init_openai_api_key: str | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         type(self).init_kwargs = kwargs
         type(self).init_openai_base_url = main.os.getenv("OPENAI_BASE_URL")
+        type(self).init_openai_api_key = main.os.getenv("OPENAI_API_KEY")
         self.websocket = kwargs["websocket"]
         self.cfg = SimpleNamespace(scraper="beautiful_soup")
 
@@ -317,6 +319,7 @@ def test_research_contract_and_active_configuration(monkeypatch) -> None:
         "RETRIEVER",
         "OPENAI_BASE_URL",
         "OPENAI_API_KEY",
+        "GPTR_EMBEDDING_API_KEY",
         "FAST_LLM",
         "SMART_LLM",
         "STRATEGIC_LLM",
@@ -327,6 +330,7 @@ def test_research_contract_and_active_configuration(monkeypatch) -> None:
         "CURATE_SOURCES",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GPTR_EMBEDDING_API_KEY", "embedding-secret")
 
     response = TestClient(main.app).post(
         "/research",
@@ -341,6 +345,7 @@ def test_research_contract_and_active_configuration(monkeypatch) -> None:
             "smartLlm": "openai:smart-model",
             "embedding": "openai:embedding-model",
             "embeddingBaseUrl": "https://embeddings.example/v1/",
+            "embeddingApiKey": "request-embedding-secret",
             "researchProfile": {
                 "schemaVersion": 1,
                 "mode": "standard",
@@ -422,7 +427,9 @@ def test_research_contract_and_active_configuration(monkeypatch) -> None:
         FakeResearcher.init_openai_base_url
         == "https://embeddings.example/v1"
     )
+    assert FakeResearcher.init_openai_api_key == "request-embedding-secret"
     assert main.os.environ["OPENAI_BASE_URL"] == "https://models.example/v1"
+    assert main.os.environ["OPENAI_API_KEY"] == "secret"
 
 
 def test_research_rejects_deep_profile_beyond_deployment_limit(

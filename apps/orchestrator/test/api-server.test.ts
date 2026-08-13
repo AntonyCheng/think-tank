@@ -24,6 +24,7 @@ import type {
   RetrieverCatalog,
 } from "../src/gptr-capabilities.js";
 import type { WorkflowCheckpoint } from "../src/workflow-checkpoint.js";
+import type { SettingsPreflightCheck } from "../src/settings-preflight.js";
 
 const readyRetrieverCatalog: RetrieverCatalog = Object.freeze({
   schemaVersion: 1,
@@ -52,6 +53,11 @@ const readyCapabilityProvider: ResearchCapabilityProvider = {
     return readyRetrieverCatalog;
   },
 };
+const passingSettingsPreflight = async (): Promise<SettingsPreflightCheck[]> => [
+  { id: "model", label: "模型", status: "passed" },
+  { id: "embedding", label: "Embedding 模型", status: "passed" },
+  { id: "retriever", label: "DuckDuckGo 网页搜索", status: "passed" },
+];
 
 test("lists the Chinese AO agent directory with only presentation metadata", async (t) => {
   const manager = new ResearchTaskManager(async () => ({
@@ -612,6 +618,7 @@ test("validates and snapshots task research profiles at submission", async (t) =
     GPTR_FAST_LLM: "fast",
     GPTR_SMART_LLM: "smart",
     GPTR_EMBEDDING: "m3e",
+    GPTR_EMBEDDING_API_KEY: "embedding-secret",
     RETRIEVER: "duckduckgo,openalex",
   });
   const server = createApiServer(
@@ -1090,6 +1097,10 @@ test("updates an API Key without exposing it through settings reads", async (t) 
     undefined,
     readyCapabilityProvider,
     environmentFilePath,
+    undefined,
+    undefined,
+    undefined,
+    passingSettingsPreflight,
   );
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -1100,7 +1111,9 @@ test("updates an API Key without exposing it through settings reads", async (t) 
   const initial = await fetch(`${baseUrl}/api/settings`)
     .then((response) => response.json()) as Record<string, unknown>;
   assert.equal(initial.apiKeyConfigured, true);
+  assert.equal(initial.embeddingApiKeyConfigured, false);
   assert.equal("apiKey" in initial, false);
+  assert.equal("embeddingApiKey" in initial, false);
   assert.deepEqual(initial.retrieverCapabilities, [
     {
       id: "duckduckgo",
@@ -1125,6 +1138,7 @@ test("updates an API Key without exposing it through settings reads", async (t) 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       apiKey: "replacement-secret",
+      embeddingApiKey: "replacement-embedding-secret",
       retrievers: ["duckduckgo", "openalex"],
       concurrency: 4,
     }),
@@ -1134,19 +1148,85 @@ test("updates an API Key without exposing it through settings reads", async (t) 
     retriever: string;
     retrievers: string[];
     concurrency: number;
+    embeddingApiKeyConfigured: boolean;
   };
   assert.equal(updated.retriever, "duckduckgo");
   assert.deepEqual(updated.retrievers, ["duckduckgo", "openalex"]);
   assert.equal(updated.concurrency, 4);
+  assert.equal(updated.embeddingApiKeyConfigured, true);
   assert.equal("apiKey" in updated, false);
+  assert.equal("embeddingApiKey" in updated, false);
   assert.equal(
     settings.getRuntimeSettings().planner.api_key,
     "replacement-secret",
   );
   assert.equal(
-    await readFile(environmentFilePath, "utf8"),
-    'OPENAI_API_KEY="replacement-secret"\n',
+    settings.getRuntimeSettings().gptrEmbeddingApiKey,
+    "replacement-embedding-secret",
   );
+  assert.equal(
+    await readFile(environmentFilePath, "utf8"),
+    'OPENAI_API_KEY="replacement-secret"\nGPTR_EMBEDDING_API_KEY="replacement-embedding-secret"\n',
+  );
+});
+
+test("does not persist settings when connection preflight fails", async (t) => {
+  const settings = new RuntimeSettingsStore({
+    OPENAI_API_KEY: "original-secret",
+    OPENAI_BASE_URL: "https://models.example/v1",
+    AO_PLANNER_MODEL: "planner",
+    GPTR_FAST_LLM: "fast",
+    GPTR_SMART_LLM: "smart",
+    GPTR_EMBEDDING: "m3e",
+    RETRIEVER: "duckduckgo",
+    AO_CONCURRENCY: "2",
+  });
+  const directory = await mkdtemp(join(tmpdir(), "think-tank-settings-"));
+  const environmentFilePath = join(directory, ".env");
+  await writeFile(environmentFilePath, 'OPENAI_API_KEY="original-secret"\n', "utf8");
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const server = createApiServer(
+    new ResearchTaskManager(async () => { throw new Error("runner should not be called"); }),
+    settings,
+    undefined,
+    readyCapabilityProvider,
+    environmentFilePath,
+    undefined,
+    undefined,
+    undefined,
+    async () => [{
+      id: "embedding",
+      label: "Embedding 模型",
+      status: "failed",
+      detail: "Embedding 接口返回 401",
+    }],
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as AddressInfo).port;
+
+  const response = await fetch(`http://127.0.0.1:${port}/api/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      apiKey: "replacement-secret",
+      embeddingApiKey: "replacement-embedding-secret",
+    }),
+  });
+
+  assert.equal(response.status, 422);
+  const body = await response.json() as { error: string; checks: SettingsPreflightCheck[] };
+  assert.match(body.error, /Embedding 模型/u);
+  assert.deepEqual(body.checks, [{
+    id: "embedding",
+    label: "Embedding 模型",
+    status: "failed",
+    detail: "Embedding 接口返回 401",
+  }]);
+  assert.equal(settings.getRuntimeSettings().planner.api_key, "original-secret");
+  assert.equal(settings.getRuntimeSettings().gptrEmbeddingApiKey, undefined);
+  assert.equal(await readFile(environmentFilePath, "utf8"), 'OPENAI_API_KEY="original-secret"\n');
 });
 
 async function waitFor(predicate: () => Promise<boolean>): Promise<void> {

@@ -12,6 +12,7 @@ const baseEnv = {
   GPTR_SMART_LLM: "smart",
   GPTR_EMBEDDING: "m3e",
   GPTR_EMBEDDING_BASE_URL: "https://embedding.example/v1",
+  GPTR_EMBEDDING_API_KEY: "embedding-secret",
   RETRIEVER: "duckduckgo",
   AO_CONCURRENCY: "2",
 };
@@ -32,8 +33,14 @@ test("updates deployment settings without exposing the API key", () => {
     "https://new-embedding.example/v1",
   );
   assert.equal(updated.apiKeyConfigured, true);
+  assert.equal(updated.embeddingApiKeyConfigured, true);
   assert.equal("apiKey" in updated, false);
+  assert.equal("embeddingApiKey" in updated, false);
   assert.equal(store.getRuntimeSettings().planner.api_key, "secret");
+  assert.equal(
+    store.getRuntimeSettings().gptrEmbeddingApiKey,
+    "embedding-secret",
+  );
 });
 
 test("updates the default multi-retriever grant", () => {

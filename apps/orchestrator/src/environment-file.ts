@@ -5,11 +5,22 @@ export async function replaceEnvironmentValue(
   name: string,
   value: string,
 ): Promise<void> {
-  if (!/^[A-Z][A-Z0-9_]*$/u.test(name)) {
-    throw new Error("Environment variable name is invalid.");
-  }
-  if (!value.trim() || /[\r\n]/u.test(value)) {
-    throw new Error("API Key must be a non-empty single-line value.");
+  await replaceEnvironmentValues(filePath, { [name]: value });
+}
+
+export async function replaceEnvironmentValues(
+  filePath: string,
+  values: Readonly<Record<string, string>>,
+): Promise<void> {
+  const entries = Object.entries(values);
+  if (!entries.length) return;
+  for (const [name, value] of entries) {
+    if (!/^[A-Z][A-Z0-9_]*$/u.test(name)) {
+      throw new Error("Environment variable name is invalid.");
+    }
+    if (!value.trim() || /[\r\n]/u.test(value)) {
+      throw new Error("API Key must be a non-empty single-line value.");
+    }
   }
 
   let current = "";
@@ -19,11 +30,14 @@ export async function replaceEnvironmentValue(
     if (!(error instanceof Error) || !isMissingFile(error)) throw error;
   }
 
-  const line = `${name}=${JSON.stringify(value.trim())}`;
-  const expression = new RegExp(`^\\s*${name}\\s*=.*$`, "mu");
-  const next = expression.test(current)
-    ? current.replace(expression, line)
-    : `${current}${current && !current.endsWith("\n") ? "\n" : ""}${line}\n`;
+  let next = current;
+  for (const [name, value] of entries) {
+    const line = `${name}=${JSON.stringify(value.trim())}`;
+    const expression = new RegExp(`^\\s*${name}\\s*=.*$`, "mu");
+    next = expression.test(next)
+      ? next.replace(expression, line)
+      : `${next}${next && !next.endsWith("\n") ? "\n" : ""}${line}\n`;
+  }
   const temporary = `${filePath}.tmp`;
   await writeFile(temporary, next, "utf8");
   await rename(temporary, filePath);

@@ -14,6 +14,7 @@ export interface RuntimeSettings {
   gptrSmartLlm: string;
   gptrEmbedding: string;
   gptrEmbeddingBaseUrl?: string;
+  gptrEmbeddingApiKey?: string;
   timeZone: string;
   concurrency: number;
   gptrHealthTimeoutMs: number;
@@ -110,6 +111,7 @@ export function settingsFromEnv(
       env.GPTR_EMBEDDING_BASE_URL?.trim()
       || env.OPENAI_BASE_URL?.trim()
       || undefined,
+    gptrEmbeddingApiKey: env.GPTR_EMBEDDING_API_KEY?.trim() || undefined,
     timeZone,
     concurrency,
     gptrHealthTimeoutMs,
