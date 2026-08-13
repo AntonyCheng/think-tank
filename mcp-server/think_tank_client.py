@@ -10,8 +10,9 @@ class ThinkTankApiError(RuntimeError):
 
 
 class ThinkTankClient:
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, service_api_key: str = "") -> None:
         self._base_url = base_url.rstrip("/")
+        self._headers = {"X-Think-Tank-Service-Key": service_api_key} if service_api_key else {}
 
     async def submit_research_task(self, topic: str) -> dict[str, Any]:
         return await self._request("POST", "/api/tasks", json={"topic": topic})
@@ -23,7 +24,7 @@ class ThinkTankClient:
         return await self._request("GET", f"/api/tasks/{task_id}/report-document")
 
     async def export_report(self, task_id: str, export_format: str) -> tuple[bytes, str]:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=90.0, headers=self._headers) as client:
             response = await client.get(
                 f"{self._base_url}/api/tasks/{task_id}/export/{export_format}"
             )
@@ -37,7 +38,7 @@ class ThinkTankClient:
         return response.content, response.headers.get("content-type", "application/octet-stream")
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, headers=self._headers) as client:
             response = await client.request(method, f"{self._base_url}{path}", **kwargs)
         try:
             payload = response.json()

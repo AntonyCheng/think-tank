@@ -19,7 +19,7 @@ from think_tank_client import ThinkTankApiError, ThinkTankClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 log = logging.getLogger("think-tank-mcp")
 
-client = ThinkTankClient(config.THINK_TANK_API_URL)
+client = ThinkTankClient(config.THINK_TANK_API_URL, config.THINK_TANK_SERVICE_API_KEY)
 artifacts = ArtifactStore(Path(__file__).with_name("artifacts"), config.ARTIFACT_TTL_MINUTES)
 mcp = FastMCP(
     "think-tank-mcp",
@@ -53,11 +53,14 @@ def _pending_message(status: str) -> str:
 
 def _safe_task_status(task: dict[str, Any]) -> dict[str, Any]:
     status = str(task.get("status", "unknown"))
+    report_ready = task.get("reportReady")
     return {
         "task_id": task.get("id"),
         "topic": task.get("topic"),
         "status": status,
-        "report_ready": status in {"completed", "completed_with_warnings"} and bool(task.get("output")),
+        "report_ready": bool(report_ready) if isinstance(report_ready, bool) else (
+            status in {"completed", "completed_with_warnings"} and bool(task.get("output"))
+        ),
     }
 
 

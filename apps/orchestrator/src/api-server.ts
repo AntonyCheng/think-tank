@@ -41,7 +41,18 @@ import {
 import type { RuntimeSettings } from "./settings.js";
 import { loadAgentCatalog } from "./agent-catalog.js";
 import { agentsDirForLanguage } from "./ao-runtime.js";
+import {
+  authConfigFromEnv,
+  createAuthService,
+  isServiceTaskApiRequest,
+  type ApiAuthConfig,
+} from "./auth.js";
 import { TaskDocumentStore } from "./document-store.js";
+import {
+  generateResearchTopicRecommendations,
+  ResearchTopicRecommendationService,
+  type ResearchTopicRecommendationProvider,
+} from "./research-topic-recommendations.js";
 import {
   InMemoryReportDocumentStore,
   ReportDocumentConflictError,
@@ -89,8 +100,45 @@ export function createApiServer(
     scope?: SettingsPreflightScope,
   ) => Promise<SettingsPreflightCheck[]> = (candidate, scope) =>
     preflightRuntimeSettings(candidate, fetch, scope),
+  topicRecommendationProvider?: ResearchTopicRecommendationProvider,
+  authConfig: ApiAuthConfig = authConfigFromEnv(),
 ) {
   const documents = new TaskDocumentStore();
+  const topicRecommendations = topicRecommendationProvider ??
+    new ResearchTopicRecommendationService({
+      cacheFilePath: resolve(
+        ".think-tank",
+        "cache",
+        "research-topic-recommendations.json",
+      ),
+      ...(settings
+        ? {
+            refresh: async () => {
+              const runtime = settings.getRuntimeSettings();
+              const catalog = await loadRetrieverCatalog(
+                settings,
+                researcherServiceUrl(),
+                capabilityProvider,
+              );
+              const available = new Set(catalog.retrievers.map((item) => item.id));
+              const retrievers = runtime.retrievers.filter((item) => available.has(item));
+              return generateResearchTopicRecommendations({
+                planner: runtime.planner,
+                researcherServiceUrl: researcherServiceUrl(),
+                retrievers: retrievers.length ? retrievers : [catalog.retrievers[0]!.id],
+                timeZone: runtime.timeZone,
+              });
+            },
+          }
+        : {}),
+      onRefreshError(error) {
+        process.stderr.write(`${JSON.stringify({
+          event: "research_topics.refresh_failed",
+          message: error instanceof Error ? error.message : String(error),
+        })}\n`);
+      },
+    });
+  const auth = createAuthService(authConfig);
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
@@ -112,7 +160,48 @@ export function createApiServer(
         );
       }
 
-      if (request.method === "GET" && !url.pathname.startsWith("/api/")) {
+      if (request.method === "GET" && url.pathname === "/api/auth/status") {
+        return sendJson(response, 200, {
+          enabled: auth.enabled,
+          authenticated: auth.isBrowserAuthenticated(request),
+          ...(auth.isBrowserAuthenticated(request) && auth.username ? { username: auth.username } : {}),
+        });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/auth/login") {
+        if (!auth.enabled) return sendJson(response, 200, { enabled: false, authenticated: true });
+        const body = await readJsonBody(request);
+        const username = typeof body.username === "string" ? body.username.trim() : "";
+        const password = typeof body.password === "string" ? body.password : "";
+        const token = auth.authenticate(username, password);
+        if (!token) return sendJson(response, 401, { error: "账号或密码错误" });
+        response.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Set-Cookie": auth.cookie(token),
+        });
+        response.end(JSON.stringify({ enabled: true, authenticated: true, username }));
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+        auth.clear(request);
+        response.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Set-Cookie": auth.expiredCookie(),
+        });
+        response.end(JSON.stringify({ enabled: auth.enabled, authenticated: !auth.enabled }));
+        return;
+      }
+
+      const isStaticAsset = request.method === "GET" && !url.pathname.startsWith("/api/");
+      const isPublicApi = request.method === "GET" && url.pathname === "/api/recommendations/research-topics";
+      const serviceAuthorized = isServiceTaskApiRequest(request.method, url.pathname) &&
+        auth.isServiceAuthenticated(request);
+      if (!isStaticAsset && !isPublicApi && !serviceAuthorized && !auth.isBrowserAuthenticated(request)) {
+        return sendJson(response, 401, { error: "请先登录" });
+      }
+
+      if (isStaticAsset) {
         const asset = await readWebAsset(webRoot, url.pathname);
         if (asset) {
           response.writeHead(200, {
@@ -130,6 +219,13 @@ export function createApiServer(
         return sendJson(response, 200, {
           agents: await loadAgentCatalog(agentsDirForLanguage("zh")),
         });
+      }
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/recommendations/research-topics"
+      ) {
+        return sendJson(response, 200, await topicRecommendations.get());
       }
 
       if (
@@ -280,14 +376,15 @@ export function createApiServer(
               "Synthesis mode is only valid as an AO step override.",
             );
           }
-          return sendJson(
-            response,
-            202,
-            manager.submit(topic, {
+          const submitted = manager.submit(topic, {
               ...(typeof body.taskId === "string" ? { taskId: body.taskId } : {}),
               researchProfile,
               researchCapabilities: environment.capabilities,
-            }),
+            });
+          return sendJson(
+            response,
+            202,
+            serviceAuthorized ? serviceTaskStatus(submitted) : submitted,
           );
         } catch (error) {
           if (!(error instanceof ResearchProfileError)) throw error;
@@ -347,10 +444,12 @@ export function createApiServer(
           });
         }
         const document = reportDocuments.getOrCreate(task.id, task.output);
-        return sendJson(response, 200, {
-          ...document,
-          audit: reportEditor.audit(task.id, reportEditorSources(task)),
-        });
+        return sendJson(response, 200, serviceAuthorized
+          ? { version: document.version, currentMarkdown: document.currentMarkdown }
+          : {
+              ...document,
+              audit: reportEditor.audit(task.id, reportEditorSources(task)),
+            });
       }
 
       if (
@@ -1135,7 +1234,11 @@ export function createApiServer(
         }
 
         if (segments.length === 3) {
-          return sendJson(response, 200, enrichLegacyWorkflowPlan(task));
+          return sendJson(
+            response,
+            200,
+            serviceAuthorized ? serviceTaskStatus(task) : enrichLegacyWorkflowPlan(task),
+          );
         }
         if (segments.length === 4 && segments[3] === "events") {
           return streamEvents(
@@ -1200,6 +1303,21 @@ function preflightFailureMessage(checks: readonly SettingsPreflightCheck[]): str
   return `连接检测未通过：${checks.map((check) =>
     `${check.label}${check.detail ? `（${check.detail}）` : ""}`
   ).join("；")}`;
+}
+
+function serviceTaskStatus(task: {
+  id: string;
+  topic: string;
+  status: string;
+  output?: string;
+}): Record<string, unknown> {
+  return {
+    id: task.id,
+    topic: task.topic,
+    status: task.status,
+    reportReady: ["completed", "completed_with_warnings"].includes(task.status) &&
+      Boolean(task.output),
+  };
 }
 
 function parsePreflightScope(value: unknown): SettingsPreflightScope {

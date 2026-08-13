@@ -16,6 +16,7 @@ MCP_PUBLIC_BASE_URL = os.getenv(
     "MCP_PUBLIC_BASE_URL", f"http://{MCP_HOST}:{MCP_PORT}"
 ).rstrip("/")
 THINK_TANK_API_URL = os.getenv("THINK_TANK_API_URL", "http://127.0.0.1:3000").rstrip("/")
+THINK_TANK_SERVICE_API_KEY = os.getenv("THINK_TANK_SERVICE_API_KEY", "").strip()
 REPORT_PAGE_CHARACTERS = int(os.getenv("REPORT_PAGE_CHARACTERS", "6000"))
 ARTIFACT_TTL_MINUTES = int(os.getenv("ARTIFACT_TTL_MINUTES", "15"))
 
@@ -23,6 +24,10 @@ if MCP_TRANSPORT not in {"stdio", "streamable-http"}:
     raise ValueError("MCP_TRANSPORT must be stdio or streamable-http")
 if not THINK_TANK_API_URL.startswith(("http://", "https://")):
     raise ValueError("THINK_TANK_API_URL must use HTTP or HTTPS")
+if not THINK_TANK_SERVICE_API_KEY or THINK_TANK_SERVICE_API_KEY.startswith("change-me"):
+    raise ValueError(
+        "THINK_TANK_SERVICE_API_KEY must match ORCHESTRATOR_SERVICE_API_KEY"
+    )
 if not MCP_PUBLIC_BASE_URL.startswith(("http://", "https://")):
     raise ValueError("MCP_PUBLIC_BASE_URL must use HTTP or HTTPS")
 if not 1 <= MCP_PORT <= 65535:

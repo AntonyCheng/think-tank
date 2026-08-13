@@ -5,6 +5,7 @@ import type {
   ReportEditorResponse,
   ReportOperation,
 } from "../domain/report";
+import { notifyAuthRequired } from "./auth-client";
 
 export interface ReportSessionData {
   document: ReportDocument;
@@ -22,6 +23,7 @@ function reportSessionKey(taskId: string, scopeKey: string): string {
 
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
+  notifyAuthRequired(response);
   const payload = await response.json().catch(() => ({})) as T & { error?: string };
   if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
   return payload;
@@ -128,6 +130,7 @@ export async function streamReportMessage(
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
     }),
   });
+  notifyAuthRequired(response);
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { error?: string };
     throw new Error(payload.error || `请求失败（${response.status}）`);
@@ -200,6 +203,7 @@ function downloadFilename(contentDisposition: string | null, format: ReportExpor
 
 export async function downloadReportExport(taskId: string, format: ReportExportFormat): Promise<void> {
   const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/export/${format}`);
+  notifyAuthRequired(response);
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { error?: string };
     throw new Error(payload.error || `导出失败（${response.status}）`);

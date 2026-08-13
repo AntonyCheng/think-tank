@@ -25,6 +25,7 @@ import type {
 } from "../src/gptr-capabilities.js";
 import type { WorkflowCheckpoint } from "../src/workflow-checkpoint.js";
 import type { SettingsPreflightCheck } from "../src/settings-preflight.js";
+import type { ResearchTopicRecommendationProvider } from "../src/research-topic-recommendations.js";
 
 const readyRetrieverCatalog: RetrieverCatalog = Object.freeze({
   schemaVersion: 1,
@@ -58,6 +59,77 @@ const passingSettingsPreflight = async (): Promise<SettingsPreflightCheck[]> => 
   { id: "embedding", label: "Embedding 模型", status: "passed" },
   { id: "retriever", label: "DuckDuckGo 网页搜索", status: "passed" },
 ];
+
+test("returns only public research topic recommendation fields", async (t) => {
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }));
+  const topicRecommendations: ResearchTopicRecommendationProvider = {
+    async get() {
+      return {
+        items: [{
+          id: "topic-public",
+          category: "产业趋势",
+          title: "人工智能产业发展与区域竞争格局研究",
+          summary: "关注产业规模、区域布局、应用场景和政策环境。",
+          sources: [{
+            title: "人工智能产业发展观察",
+            url: "https://example.com/ai-industry",
+            domain: "example.com",
+          }],
+        }],
+        updatedAt: "2026-08-13T00:00:00.000Z",
+        nextRefreshAt: "2026-08-13T03:00:00.000Z",
+        source: "generated",
+        refreshing: false,
+      };
+    },
+  };
+  const server = createApiServer(
+    manager,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    topicRecommendations,
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as AddressInfo).port;
+
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/recommendations/research-topics`,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json() as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload).sort(), [
+    "items",
+    "nextRefreshAt",
+    "refreshing",
+    "source",
+    "updatedAt",
+  ]);
+  assert.deepEqual(Object.keys((payload.items as Array<Record<string, unknown>>)[0] ?? {}).sort(), [
+    "category",
+    "id",
+    "sources",
+    "summary",
+    "title",
+  ]);
+  assert.deepEqual(
+    Object.keys(
+      ((payload.items as Array<Record<string, unknown>>)[0]?.sources as Array<Record<string, unknown>>)[0] ?? {},
+    ).sort(),
+    ["domain", "title", "url"],
+  );
+});
 
 test("lists the Chinese AO agent directory with only presentation metadata", async (t) => {
   const manager = new ResearchTaskManager(async () => ({

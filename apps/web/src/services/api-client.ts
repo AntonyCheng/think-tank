@@ -12,9 +12,31 @@ import type {
 } from "../domain/settings";
 import type { AgentCatalogEntry } from "../domain/agent";
 import { TASK_EVENT_TYPES, type TaskEvent, type TaskEventType } from "../domain/research-events";
+import { notifyAuthRequired } from "./auth-client";
+
+export interface ResearchTopicRecommendation {
+  id: string;
+  category: string;
+  title: string;
+  summary: string;
+  sources: Array<{
+    title: string;
+    url: string;
+    domain: string;
+  }>;
+}
+
+export interface ResearchTopicRecommendationResponse {
+  items: ResearchTopicRecommendation[];
+  updatedAt: string | null;
+  nextRefreshAt: string | null;
+  source: "generated" | "fallback";
+  refreshing: boolean;
+}
 
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
+  notifyAuthRequired(response);
   const payload = await response.json().catch(() => ({})) as T & { error?: string };
   if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
   return payload;
@@ -68,6 +90,10 @@ export async function getAgentCatalog(): Promise<AgentCatalogEntry[]> {
   });
 }
 
+export function getResearchTopicRecommendations(): Promise<ResearchTopicRecommendationResponse> {
+  return requestJson<ResearchTopicRecommendationResponse>("/api/recommendations/research-topics");
+}
+
 export function listResearchHistory(input: {
   filter?: ResearchHistoryFilter;
   query?: string;
@@ -113,6 +139,7 @@ async function requestSettingsSave(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+  notifyAuthRequired(response);
   const payload = await response.json().catch(() => ({})) as RuntimeSettingsSaveResult & {
     error?: string;
     checks?: SettingsPreflightCheck[];
