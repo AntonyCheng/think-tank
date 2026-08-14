@@ -15,7 +15,7 @@ services:
       thinktank-api:
         condition: service_healthy
     ports:
-      - "5173:80"
+      - "${WEB_PORT:-5173}:80"
     networks:
       - thinktank_network
 
@@ -55,11 +55,15 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.researcher
       args:
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
     image: thinktank-researcher:local
     container_name: thinktank-researcher
     init: true
     restart: unless-stopped
+    depends_on:
+      thinktank-searxng:
+        condition: service_healthy
     env_file:
       - ./data/config/runtime/runtime.env
     environment:
@@ -73,12 +77,46 @@ services:
     networks:
       - thinktank_network
 
+  thinktank-searxng:
+    image: docker.io/searxng/searxng:2026.8.14-094c33d40
+    container_name: thinktank-searxng
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./data/config/searxng/searxng.env
+    environment:
+      FORCE_OWNERSHIP: "false"
+      SEARXNG_BASE_URL: http://thinktank-searxng:8080/
+      SEARXNG_BIND_ADDRESS: 0.0.0.0
+      SEARXNG_PORT: "8080"
+      SEARXNG_LIMITER: "false"
+      SEARXNG_PUBLIC_INSTANCE: "false"
+      SEARXNG_IMAGE_PROXY: "false"
+    expose:
+      - "8080"
+    volumes:
+      - ./data/config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./data/searxng/cache:/var/cache/searxng
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/searxng/.venv/bin/python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - thinktank_network
+
   thinktank-mcp:
     build:
       context: ..
       dockerfile: docker/Dockerfile.mcp
       args:
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
     image: thinktank-mcp:local
     container_name: thinktank-mcp
     init: true

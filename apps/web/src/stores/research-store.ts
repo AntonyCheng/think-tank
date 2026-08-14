@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { applyEvent, type TaskEvent } from "../domain/research-events";
+import { applyEvent, isTerminalTaskEvent, type TaskEvent } from "../domain/research-events";
 import type { ResearchTaskSnapshot } from "../domain/task";
 import { getResearchTask, subscribeToTaskEvents } from "../services/api-client";
+import { createSnapshotRefreshScheduler } from "./snapshot-refresh";
 
 export type ConnectionState = "loading" | "open" | "closed" | "error";
 
@@ -20,17 +21,31 @@ export function useResearchStore(taskId: string): ResearchStoreState {
   }, []);
   useEffect(() => {
     let active = true;
+    let hasLoadedSnapshot = false;
     setState({ events: [], connection: "loading" });
-    getResearchTask(taskId).then((snapshot) => {
-      if (active) setState((current) => ({
-        ...current,
-        snapshot,
-        connection: current.connection,
-        error: undefined,
-      }));
-    }).catch((reason) => {
-      if (active) setState((current) => ({ ...current, connection: "error", error: reason instanceof Error ? reason.message : String(reason) }));
+    const snapshotRefresh = createSnapshotRefreshScheduler(async () => {
+      try {
+        const snapshot = await getResearchTask(taskId);
+        if (!active) return;
+        hasLoadedSnapshot = true;
+        setState((current) => ({
+          ...current,
+          snapshot: !current.snapshot || snapshot.updatedAt >= current.snapshot.updatedAt
+            ? snapshot
+            : current.snapshot,
+          error: undefined,
+        }));
+      } catch (reason) {
+        if (active && !hasLoadedSnapshot) {
+          setState((current) => ({
+            ...current,
+            connection: "error",
+            error: reason instanceof Error ? reason.message : String(reason),
+          }));
+        }
+      }
     });
+    void snapshotRefresh.flush();
     const unsubscribe = subscribeToTaskEvents(taskId, (event) => {
       if (!active) return;
       setState((current) => ({
@@ -38,25 +53,16 @@ export function useResearchStore(taskId: string): ResearchStoreState {
         events: current.events.some((item) => item.id === event.id) ? current.events : [...current.events, event],
         snapshot: current.snapshot ? applyEvent(current.snapshot, event) : current.snapshot,
       }));
-      if (
-        event.type.startsWith("research.") ||
-        event.type === "task.completed" ||
-        event.type === "task.completed_with_warnings"
-      ) {
-        void getResearchTask(taskId).then((snapshot) => {
-          if (!active) return;
-          setState((current) => ({
-            ...current,
-            snapshot: !current.snapshot || snapshot.updatedAt >= current.snapshot.updatedAt
-              ? snapshot
-              : current.snapshot,
-          }));
-        }).catch(() => undefined);
-      }
+      if (event.type.startsWith("research.")) snapshotRefresh.schedule();
+      if (isTerminalTaskEvent(event)) void snapshotRefresh.flush();
     }, (connection) => {
       if (active) setState((current) => ({ ...current, connection: connection === "open" ? "open" : "closed" }));
     });
-    return () => { active = false; unsubscribe(); };
+    return () => {
+      active = false;
+      snapshotRefresh.dispose();
+      unsubscribe();
+    };
   }, [taskId]);
   return { ...state, updateSnapshot };
 }

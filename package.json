@@ -10,7 +10,7 @@
     "build": "npm run build --workspace @think-tank/orchestrator && npm run web:build",
     "web:dev": "npm --workspace @think-tank/web run dev --",
     "web:build": "npm run build --workspace @think-tank/web",
-    "test": "npm run test --workspace @think-tank/orchestrator",
+    "test": "npm run test --workspace @think-tank/orchestrator && npm run test --workspace @think-tank/web",
     "typecheck": "npm run typecheck --workspace @think-tank/orchestrator",
     "test:acceptance": "node scripts/acceptance.mjs",
     "spike": "node --env-file-if-exists=.env --import tsx apps/orchestrator/src/spike.ts",

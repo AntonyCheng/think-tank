@@ -2,6 +2,7 @@ export type ResearchMode = "standard" | "deep" | "synthesis";
 export type ResearchSourceMode = "web" | "urls" | "local" | "hybrid";
 export const RESEARCH_RETRIEVERS = [
   "duckduckgo",
+  "searx",
   "tavily",
   "arxiv",
   "openalex",

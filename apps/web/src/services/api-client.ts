@@ -11,7 +11,12 @@ import type {
   SettingsPreflightCheck,
 } from "../domain/settings";
 import type { AgentCatalogEntry } from "../domain/agent";
-import { TASK_EVENT_TYPES, type TaskEvent, type TaskEventType } from "../domain/research-events";
+import {
+  isTerminalTaskEvent,
+  TASK_EVENT_TYPES,
+  type TaskEvent,
+  type TaskEventType,
+} from "../domain/research-events";
 import { notifyAuthRequired } from "./auth-client";
 
 export interface ResearchTopicRecommendation {
@@ -180,7 +185,13 @@ export function subscribeToTaskEvents(
     const message = event as MessageEvent<string>;
     try {
       const payload = JSON.parse(message.data) as TaskEvent;
-      if (payload && typeof payload.id === "number") onEvent(payload);
+      if (payload && typeof payload.id === "number") {
+        onEvent(payload);
+        if (isTerminalTaskEvent(payload)) {
+          source.close();
+          onState("closed");
+        }
+      }
     } catch {
       // Ignore malformed event frames; the snapshot remains the source of truth.
     }

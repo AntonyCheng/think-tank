@@ -14,6 +14,7 @@ from .source_access import url_allowed_by_domains
 
 RetrieverId = Literal[
     "duckduckgo",
+    "searx",
     "tavily",
     "arxiv",
     "openalex",
@@ -44,15 +45,23 @@ class _RetrieverSpec:
     label: str
     category: RetrieverCategory
     required_environment: tuple[str, ...] = ()
+    credential_required: bool = False
 
 
 _RETRIEVERS = (
     _RetrieverSpec("duckduckgo", "DuckDuckGo", "web"),
     _RetrieverSpec(
+        "searx",
+        "SearXNG",
+        "web",
+        required_environment=("SEARX_URL",),
+    ),
+    _RetrieverSpec(
         "tavily",
         "Tavily",
         "web",
         required_environment=("TAVILY_API_KEY",),
+        credential_required=True,
     ),
     _RetrieverSpec("arxiv", "arXiv", "academic"),
     _RetrieverSpec("openalex", "OpenAlex", "academic"),
@@ -532,7 +541,7 @@ def build_retriever_catalog(
                 id=spec.id,
                 label=spec.label,
                 category=spec.category,
-                credential_required=bool(spec.required_environment),
+                credential_required=spec.credential_required,
                 timeout_ms=timeout_ms,
             )
         )

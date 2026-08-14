@@ -4,4 +4,4 @@
 !.gitignore
 !*.example
 !.gitkeep
-
+!config/searxng/settings.yml

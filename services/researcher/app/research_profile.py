@@ -11,6 +11,7 @@ ResearchMode = Literal["standard", "deep", "synthesis"]
 ResearchSourceMode = Literal["web", "urls", "local", "hybrid"]
 ResearchRetriever = Literal[
     "duckduckgo",
+    "searx",
     "tavily",
     "arxiv",
     "openalex",
@@ -19,6 +20,7 @@ ResearchRetriever = Literal[
 ]
 RESEARCH_RETRIEVERS: tuple[ResearchRetriever, ...] = (
     "duckduckgo",
+    "searx",
     "tavily",
     "arxiv",
     "openalex",

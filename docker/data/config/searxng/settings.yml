@@ -1,0 +1,16 @@
+use_default_settings: true
+
+general:
+  instance_name: "Think Tank Search"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false

@@ -22,6 +22,7 @@
         "sourceModes": ["web", "urls", "local", "hybrid"],
         "retrievers": [
           "duckduckgo",
+          "searx",
           "tavily",
           "arxiv",
           "openalex",

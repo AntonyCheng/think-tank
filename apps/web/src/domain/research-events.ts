@@ -11,12 +11,23 @@ export const TASK_EVENT_TYPES = [
 
 export type TaskEventType = typeof TASK_EVENT_TYPES[number];
 
+const TERMINAL_TASK_EVENT_TYPES: ReadonlySet<TaskEventType> = new Set([
+  "task.canceled",
+  "task.completed",
+  "task.completed_with_warnings",
+  "task.failed",
+]);
+
 export interface TaskEvent {
   id: number;
   taskId: string;
   timestamp: string;
   type: TaskEventType;
   data: Record<string, unknown>;
+}
+
+export function isTerminalTaskEvent(event: Pick<TaskEvent, "type">): boolean {
+  return TERMINAL_TASK_EVENT_TYPES.has(event.type);
 }
 
 export interface ResearchActivity {

@@ -6,15 +6,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ARG PIP_EXTRA_INDEX_URL=
 
 WORKDIR /app/mcp-server
 
 COPY mcp-server/requirements.txt ./requirements.txt
-RUN --mount=type=cache,id=thinktank-pip,target=/root/.cache/pip,sharing=locked \
-    python -m pip install \
-      --index-url "${PIP_INDEX_URL}" \
-      -r requirements.txt
+RUN --mount=type=cache,id=thinktank-mcp-pip,target=/root/.cache/pip,sharing=locked \
+    if [ -n "${PIP_EXTRA_INDEX_URL}" ]; then \
+      python -m pip install \
+        --index-url "${PIP_INDEX_URL}" \
+        --extra-index-url "${PIP_EXTRA_INDEX_URL}" \
+        -r requirements.txt; \
+    else \
+      python -m pip install \
+        --index-url "${PIP_INDEX_URL}" \
+        -r requirements.txt; \
+    fi
 
 COPY mcp-server/*.py ./
 RUN mkdir -p /app/mcp-server/artifacts

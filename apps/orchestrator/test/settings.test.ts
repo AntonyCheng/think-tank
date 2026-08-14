@@ -84,6 +84,20 @@ test("loads an ordered multi-retriever default grant", () => {
   assert.deepEqual(settings.retrievers, ["duckduckgo", "openalex"]);
 });
 
+test("accepts SearXNG as a default retriever", () => {
+  const settings = settingsFromEnv({
+    OPENAI_API_KEY: "key",
+    AO_PLANNER_MODEL: "planner",
+    GPTR_FAST_LLM: "fast",
+    GPTR_SMART_LLM: "smart",
+    GPTR_EMBEDDING: "embedding-model",
+    RETRIEVER: "searx",
+  });
+
+  assert.equal(settings.retriever, "searx");
+  assert.deepEqual(settings.retrievers, ["searx"]);
+});
+
 test("rejects an invalid application time zone", () => {
   assert.throws(
     () => settingsFromEnv({

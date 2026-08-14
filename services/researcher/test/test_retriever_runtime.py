@@ -47,6 +47,35 @@ def test_catalog_uses_legacy_retriever_as_default_enablement() -> None:
     assert catalog.max_retrievers == 1
 
 
+def test_catalog_requires_searx_url_without_marking_it_as_a_credential() -> None:
+    adapter = object()
+
+    unavailable = build_retriever_catalog(
+        {"GPTR_ENABLED_RETRIEVERS": "searx"},
+        adapter_loader=lambda provider_id: (
+            adapter if provider_id == "searx" else None
+        ),
+    )
+    assert unavailable.retrievers == ()
+    assert unavailable.max_retrievers == 0
+
+    available = build_retriever_catalog(
+        {
+            "GPTR_ENABLED_RETRIEVERS": "searx",
+            "SEARX_URL": "http://thinktank-searxng:8080",
+        },
+        adapter_loader=lambda provider_id: (
+            adapter if provider_id == "searx" else None
+        ),
+    )
+
+    assert [item.id for item in available.retrievers] == ["searx"]
+    assert available.retrievers[0].label == "SearXNG"
+    assert available.retrievers[0].category == "web"
+    assert available.retrievers[0].credential_required is False
+    assert available.max_retrievers == 1
+
+
 def test_runtime_applies_fair_budget_domain_filter_and_cross_provider_dedup() -> None:
     calls: list[tuple[str, int]] = []
 
