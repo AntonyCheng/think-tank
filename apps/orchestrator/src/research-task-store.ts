@@ -6,6 +6,7 @@ import type {
   ResearchTaskEvent,
   ResearchTaskSnapshot,
 } from "./research-tasks.js";
+import type { EvidenceBundle } from "./evidence-bundle.js";
 import type { ResearchDiagnosticRecord } from "./research-telemetry.js";
 import type { WorkflowCheckpoint } from "./workflow-checkpoint.js";
 
@@ -47,6 +48,9 @@ export interface ResearchTaskStore {
     diagnostic: ResearchDiagnosticRecord,
   ): StoredResearchDiagnostic | undefined;
   loadDiagnostics(id: string): StoredResearchDiagnostic[];
+  loadEvidenceBundles(id: string): EvidenceBundle[];
+  appendEvidenceBundle(id: string, bundle: EvidenceBundle): boolean;
+  replaceEvidenceBundles(id: string, bundles: readonly EvidenceBundle[]): boolean;
   saveCheckpoint(checkpoint: WorkflowCheckpoint): void;
   latestCheckpoint(id: string): WorkflowCheckpoint | undefined;
   listCheckpoints(id: string): WorkflowCheckpoint[];
@@ -81,7 +85,13 @@ export class InMemoryResearchTaskStore implements ResearchTaskStore {
 
   load(id: string): StoredResearchTask | undefined {
     const stored = this.#tasks.get(id);
-    return stored ? structuredClone(stored) : undefined;
+    if (!stored) return undefined;
+    const snapshot = structuredClone(stored.snapshot);
+    delete snapshot.evidenceBundles;
+    return {
+      snapshot,
+      events: structuredClone(stored.events),
+    };
   }
 
   list(): ResearchTaskSnapshot[] {
@@ -158,6 +168,32 @@ export class InMemoryResearchTaskStore implements ResearchTaskStore {
     return structuredClone(this.#diagnostics.get(id) ?? []);
   }
 
+  loadEvidenceBundles(id: string): EvidenceBundle[] {
+    return structuredClone(this.#tasks.get(id)?.snapshot.evidenceBundles ?? []);
+  }
+
+  appendEvidenceBundle(id: string, bundle: EvidenceBundle): boolean {
+    const stored = this.#tasks.get(id);
+    if (!stored) return false;
+    stored.snapshot.evidenceBundles = [
+      ...(stored.snapshot.evidenceBundles ?? []),
+      structuredClone(bundle),
+    ];
+    return true;
+  }
+
+  replaceEvidenceBundles(
+    id: string,
+    bundles: readonly EvidenceBundle[],
+  ): boolean {
+    const stored = this.#tasks.get(id);
+    if (!stored) return false;
+    stored.snapshot.evidenceBundles = bundles.map((bundle) =>
+      structuredClone(bundle)
+    );
+    return true;
+  }
+
   saveCheckpoint(checkpoint: WorkflowCheckpoint): void {
     const records = this.#checkpoints.get(checkpoint.taskId) ?? [];
     const existing = records.findIndex(
@@ -232,6 +268,7 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
     this.#database = new DatabaseSync(filePath);
     this.#database.exec("PRAGMA foreign_keys = ON");
     this.#database.exec("PRAGMA journal_mode = WAL");
+    this.#database.exec("PRAGMA busy_timeout = 5000");
     this.#database.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,
@@ -275,6 +312,13 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
         PRIMARY KEY (task_id, run_id, sequence),
         FOREIGN KEY (task_id) REFERENCES research_tasks(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS research_task_evidence_bundles (
+        task_id TEXT NOT NULL,
+        bundle_index INTEGER NOT NULL,
+        bundle_json TEXT NOT NULL,
+        PRIMARY KEY (task_id, bundle_index),
+        FOREIGN KEY (task_id) REFERENCES research_tasks(id) ON DELETE CASCADE
+      );
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (1, datetime('now'));
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
@@ -282,6 +326,7 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (3, datetime('now'));
     `);
+    this.#migrateEvidenceBundles();
   }
 
   create(
@@ -290,6 +335,7 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
   ): ResearchTaskTransition {
     return this.#transaction(() => {
       const event = taskEvent(snapshot.id, 1, snapshot.createdAt, draft);
+      const { evidenceBundles, ...persistedSnapshot } = snapshot;
       this.#database.prepare(`
         INSERT INTO research_tasks(
           id, status, created_at, updated_at, snapshot_json
@@ -299,8 +345,11 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
         snapshot.status,
         snapshot.createdAt,
         snapshot.updatedAt,
-        JSON.stringify(snapshot),
+        JSON.stringify(persistedSnapshot),
       );
+      if (evidenceBundles?.length) {
+        this.#writeEvidenceBundles(snapshot.id, evidenceBundles);
+      }
       this.#insertEvent(event);
       return cloneTransition(snapshot, event);
     });
@@ -364,10 +413,14 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
       `).get(id) as { snapshot_json: string } | undefined;
       if (!taskRow) return undefined;
 
+      const { evidenceBundles, ...snapshotChanges } = changes;
+      if (evidenceBundles !== undefined) {
+        this.#writeEvidenceBundles(id, evidenceBundles);
+      }
       const timestamp = new Date().toISOString();
       const snapshot = {
         ...JSON.parse(taskRow.snapshot_json) as ResearchTaskSnapshot,
-        ...changes,
+        ...snapshotChanges,
         updatedAt: timestamp,
       };
       const sequenceRow = this.#database.prepare(`
@@ -499,6 +552,51 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
     }));
   }
 
+  loadEvidenceBundles(id: string): EvidenceBundle[] {
+    const rows = this.#database.prepare(`
+      SELECT bundle_json
+      FROM research_task_evidence_bundles
+      WHERE task_id = ?
+      ORDER BY bundle_index
+    `).all(id) as Array<{ bundle_json: string }>;
+    return rows.map((row) =>
+      JSON.parse(row.bundle_json) as EvidenceBundle
+    );
+  }
+
+  appendEvidenceBundle(id: string, bundle: EvidenceBundle): boolean {
+    return this.#transaction(() => {
+      const task = this.#database.prepare(`
+        SELECT id FROM research_tasks WHERE id = ?
+      `).get(id) as { id: string } | undefined;
+      if (!task) return false;
+      const row = this.#database.prepare(`
+        SELECT COALESCE(MAX(bundle_index), -1) AS last_bundle_index
+        FROM research_task_evidence_bundles
+        WHERE task_id = ?
+      `).get(id) as { last_bundle_index: number };
+      this.#database.prepare(`
+        INSERT INTO research_task_evidence_bundles(task_id, bundle_index, bundle_json)
+        VALUES (?, ?, ?)
+      `).run(id, Number(row.last_bundle_index) + 1, JSON.stringify(bundle));
+      return true;
+    });
+  }
+
+  replaceEvidenceBundles(
+    id: string,
+    bundles: readonly EvidenceBundle[],
+  ): boolean {
+    return this.#transaction(() => {
+      const task = this.#database.prepare(`
+        SELECT id FROM research_tasks WHERE id = ?
+      `).get(id) as { id: string } | undefined;
+      if (!task) return false;
+      this.#writeEvidenceBundles(id, bundles);
+      return true;
+    });
+  }
+
   saveCheckpoint(checkpoint: WorkflowCheckpoint): void {
     this.#database.prepare(`
       INSERT INTO research_task_checkpoints(
@@ -615,6 +713,48 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
       JSON.stringify(diagnostic.data),
       diagnostic.truncated ? 1 : 0,
     );
+  }
+
+  #writeEvidenceBundles(
+    id: string,
+    bundles: readonly EvidenceBundle[],
+  ): void {
+    this.#database.prepare(`
+      DELETE FROM research_task_evidence_bundles WHERE task_id = ?
+    `).run(id);
+    const insert = this.#database.prepare(`
+      INSERT INTO research_task_evidence_bundles(task_id, bundle_index, bundle_json)
+      VALUES (?, ?, ?)
+    `);
+    bundles.forEach((bundle, index) => {
+      insert.run(id, index, JSON.stringify(bundle));
+    });
+  }
+
+  #migrateEvidenceBundles(): void {
+    const migrated = this.#database.prepare(`
+      SELECT 1 FROM schema_migrations WHERE version = 4
+    `).get();
+    if (migrated) return;
+    this.#transaction(() => {
+      const rows = this.#database.prepare(`
+        SELECT id, snapshot_json FROM research_tasks
+      `).all() as Array<{ id: string; snapshot_json: string }>;
+      for (const row of rows) {
+        const snapshot = JSON.parse(row.snapshot_json) as ResearchTaskSnapshot;
+        const bundles = snapshot.evidenceBundles;
+        if (!bundles) continue;
+        delete snapshot.evidenceBundles;
+        this.#database.prepare(`
+          UPDATE research_tasks SET snapshot_json = ? WHERE id = ?
+        `).run(JSON.stringify(snapshot), row.id);
+        this.#writeEvidenceBundles(row.id, bundles);
+      }
+      this.#database.prepare(`
+        INSERT INTO schema_migrations(version, applied_at)
+        VALUES (4, datetime('now'))
+      `).run();
+    });
   }
 
   #transaction<T>(operation: () => T): T {

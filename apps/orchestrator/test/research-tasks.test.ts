@@ -144,10 +144,8 @@ test("persists full evidence bundles without flooding observable events", async 
   const submitted = manager.submit("evidence topic");
   await waitFor(() => manager.get(submitted.id)?.status === "completed");
 
-  assert.deepEqual(
-    manager.get(submitted.id)?.evidenceBundles,
-    [evidenceBundle],
-  );
+  assert.equal(manager.get(submitted.id)?.evidenceBundles, undefined);
+  assert.deepEqual(manager.evidenceBundles(submitted.id), [evidenceBundle]);
   const evidenceEvents: Array<Record<string, unknown>> = [];
   manager.subscribe(submitted.id, (event) => {
     if (event.type === "evidence.bundle.recorded") {
@@ -335,7 +333,8 @@ test("retains completed evidence when a later workflow step fails", async () => 
 
   const failed = manager.get(submitted.id);
   assert.equal(failed?.error, "later AO step failed");
-  assert.deepEqual(failed?.evidenceBundles, [evidenceBundle]);
+  assert.equal(failed?.evidenceBundles, undefined);
+  assert.deepEqual(manager.evidenceBundles(submitted.id), [evidenceBundle]);
 });
 
 test("freezes the submitted research policy in the task snapshot", async () => {

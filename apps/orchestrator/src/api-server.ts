@@ -17,7 +17,10 @@ import {
   type ResearchTaskEvent,
 } from "./research-tasks.js";
 import { SqliteResearchTaskStore } from "./research-task-store.js";
-import { RuntimeSettingsStore } from "./settings-store.js";
+import {
+  RuntimeSettingsStore,
+  SqliteRuntimeSettingsPersistence,
+} from "./settings-store.js";
 import {
   ResearchProfileError,
   resolveResearchProfile,
@@ -320,7 +323,9 @@ export function createApiServer(
               ? { GPTR_EMBEDDING_API_KEY: embeddingApiKey }
               : {}),
           };
-          await replaceEnvironmentValues(environmentFilePath, environmentValues);
+          if (!settings.persistsToDatabase) {
+            await replaceEnvironmentValues(environmentFilePath, environmentValues);
+          }
           if (apiKey) settings.setApiKey(apiKey);
           if (embeddingApiKey) {
             settings.setEmbeddingApiKey(embeddingApiKey);
@@ -1849,16 +1854,23 @@ if (
   if (!process.stderr.isTTY) {
     process.stderr.write("\uFEFF");
   }
+  const reportDatabasePath = resolve(".think-tank", "data", "think-tank.sqlite");
+  const reportDatabase = new DatabaseSync(reportDatabasePath);
+  reportDatabase.exec("PRAGMA foreign_keys = ON");
+  reportDatabase.exec("PRAGMA journal_mode = WAL");
+  reportDatabase.exec("PRAGMA busy_timeout = 5000");
   const settings = new RuntimeSettingsStore(
     process.env,
     resolve(".think-tank", "settings.json"),
+    new SqliteRuntimeSettingsPersistence(
+      reportDatabase,
+      process.env.ORCHESTRATOR_SERVICE_API_KEY ?? "",
+    ),
   );
   const initialSettings = settings.getRuntimeSettings();
   const taskStore = new SqliteResearchTaskStore(
-    resolve(".think-tank", "data", "think-tank.sqlite"),
+    reportDatabasePath,
   );
-  const reportDatabasePath = resolve(".think-tank", "data", "think-tank.sqlite");
-  const reportDatabase = new DatabaseSync(reportDatabasePath);
   const reportDocuments = new SqliteReportDocumentStore(reportDatabasePath, reportDatabase);
   const reportEditor = new ReportEditorService(
     reportDocuments,

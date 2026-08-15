@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 
 import {
@@ -12,6 +13,7 @@ import {
 import type { ResearchTaskSnapshot } from "../src/research-tasks.js";
 import type { ResearchDiagnosticRecord } from "../src/research-telemetry.js";
 import type { WorkflowCheckpoint } from "../src/workflow-checkpoint.js";
+import type { EvidenceBundle } from "../src/evidence-bundle.js";
 
 for (const adapter of [
   {
@@ -133,6 +135,20 @@ for (const adapter of [
     }
   });
 
+  test(`${adapter.name} keeps evidence bundles outside the task snapshot`, () => {
+    const { store, cleanup } = adapter.create();
+    try {
+      const snapshot = taskSnapshot("task-evidence");
+      store.create(snapshot, { type: "task.queued", data: {} });
+      assert.equal(store.appendEvidenceBundle(snapshot.id, evidenceBundle()), true);
+
+      assert.equal(store.load(snapshot.id)?.snapshot.evidenceBundles, undefined);
+      assert.deepEqual(store.loadEvidenceBundles(snapshot.id), [evidenceBundle()]);
+    } finally {
+      cleanup();
+    }
+  });
+
   test(`${adapter.name} bounds diagnostics and summarizes dropped records`, () => {
     const { store, cleanup } = adapter.create(3);
     try {
@@ -202,6 +218,53 @@ test("sqlite keeps terminal tasks and fails interrupted tasks on recovery", () =
   }
 });
 
+test("sqlite migrates legacy inline evidence bundles into the dedicated table", () => {
+  const directory = mkdtempSync(join(tmpdir(), "think-tank-evidence-migration-"));
+  const path = join(directory, "tasks.sqlite");
+  const legacy = new DatabaseSync(path);
+  try {
+    legacy.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+      CREATE TABLE research_tasks (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL
+      );
+    `);
+    const snapshot = {
+      ...taskSnapshot("legacy-evidence"),
+      evidenceBundles: [evidenceBundle()],
+    };
+    legacy.prepare(`
+      INSERT INTO research_tasks(id, status, created_at, updated_at, snapshot_json)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      snapshot.id,
+      snapshot.status,
+      snapshot.createdAt,
+      snapshot.updatedAt,
+      JSON.stringify(snapshot),
+    );
+  } finally {
+    legacy.close();
+  }
+  try {
+    const store = new SqliteResearchTaskStore(path);
+    assert.equal(store.load("legacy-evidence")?.snapshot.evidenceBundles, undefined);
+    assert.deepEqual(store.loadEvidenceBundles("legacy-evidence"), [
+      evidenceBundle(),
+    ]);
+    store.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function taskSnapshot(
   id: string,
   status: ResearchTaskSnapshot["status"] = "queued",
@@ -248,5 +311,28 @@ function checkpoint(taskId: string, sequence: number): WorkflowCheckpoint {
     completedSteps: [],
     outputVariables: {},
     evidenceBundles: [],
+  };
+}
+
+function evidenceBundle(): EvidenceBundle {
+  return {
+    schemaVersion: 1 as const,
+    aoStepId: "research",
+    researchRunId: "run-1",
+    attempt: 1,
+    mode: "standard" as const,
+    startedAt: "2026-07-29T00:00:00.000Z",
+    completedAt: "2026-07-29T00:01:00.000Z",
+    derivedFromStepIds: [],
+    queries: [],
+    sources: [],
+    researchContext: {
+      content: "evidence",
+      originalCharacters: 8,
+      truncated: false,
+    },
+    method: { sourceMode: "web", retrievers: ["duckduckgo"] },
+    report: { format: "markdown" as const, content: "# evidence", revision: 1 },
+    cost: 0,
   };
 }

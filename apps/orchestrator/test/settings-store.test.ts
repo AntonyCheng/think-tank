@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import { test } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
-import { RuntimeSettingsStore } from "../src/settings-store.js";
+import {
+  RuntimeSettingsStore,
+  SqliteRuntimeSettingsPersistence,
+} from "../src/settings-store.js";
 
 const baseEnv = {
   OPENAI_API_KEY: "secret",
@@ -56,4 +63,47 @@ test("updates the default multi-retriever grant", () => {
     store.getRuntimeSettings().retrievers,
     ["duckduckgo", "openalex"],
   );
+});
+
+test("persists editable model settings and encrypted keys in SQLite", () => {
+  const directory = mkdtempSync(join(tmpdir(), "think-tank-settings-"));
+  const database = new DatabaseSync(join(directory, "settings.sqlite"));
+  try {
+    const first = new RuntimeSettingsStore(
+      baseEnv,
+      undefined,
+      new SqliteRuntimeSettingsPersistence(database, "service-secret"),
+    );
+    first.setApiKey("replacement-secret");
+    first.setEmbeddingApiKey("replacement-embedding-secret");
+    first.update({
+      aoPlannerModel: "planner-v2",
+      retrievers: ["duckduckgo", "openalex"],
+    });
+
+    const raw = database.prepare(`
+      SELECT settings_json, secrets_ciphertext FROM runtime_settings WHERE id = 1
+    `).get() as { settings_json: string; secrets_ciphertext: string };
+    assert.match(raw.settings_json, /planner-v2/);
+    assert.doesNotMatch(raw.secrets_ciphertext, /replacement-secret/);
+
+    const second = new RuntimeSettingsStore(
+      baseEnv,
+      undefined,
+      new SqliteRuntimeSettingsPersistence(database, "service-secret"),
+    );
+    assert.equal(second.getRuntimeSettings().planner.model, "planner-v2");
+    assert.equal(second.getRuntimeSettings().planner.api_key, "replacement-secret");
+    assert.equal(
+      second.getRuntimeSettings().gptrEmbeddingApiKey,
+      "replacement-embedding-secret",
+    );
+    assert.deepEqual(second.getRuntimeSettings().retrievers, [
+      "duckduckgo",
+      "openalex",
+    ]);
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

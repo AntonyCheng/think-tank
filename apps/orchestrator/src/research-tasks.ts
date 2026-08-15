@@ -161,6 +161,12 @@ interface RuntimeTask {
   remainingExecutionMs?: number;
   activeSince?: number;
   timedOut?: boolean;
+  transientUpdate?: {
+    changes: Partial<ResearchTaskSnapshot>;
+    type: Extract<ResearchTaskEvent["type"], "research.activity" | "research.progress">;
+    data: Record<string, unknown>;
+  };
+  transientTimer?: NodeJS.Timeout;
 }
 
 export interface ResearchTaskManagerOptions {
@@ -319,6 +325,10 @@ export class ResearchTaskManager {
 
   diagnostics(id: string): StoredResearchDiagnostic[] {
     return this.#store.loadDiagnostics(id);
+  }
+
+  evidenceBundles(id: string): EvidenceBundle[] {
+    return this.#store.loadEvidenceBundles(id);
   }
 
   listHistory(input: {
@@ -510,7 +520,7 @@ export class ResearchTaskManager {
           }
           if (event.type === "research.activity") {
             changes.researchTelemetry = structuredClone(event.telemetry);
-            this.#record(
+            this.#scheduleTransientRecord(
               id,
               changes,
               event.type,
@@ -519,8 +529,18 @@ export class ResearchTaskManager {
             );
             return;
           }
+          if (event.type === "research.progress") {
+            changes.researchTelemetry = structuredClone(event.telemetry);
+            this.#scheduleTransientRecord(
+              id,
+              changes,
+              event.type,
+              structuredClone(event.progress) as unknown as
+                Record<string, unknown>,
+            );
+            return;
+          }
           if (
-            event.type === "research.progress" ||
             event.type === "research.completed" ||
             event.type === "research.failed"
           ) {
@@ -539,12 +559,9 @@ export class ResearchTaskManager {
             changes.workflowPlan = structuredClone(event.workflowPlan);
           }
           if (event.type === "evidence.bundle.recorded") {
-            const existing = this.#store.load(id)?.snapshot
-              .evidenceBundles ?? [];
-            changes.evidenceBundles = [
-              ...existing,
-              structuredClone(event.bundle),
-            ];
+            if (!this.#store.appendEvidenceBundle(id, event.bundle)) {
+              throw new Error(`task not found: ${id}`);
+            }
             this.#record(id, changes, event.type, {
               aoStepId: event.bundle.aoStepId,
               researchRunId: event.bundle.researchRunId,
@@ -593,6 +610,12 @@ export class ResearchTaskManager {
       const status: ResearchTaskStatus = warnings.length > 0
         ? "completed_with_warnings"
         : "completed";
+      if (
+        result.evidenceBundles !== undefined &&
+        !this.#store.replaceEvidenceBundles(id, result.evidenceBundles)
+      ) {
+        throw new Error(`task not found: ${id}`);
+      }
       this.#record(
         id,
         {
@@ -613,11 +636,6 @@ export class ResearchTaskManager {
                 reportEvidencePolicy: structuredClone(
                   result.reportEvidencePolicy,
                 ),
-              }),
-          ...(result.evidenceBundles === undefined
-            ? {}
-            : {
-                evidenceBundles: structuredClone(result.evidenceBundles),
               }),
           ...(result.researchTelemetry === undefined
             ? {}
@@ -711,6 +729,16 @@ export class ResearchTaskManager {
     type: ResearchTaskEvent["type"],
     data: Record<string, unknown>,
   ): void {
+    this.#flushTransientRecord(id);
+    this.#recordNow(id, changes, type, data);
+  }
+
+  #recordNow(
+    id: string,
+    changes: Partial<ResearchTaskSnapshot>,
+    type: ResearchTaskEvent["type"],
+    data: Record<string, unknown>,
+  ): void {
     const draft: ResearchTaskEventDraft = {
       type,
       data,
@@ -722,6 +750,38 @@ export class ResearchTaskManager {
     for (const listener of this.#runtimeFor(id).listeners) {
       listener(presentTaskEvent(transition.event));
     }
+  }
+
+  #scheduleTransientRecord(
+    id: string,
+    changes: Partial<ResearchTaskSnapshot>,
+    type: Extract<ResearchTaskEvent["type"], "research.activity" | "research.progress">,
+    data: Record<string, unknown>,
+  ): void {
+    const runtime = this.#runtimeFor(id);
+    runtime.transientUpdate = {
+      changes,
+      type,
+      data,
+    };
+    if (runtime.transientTimer) return;
+    runtime.transientTimer = setTimeout(() => {
+      runtime.transientTimer = undefined;
+      this.#flushTransientRecord(id);
+    }, 750);
+    runtime.transientTimer.unref();
+  }
+
+  #flushTransientRecord(id: string): void {
+    const runtime = this.#runtimeFor(id);
+    if (runtime.transientTimer) {
+      clearTimeout(runtime.transientTimer);
+      runtime.transientTimer = undefined;
+    }
+    const pending = runtime.transientUpdate;
+    runtime.transientUpdate = undefined;
+    if (!pending) return;
+    this.#recordNow(id, pending.changes, pending.type, pending.data);
   }
 
   #runtimeFor(id: string): RuntimeTask {
