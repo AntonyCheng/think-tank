@@ -132,7 +132,7 @@ services:
       MCP_PORT: "7010"
       THINK_TANK_API_URL: http://thinktank-api:3000
     ports:
-      - "7169:7010"
+      - "${MCP_PUBLIC_PORT:-7169}:7010"
     volumes:
       - ./data/mcp/artifacts:/app/mcp-server/artifacts
     networks:

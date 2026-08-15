@@ -11,6 +11,7 @@
 所有容器都加入 `thinktank_network`。宿主机仅映射前端 `5173` 和 MCP `7010`，不使用 Docker named volume，运行数据全部保存在 `docker/data`。
 
 前端宿主机端口可通过 `WEB_PORT` 覆盖；例如 Windows 保留 `5173` 时，可使用 `WEB_PORT=5800`。
+MCP 宿主机端口可通过 `MCP_PUBLIC_PORT` 覆盖；容器内部服务端口始终为 `7010`。
 
 MCP 默认关闭 Uvicorn HTTP 访问日志，因为 MCP 鉴权密钥位于连接 URL 的查询参数中。应用自身的启动、错误和工具调用日志仍会正常输出。
 
