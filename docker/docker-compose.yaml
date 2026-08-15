@@ -15,7 +15,7 @@ services:
       thinktank-api:
         condition: service_healthy
     ports:
-      - "${WEB_PORT:-5173}:80"
+      - "${WEB_PORT:-7168}:80"
     networks:
       - thinktank_network
 
@@ -132,7 +132,7 @@ services:
       MCP_PORT: "7010"
       THINK_TANK_API_URL: http://thinktank-api:3000
     ports:
-      - "7010:7010"
+      - "7169:7010"
     volumes:
       - ./data/mcp/artifacts:/app/mcp-server/artifacts
     networks:
