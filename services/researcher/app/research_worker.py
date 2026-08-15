@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -40,6 +41,14 @@ from .source_access import (
     MaterializedSourceSet,
     SourceAccessError,
     default_source_materializer,
+)
+from .synthesis_compression import (
+    DEFAULT_ROUTE_THRESHOLD,
+    CompressionStats,
+    SynthesisCompressor,
+    dedupe_sources,
+    estimate_original_characters,
+    resolve_extraction_llm,
 )
 from .document_extractors import PrivateDocumentEvidence, extract_document
 from .document_store import DocumentStore, DocumentStoreError
@@ -401,9 +410,58 @@ async def run_research(
             )
 
         if research_profile.mode == "synthesis":
+            upstream_bundles = request.upstream_evidence or []
+            compression_stats = None
+            if upstream_bundles:
+                original_characters = estimate_original_characters(
+                    upstream_bundles
+                )
+                upstream_bundles, deduped_characters, duplicate_count = (
+                    dedupe_sources(upstream_bundles)
+                )
+                extraction_llm = resolve_extraction_llm(request)
+                if (
+                    deduped_characters > DEFAULT_ROUTE_THRESHOLD
+                    and extraction_llm is not None
+                ):
+                    base_url, api_key, model = extraction_llm
+                    compressor = SynthesisCompressor(
+                        base_url, api_key, model
+                    )
+                    started = time.monotonic()
+                    upstream_bundles, compression_stats = (
+                        await compressor.compress(
+                            upstream_bundles, deduped_characters
+                        )
+                    )
+                    compression_stats.duration_ms = int(
+                        (time.monotonic() - started) * 1000
+                    )
+                else:
+                    compression_stats = CompressionStats(
+                        original_characters=original_characters,
+                        deduped_characters=deduped_characters,
+                        final_characters=deduped_characters,
+                        source_count=sum(
+                            len(b.get("sources") or [])
+                            for b in upstream_bundles
+                            if isinstance(b.get("sources"), list)
+                        ),
+                        duplicate_count=duplicate_count,
+                        passthrough=True,
+                    )
+                if compression_stats is not None:
+                    compression_stats.original_characters = (
+                        original_characters
+                    )
+                    compression_stats.duplicate_count = duplicate_count
+                    await collector.record(
+                        "synthesis.compression",
+                        compression_stats.event_data(),
+                    )
             synthesis_context = render_synthesis_context(
                 request.task,
-                request.upstream_evidence,
+                upstream_bundles,
             )
             await collector.record(
                 "synthesis.started",
