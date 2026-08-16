@@ -34,7 +34,7 @@ export function SettingsDrawer({ open, onClose }: { open: boolean; onClose: () =
     getRuntimeSettings()
       .then((value) => {
         setSettings(value);
-        form.setFieldsValue({ ...value, apiKey: "", embeddingApiKey: "" });
+        form.setFieldsValue({ ...value, apiKey: "", embeddingApiKey: "", retrieverApiKeys: {} });
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : "设置加载失败"))
       .finally(() => setLoading(false));
@@ -48,7 +48,7 @@ export function SettingsDrawer({ open, onClose }: { open: boolean; onClose: () =
     try {
       const updated = await updateRuntimeSettings(values);
       setSettings(updated);
-      form.setFieldsValue({ ...updated, apiKey: "", embeddingApiKey: "" });
+      form.setFieldsValue({ ...updated, apiKey: "", embeddingApiKey: "", retrieverApiKeys: {} });
       setChecks(updated.checks);
       setSaved(true);
     } catch (reason) {
@@ -91,6 +91,10 @@ export function SettingsDrawer({ open, onClose }: { open: boolean; onClose: () =
 
   const checkFor = (label: string) => checks.find((check) => check.label === label);
   const groupSummary = (scope: CheckScope) => summarizeChecks(checks.filter((check) => check.id === scopeCheckId(scope)));
+  const selectedRetrievers = Form.useWatch("retrievers", form) ?? settings?.retrievers ?? [];
+  const credentialRetrievers = settings?.retrieverCapabilities.filter(
+    (item) => item.credentialRequired && selectedRetrievers.includes(item.id),
+  ) ?? [];
 
   return (
     <Drawer className="settings-drawer" open={open} onClose={onClose} title="运行设置" width={480} destroyOnClose>
@@ -132,7 +136,8 @@ export function SettingsDrawer({ open, onClose }: { open: boolean; onClose: () =
             <strong>网页搜索</strong>
             <span className="settings-test-group-actions">{groupSummary("retrievers")}{checkButton("retrievers", "检测搜索")}</span>
           </div>
-          <Form.Item label="默认检索器" name="retrievers" rules={[{ required: true, message: "至少选择一个检索器" }]}><Select maxCount={settings.maxRetrievers} mode="multiple" options={settings.retrieverCapabilities.filter((item) => item.selectable).map((item) => ({ label: item.credentialRequired ? `${item.label}（需服务端密钥）` : item.label, value: item.id }))} /></Form.Item>
+          <Form.Item label="默认检索器" name="retrievers" rules={[{ required: true, message: "至少选择一个检索器" }]}><Select maxCount={settings.maxRetrievers} mode="multiple" options={settings.retrieverCapabilities.filter((item) => item.selectable).map((item) => ({ label: item.label, value: item.id }))} /></Form.Item>
+          {credentialRetrievers.map((item) => <Form.Item key={item.id} label={`${item.label} API Key`} name={["retrieverApiKeys", item.id]}><Input.Password placeholder={settings.configuredRetrieverCredentials.includes(item.id) ? "已配置，留空则保持不变" : `请输入 ${item.label} API Key`} /></Form.Item>)}
           {checks.filter((check) => check.id === "retriever").map((check) => <FieldCheck check={check} key={`${check.id}:${check.label}`} showLabel />)}
         </div>
 

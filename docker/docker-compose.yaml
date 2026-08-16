@@ -32,9 +32,12 @@ services:
     depends_on:
       thinktank-researcher:
         condition: service_healthy
+      thinktank-postgres:
+        condition: service_healthy
     env_file:
       - ./data/config/runtime/runtime.env
       - ./data/config/api/api.env
+      - ./data/config/postgres/postgres.env
     environment:
       API_HOST: 0.0.0.0
       API_PORT: "3000"
@@ -42,11 +45,37 @@ services:
       LOCAL_DOCUMENTS_ROOT: /app/.think-tank/documents
       RUNTIME_ENV_FILE: /app/config/runtime.env
       WEB_ROOT: /app/empty-web
+    command:
+      - sh
+      - -c
+      - export DATABASE_URL="postgresql://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@thinktank-postgres:5432/$${POSTGRES_DB}"; exec node apps/orchestrator/dist/src/api-server.js
     expose:
       - "3000"
     volumes:
       - ./data/app:/app/.think-tank
       - ./data/config/runtime:/app/config
+    networks:
+      - thinktank_network
+
+  thinktank-postgres:
+    image: postgres:17.6-bookworm
+    container_name: thinktank-postgres
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./data/config/postgres/postgres.env
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    expose:
+      - "5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     networks:
       - thinktank_network
 
@@ -94,6 +123,8 @@ services:
       SEARXNG_IMAGE_PROXY: "false"
     expose:
       - "8080"
+    ports:
+      - "${SEARXNG_PUBLIC_PORT:-7170}:8080"
     volumes:
       - ./data/config/searxng/settings.yml:/etc/searxng/settings.yml:ro
       - ./data/searxng/cache:/var/cache/searxng

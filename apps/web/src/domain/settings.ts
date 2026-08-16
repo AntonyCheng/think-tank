@@ -20,6 +20,7 @@ export interface RuntimeSettings {
   concurrency: number;
   apiKeyConfigured: boolean;
   embeddingApiKeyConfigured: boolean;
+  configuredRetrieverCredentials: string[];
   retrieverCapabilities: RetrieverCapability[];
   maxRetrievers: number;
 }
@@ -35,7 +36,8 @@ export interface RuntimeSettingsSaveResult extends RuntimeSettings {
   checks: SettingsPreflightCheck[];
 }
 
-export type RuntimeSettingsUpdate = Omit<RuntimeSettings, "retriever" | "apiKeyConfigured" | "embeddingApiKeyConfigured" | "retrieverCapabilities" | "maxRetrievers"> & {
+export type RuntimeSettingsUpdate = Omit<RuntimeSettings, "retriever" | "apiKeyConfigured" | "embeddingApiKeyConfigured" | "configuredRetrieverCredentials" | "retrieverCapabilities" | "maxRetrievers"> & {
   apiKey?: string;
   embeddingApiKey?: string;
+  retrieverApiKeys?: Record<string, string>;
 };

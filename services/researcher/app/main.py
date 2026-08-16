@@ -26,6 +26,7 @@ from .contracts import (
     ResearchResponse,
 )
 from .editor_search import search_editor_sources
+from .research_profile import ResearchRetriever
 from .source_access import SourceAccessError, default_source_materializer
 from . import research_worker
 from .report_processing import (
@@ -82,6 +83,51 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+_editor_search_environment_lock = asyncio.Lock()
+
+
+@asynccontextmanager
+async def _editor_search_credentials(
+    api_keys: dict[str, str],
+) -> AsyncIterator[None]:
+    """Apply request-scoped retriever credentials for editor/search probes."""
+    async with _editor_search_environment_lock:
+        previous = os.environ.get("TAVILY_API_KEY")
+        tavily_api_key = api_keys.get("tavily", "").strip()
+        if tavily_api_key:
+            os.environ["TAVILY_API_KEY"] = tavily_api_key
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("TAVILY_API_KEY", None)
+            else:
+                os.environ["TAVILY_API_KEY"] = previous
+
+
+async def _search_with_request_credentials(
+    query: str,
+    retrievers: tuple[ResearchRetriever, ...],
+    *,
+    limit: int,
+    api_keys: dict[str, str],
+) -> tuple[list[EditorSearchResult], dict[str, Any]]:
+    async with _editor_search_credentials(api_keys):
+        catalog = build_retriever_catalog(os.environ)
+        available = {item.id: item for item in catalog.retrievers}
+        if len(set(retrievers)) != len(retrievers):
+            raise ValueError("Retrievers must not contain duplicates.")
+        if len(retrievers) > catalog.max_retrievers:
+            raise ValueError("Too many retrievers were requested.")
+        if any(retriever not in available for retriever in retrievers):
+            raise ValueError("A requested retriever is not available.")
+        timeout_ms = min(available[retriever].timeout_ms for retriever in retrievers)
+        return await search_editor_sources(
+            query,
+            retrievers,
+            limit=limit,
+            timeout_ms=timeout_ms,
+        )
 
 
 def mark_redirected_logs_as_utf8() -> None:
@@ -151,21 +197,12 @@ async def search_editor_sources_endpoint(
     request: EditorSearchRequest,
 ) -> EditorSearchResponse:
     try:
-        catalog = build_retriever_catalog(os.environ)
-        available = {item.id: item for item in catalog.retrievers}
         requested = tuple(request.retrievers)
-        if len(set(requested)) != len(requested):
-            raise ValueError("Retrievers must not contain duplicates.")
-        if len(requested) > catalog.max_retrievers:
-            raise ValueError("Too many retrievers were requested.")
-        if any(retriever not in available for retriever in requested):
-            raise ValueError("A requested retriever is not available.")
-        timeout_ms = min(available[retriever].timeout_ms for retriever in requested)
-        results, summary = await search_editor_sources(
+        results, summary = await _search_with_request_credentials(
             request.query.strip(),
             requested,
             limit=request.limit,
-            timeout_ms=timeout_ms,
+            api_keys=request.retriever_api_keys,
         )
         return EditorSearchResponse(results=results, summary=summary)
     except ValueError as exc:
@@ -183,25 +220,26 @@ async def research_editor_sources_endpoint(
     if not query and not urls:
         raise HTTPException(status_code=422, detail="A query or URL is required.")
     try:
-        catalog = build_retriever_catalog(os.environ)
-        available = {item.id: item for item in catalog.retrievers}
         requested = tuple(request.retrievers)
-        if len(set(requested)) != len(requested):
-            raise ValueError("Retrievers must not contain duplicates.")
-        if len(requested) > catalog.max_retrievers:
-            raise ValueError("Too many retrievers were requested.")
-        if any(retriever not in available for retriever in requested):
-            raise ValueError("A requested retriever is not available.")
         results = []
         runtime_summary: dict[str, Any] = {}
         if query:
-            timeout_ms = min(available[item].timeout_ms for item in requested)
-            results, runtime_summary = await search_editor_sources(
+            results, runtime_summary = await _search_with_request_credentials(
                 query,
                 requested,
                 limit=request.limit,
-                timeout_ms=timeout_ms,
+                api_keys=request.retriever_api_keys,
             )
+        else:
+            async with _editor_search_credentials(request.retriever_api_keys):
+                catalog = build_retriever_catalog(os.environ)
+                available = {item.id: item for item in catalog.retrievers}
+                if len(set(requested)) != len(requested):
+                    raise ValueError("Retrievers must not contain duplicates.")
+                if len(requested) > catalog.max_retrievers:
+                    raise ValueError("Too many retrievers were requested.")
+                if any(retriever not in available for retriever in requested):
+                    raise ValueError("A requested retriever is not available.")
         candidates: list[tuple[str, str, str, str | None]] = [
             ("specified_url", url, url, None) for url in urls
         ]

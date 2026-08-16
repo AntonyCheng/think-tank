@@ -10,6 +10,7 @@ export interface RuntimeSettings {
   gptrServiceUrl: string;
   retriever: ResearchRetriever;
   retrievers: readonly ResearchRetriever[];
+  retrieverApiKeys: Partial<Record<ResearchRetriever, string>>;
   gptrFastLlm: string;
   gptrSmartLlm: string;
   gptrEmbedding: string;
@@ -104,6 +105,7 @@ export function settingsFromEnv(
     gptrServiceUrl: env.GPTR_SERVICE_URL ?? "http://127.0.0.1:8010",
     retriever,
     retrievers: Object.freeze(retrievers),
+    retrieverApiKeys: retrieverApiKeysFromEnv(env),
     gptrFastLlm,
     gptrSmartLlm,
     gptrEmbedding,
@@ -121,6 +123,13 @@ export function settingsFromEnv(
     gptrTaskConcurrencyBudget,
     gptrDeepLimits,
   };
+}
+
+function retrieverApiKeysFromEnv(
+  env: NodeJS.ProcessEnv,
+): Partial<Record<ResearchRetriever, string>> {
+  const tavilyApiKey = env.TAVILY_API_KEY?.trim();
+  return tavilyApiKey ? { tavily: tavilyApiKey } : {};
 }
 
 function parseRetrievers(value: string): ResearchRetriever[] {

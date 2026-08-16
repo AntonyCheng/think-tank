@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   buildResearchComposeSystemPrompt,
   composeValidatedWorkflow,
+  workflowFileName,
   type ResearchWorkflowComposer,
 } from "../src/workflow-composer.js";
 import {
@@ -15,6 +16,15 @@ import {
 } from "../src/research-profile.js";
 
 const agentsDir = join(import.meta.dirname, "fixtures", "agents");
+
+test("uses the task-owned filename instead of a long research topic", () => {
+  assert.equal(workflowFileName({
+    description: "全国两会政策部署与中长期增长动能的传导机制研究 - 关注财政、产业、就业与消费政策之间的协同性",
+    agentsDir,
+    llmConfig: { provider: "openai" },
+    workflowFileName: "a7aa1b59-e7a8-4382-af68-1357a8b19107.yaml",
+  }), "a7aa1b59-e7a8-4382-af68-1357a8b19107.yaml");
+});
 
 test("recomposes when AO returns a dangling step dependency", async () => {
   const directory = await mkdtemp(join(tmpdir(), "think-tank-compose-"));

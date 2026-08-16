@@ -11,10 +11,12 @@
   },
   "dependencies": {
     "agency-orchestrator": "0.12.1",
-    "markdown-it": "14.3.0"
+    "markdown-it": "14.3.0",
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/node": "24.1.0",
+    "@types/pg": "^8.15.6",
     "tsx": "4.20.3",
     "typescript": "5.8.3"
   }

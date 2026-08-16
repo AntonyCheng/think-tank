@@ -1162,12 +1162,31 @@ test("updates an API Key without exposing it through settings reads", async (t) 
   });
   const directory = await mkdtemp(join(tmpdir(), "think-tank-settings-"));
   const environmentFilePath = join(directory, ".env");
+  const tavilyCapabilityProvider: ResearchCapabilityProvider = {
+    async getCatalog() {
+      return {
+        schemaVersion: 1,
+        retrievers: [
+          ...readyRetrieverCatalog.retrievers,
+          {
+            id: "tavily",
+            label: "Tavily",
+            category: "web",
+            selectable: true,
+            credentialRequired: true,
+            timeoutMs: 20_000,
+          },
+        ],
+        maxRetrievers: 3,
+      };
+    },
+  };
   t.after(() => rm(directory, { recursive: true, force: true }));
   const server = createApiServer(
     manager,
     settings,
     undefined,
-    readyCapabilityProvider,
+    tavilyCapabilityProvider,
     environmentFilePath,
     undefined,
     undefined,
@@ -1186,6 +1205,7 @@ test("updates an API Key without exposing it through settings reads", async (t) 
   assert.equal(initial.embeddingApiKeyConfigured, false);
   assert.equal("apiKey" in initial, false);
   assert.equal("embeddingApiKey" in initial, false);
+  assert.deepEqual(initial.configuredRetrieverCredentials, []);
   assert.deepEqual(initial.retrieverCapabilities, [
     {
       id: "duckduckgo",
@@ -1203,15 +1223,24 @@ test("updates an API Key without exposing it through settings reads", async (t) 
       credentialRequired: false,
       timeoutMs: 20_000,
     },
+    {
+      id: "tavily",
+      label: "Tavily",
+      category: "web",
+      selectable: true,
+      credentialRequired: true,
+      timeoutMs: 20_000,
+    },
   ]);
-  assert.equal(initial.maxRetrievers, 2);
+  assert.equal(initial.maxRetrievers, 3);
   const response = await fetch(`${baseUrl}/api/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       apiKey: "replacement-secret",
       embeddingApiKey: "replacement-embedding-secret",
-      retrievers: ["duckduckgo", "openalex"],
+      retrieverApiKeys: { tavily: "replacement-tavily-secret" },
+      retrievers: ["duckduckgo", "openalex", "tavily"],
       concurrency: 4,
     }),
   });
@@ -1221,13 +1250,16 @@ test("updates an API Key without exposing it through settings reads", async (t) 
     retrievers: string[];
     concurrency: number;
     embeddingApiKeyConfigured: boolean;
+    configuredRetrieverCredentials: string[];
   };
   assert.equal(updated.retriever, "duckduckgo");
-  assert.deepEqual(updated.retrievers, ["duckduckgo", "openalex"]);
+  assert.deepEqual(updated.retrievers, ["duckduckgo", "openalex", "tavily"]);
   assert.equal(updated.concurrency, 4);
   assert.equal(updated.embeddingApiKeyConfigured, true);
+  assert.deepEqual(updated.configuredRetrieverCredentials, ["tavily"]);
   assert.equal("apiKey" in updated, false);
   assert.equal("embeddingApiKey" in updated, false);
+  assert.equal("retrieverApiKeys" in updated, false);
   assert.equal(
     settings.getRuntimeSettings().planner.api_key,
     "replacement-secret",
@@ -1237,8 +1269,12 @@ test("updates an API Key without exposing it through settings reads", async (t) 
     "replacement-embedding-secret",
   );
   assert.equal(
+    settings.getRuntimeSettings().retrieverApiKeys.tavily,
+    "replacement-tavily-secret",
+  );
+  assert.equal(
     await readFile(environmentFilePath, "utf8"),
-    'OPENAI_API_KEY="replacement-secret"\nGPTR_EMBEDDING_API_KEY="replacement-embedding-secret"\n',
+    'OPENAI_API_KEY="replacement-secret"\nGPTR_EMBEDDING_API_KEY="replacement-embedding-secret"\nTAVILY_API_KEY="replacement-tavily-secret"\n',
   );
 });
 

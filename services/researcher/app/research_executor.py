@@ -253,6 +253,10 @@ def _resolve_managed_environment(
             or values["STRATEGIC_LLM"]
             or values["SMART_LLM"],
             "EMBEDDING": request.embedding or values["EMBEDDING"],
+            "TAVILY_API_KEY": (
+                request.retriever_api_keys.get("tavily")
+                or values["TAVILY_API_KEY"]
+            ),
             "MAX_SEARCH_RESULTS_PER_QUERY": str(
                 profile.limits.max_search_results_per_query
             ),
@@ -329,6 +333,7 @@ def _run_engine_process(
             ]
             if request.embedding_api_key:
                 secrets.append(request.embedding_api_key)
+            secrets.extend(request.retriever_api_keys.values())
             messages.put({
                 "type": "error",
                 "status": status_code,

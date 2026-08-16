@@ -27,12 +27,14 @@ def test_catalog_exposes_only_enabled_and_ready_retrievers() -> None:
 
     assert [item.id for item in catalog.retrievers] == [
         "duckduckgo",
+        "tavily",
         "openalex",
     ]
-    assert catalog.max_retrievers == 2
+    assert catalog.max_retrievers == 3
     assert catalog.retrievers[0].timeout_ms == 15000
     assert catalog.retrievers[0].credential_required is False
-    assert catalog.retrievers[1].category == "academic"
+    assert catalog.retrievers[1].credential_required is True
+    assert catalog.retrievers[2].category == "academic"
 
 
 def test_catalog_uses_legacy_retriever_as_default_enablement() -> None:

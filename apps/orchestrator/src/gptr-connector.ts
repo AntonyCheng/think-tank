@@ -43,6 +43,7 @@ export interface GptrConnectorOptions {
   embedding?: string;
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
+  retrieverApiKeys?: Partial<Record<ResearchRetriever, string>>;
   signal?: AbortSignal;
   timeoutMs?: number;
   cleanupGraceMs?: number;
@@ -208,6 +209,9 @@ export class GptrConnector implements LLMConnector {
       embedding: this.#options.embedding,
       embeddingBaseUrl: this.#options.embeddingBaseUrl,
       embeddingApiKey: this.#options.embeddingApiKey,
+      ...(Object.keys(this.#options.retrieverApiKeys ?? {}).length > 0
+        ? { retrieverApiKeys: this.#options.retrieverApiKeys }
+        : {}),
     };
 
     let heartbeat: NodeJS.Timeout | undefined;

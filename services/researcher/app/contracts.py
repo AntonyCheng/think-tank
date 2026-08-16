@@ -56,6 +56,10 @@ class ResearchRequest(BaseModel):
         alias="embeddingApiKey",
         default=None,
     )
+    retriever_api_keys: dict[ResearchRetriever, str] = Field(
+        alias="retrieverApiKeys",
+        default_factory=dict,
+    )
 
 
 class ResearchEvent(BaseModel):
@@ -137,6 +141,10 @@ class EditorSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4_000)
     retrievers: list[ResearchRetriever] = Field(min_length=1, max_length=5)
     limit: int = Field(default=8, ge=1, le=20)
+    retriever_api_keys: dict[ResearchRetriever, str] = Field(
+        alias="retrieverApiKeys",
+        default_factory=dict,
+    )
 
 
 class EditorSearchResult(BaseModel):
@@ -162,6 +170,10 @@ class EditorResearchRequest(BaseModel):
     urls: list[str] = Field(default_factory=list, max_length=8)
     retrievers: list[ResearchRetriever] = Field(min_length=1, max_length=5)
     limit: int = Field(default=5, ge=1, le=8)
+    retriever_api_keys: dict[ResearchRetriever, str] = Field(
+        alias="retrieverApiKeys",
+        default_factory=dict,
+    )
 
 
 class EditorResearchSource(BaseModel):

@@ -15,6 +15,7 @@ const settings: RuntimeSettings = {
   gptrServiceUrl: "http://127.0.0.1:8010",
   retriever: "duckduckgo",
   retrievers: ["duckduckgo"],
+  retrieverApiKeys: {},
   gptrFastLlm: "openai:fast",
   gptrSmartLlm: "openai:smart",
   gptrEmbedding: "custom:m3e",

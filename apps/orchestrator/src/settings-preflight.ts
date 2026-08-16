@@ -111,6 +111,9 @@ async function preflightRetrievers(
             query: "research system health check",
             retrievers: [retriever],
             limit: 1,
+            ...(Object.keys(settings.retrieverApiKeys).length > 0
+              ? { retrieverApiKeys: settings.retrieverApiKeys }
+              : {}),
           }),
           signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
         },
@@ -175,6 +178,7 @@ function failed(
     detail: redact(message, [
       settings.planner.api_key,
       settings.gptrEmbeddingApiKey,
+      ...Object.values(settings.retrieverApiKeys),
     ]),
   };
 }

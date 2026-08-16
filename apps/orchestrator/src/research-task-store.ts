@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 
 import type {
   ResearchTaskEvent,
@@ -9,6 +10,10 @@ import type {
 import type { EvidenceBundle } from "./evidence-bundle.js";
 import type { ResearchDiagnosticRecord } from "./research-telemetry.js";
 import type { WorkflowCheckpoint } from "./workflow-checkpoint.js";
+
+const LegacyDatabaseSync = process.env.NODE_ENV === "production"
+  ? undefined
+  : createRequire(import.meta.url)("node:sqlite").DatabaseSync as typeof DatabaseSync;
 
 export interface StoredResearchTask {
   snapshot: ResearchTaskSnapshot;
@@ -256,6 +261,35 @@ export class InMemoryResearchTaskStore implements ResearchTaskStore {
     }
     return recovered;
   }
+
+  hydrate(input: {
+    tasks: StoredResearchTask[];
+    diagnostics: StoredResearchDiagnostic[];
+    checkpoints: WorkflowCheckpoint[];
+    evidenceBundles: Array<{ taskId: string; bundles: EvidenceBundle[] }>;
+  }): void {
+    this.#tasks.clear();
+    this.#diagnostics.clear();
+    this.#checkpoints.clear();
+    for (const stored of input.tasks) {
+      this.#tasks.set(stored.snapshot.id, structuredClone(stored));
+    }
+    for (const record of input.evidenceBundles) {
+      const stored = this.#tasks.get(record.taskId);
+      if (stored) stored.snapshot.evidenceBundles = structuredClone(record.bundles);
+    }
+    for (const diagnostic of input.diagnostics) {
+      const records = this.#diagnostics.get(diagnostic.taskId) ?? [];
+      records.push(structuredClone(diagnostic));
+      this.#diagnostics.set(diagnostic.taskId, records);
+    }
+    for (const checkpoint of input.checkpoints) {
+      const records = this.#checkpoints.get(checkpoint.taskId) ?? [];
+      records.push(structuredClone(checkpoint));
+      records.sort(compareCheckpoints);
+      this.#checkpoints.set(checkpoint.taskId, records);
+    }
+  }
 }
 
 export class SqliteResearchTaskStore implements ResearchTaskStore {
@@ -265,7 +299,8 @@ export class SqliteResearchTaskStore implements ResearchTaskStore {
   constructor(filePath: string, diagnosticLimit = 2_000) {
     this.#diagnosticLimit = normalizeDiagnosticLimit(diagnosticLimit);
     mkdirSync(dirname(filePath), { recursive: true });
-    this.#database = new DatabaseSync(filePath);
+    if (!LegacyDatabaseSync) throw new Error("SQLite storage is not available in production.");
+    this.#database = new LegacyDatabaseSync(filePath);
     this.#database.exec("PRAGMA foreign_keys = ON");
     this.#database.exec("PRAGMA journal_mode = WAL");
     this.#database.exec("PRAGMA busy_timeout = 5000");

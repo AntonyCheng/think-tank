@@ -1284,6 +1284,7 @@ textarea:focus-visible {
 .status-working { color: #286bd1; }
 .status-completed { color: #39a16f; }
 .status-failed { color: #ce625b; }
+.status-skipped { color: #a18b5d; }
 
 .workspace-main {
   display: flex;

@@ -36,8 +36,15 @@ interface ResearchWorkspaceProps {
 }
 
 interface ExpertRuntime {
-  status: "waiting" | "working" | "completed" | "failed";
+  status: "waiting" | "working" | "completed" | "failed" | "skipped";
   event?: TaskEvent;
+}
+
+interface ResearchFailurePresentation {
+  heading: string;
+  summary: string;
+  detail?: string;
+  hint: string;
 }
 
 const statusCopy: Record<TaskStatus, string> = {
@@ -68,6 +75,14 @@ const researchPhaseCopy: Record<string, string> = {
   finalizing: "整理中",
 };
 
+const expertRuntimeCopy: Record<ExpertRuntime["status"], string> = {
+  waiting: "等待执行",
+  working: "执行中",
+  completed: "已完成",
+  failed: "未完成",
+  skipped: "因上游失败未执行",
+};
+
 function researchModeLabel(mode: string): string {
   return researchModeCopy[mode] ?? "研究中";
 }
@@ -83,7 +98,11 @@ function expertRuntime(events: TaskEvent[]): Map<string, ExpertRuntime> {
       state.set(event.data.stepId, { status: "working", event });
     }
     if (event.type === "step.completed" && typeof event.data.stepId === "string") {
-      const outcome = event.data.status === "failed" ? "failed" : "completed";
+      const outcome = event.data.status === "failed"
+        ? "failed"
+        : event.data.status === "skipped"
+          ? "skipped"
+          : "completed";
       state.set(event.data.stepId, { status: outcome, event });
     }
   }
@@ -95,6 +114,59 @@ function StatusIcon({ status }: { status: ExpertRuntime["status"] }) {
   if (status === "completed") return <CheckCircleFilled />;
   if (status === "failed") return <CloseCircleFilled />;
   return <ClockCircleOutlined />;
+}
+
+function researchFailurePresentation(
+  snapshot: ResearchTaskSnapshot,
+  events: TaskEvent[],
+): ResearchFailurePresentation {
+  const startedStepIds = new Set(
+    events
+      .filter((event) => event.type === "step.started" && typeof event.data.stepId === "string")
+      .map((event) => event.data.stepId as string),
+  );
+  if (!startedStepIds.size) {
+    return {
+      heading: "专家团队未能创建",
+      summary: "系统未能完成研究工作流编排，因此没有开始后续检索与分析。",
+      hint: "请检查模型服务设置与网络连接后，重新发起研究。",
+    };
+  }
+
+  const stepNames = new Map(
+    (snapshot.workflowPlan?.steps ?? []).map((step) => [step.id, step.name]),
+  );
+  const finalOutcomes = new Map<string, string>();
+  for (const event of events) {
+    if (event.type !== "step.completed" || typeof event.data.stepId !== "string") continue;
+    finalOutcomes.set(event.data.stepId, typeof event.data.status === "string" ? event.data.status : "completed");
+  }
+  const failedSteps = [...finalOutcomes]
+    .filter(([, status]) => status === "failed")
+    .map(([stepId]) => stepNames.get(stepId) ?? stepId);
+  const skippedSteps = [...finalOutcomes]
+    .filter(([, status]) => status === "skipped")
+    .map(([stepId]) => stepNames.get(stepId) ?? stepId);
+  const retrieverUnavailable = events
+    .map(activityFromEvent)
+    .find((activity) => activity?.message.includes("暂时不可用"));
+  const noUsableSources = snapshot.researchTelemetry?.summary.uniqueSourceCount === 0;
+  const summaryParts = ["专家团队已创建并开始执行。"];
+  if (failedSteps.length) summaryParts.push(`${failedSteps.length} 位专家未能完成研究。`);
+  if (skippedSteps.length) summaryParts.push(`${skippedSteps.length} 个汇总步骤因依赖失败未执行。`);
+
+  return {
+    heading: "专家研究未完成",
+    summary: summaryParts.join(""),
+    detail: retrieverUnavailable
+      ? `${retrieverUnavailable.message} 未获取到可用于专家研究的网页资料。`
+      : noUsableSources
+        ? "网页搜索未返回可用资料，无法为专家研究提供所需上下文。"
+        : failedSteps.length
+          ? `未完成的专家步骤：${failedSteps.join("、")}。`
+          : undefined,
+    hint: "请检查已选搜索引擎与网络连接后，重新发起研究。",
+  };
 }
 
 function ResearchWarningMarker({ warnings }: { warnings?: string[] }) {
@@ -161,7 +233,7 @@ function ExpertRosterItem({
         <strong ref={titleRef}>{name}</strong>
         <small>{mode}</small>
       </span>
-      <span className={`expert-status status-${runtime.status}`} title={runtime.status}>
+      <span className={`expert-status status-${runtime.status}`} title={expertRuntimeCopy[runtime.status]}>
         <StatusIcon status={runtime.status} />
       </span>
     </button>
@@ -241,23 +313,32 @@ function CandidateExpertMatcher({ taskId }: { taskId: string }) {
   );
 }
 
-function ResearchFailure({ taskId, error, onRetry }: { taskId: string; error?: string; onRetry: (task: ResearchTaskSnapshot) => void }) {
+function ResearchFailure({
+  snapshot,
+  events,
+  onRetry,
+}: {
+  snapshot: ResearchTaskSnapshot;
+  events: TaskEvent[];
+  onRetry: (task: ResearchTaskSnapshot) => void;
+}) {
   const [detail, setDetail] = useState("");
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState("");
+  const presentation = researchFailurePresentation(snapshot, events);
   useEffect(() => {
     let active = true;
-    getTaskDiagnostics(taskId)
+    getTaskDiagnostics(snapshot.id)
       .then((diagnostics) => { if (active) setDetail(diagnostics.at(-1)?.message ?? ""); })
       .catch(() => undefined);
     return () => { active = false; };
-  }, [taskId]);
-  const visibleError = detail || error || "研究任务在启动阶段遇到问题，尚未开始资料检索。";
+  }, [snapshot.id]);
+  const visibleError = presentation.detail || detail || snapshot.error || "研究任务在启动阶段遇到问题，尚未开始资料检索。";
   const retry = async () => {
     setRetrying(true);
     setRetryError("");
     try {
-      onRetry(await retryResearchTask(taskId));
+      onRetry(await retryResearchTask(snapshot.id));
     } catch (reason) {
       setRetryError(reason instanceof Error ? reason.message : "重新发起研究失败，请稍后再试。");
     } finally {
@@ -268,13 +349,13 @@ function ResearchFailure({ taskId, error, onRetry }: { taskId: string; error?: s
     <section className="research-failure" role="alert">
       <CloseCircleFilled />
       <p className="research-failure-kicker">研究已停止</p>
-      <h1>专家团队未能创建</h1>
-      <p className="research-failure-summary">系统未能完成研究工作流编排，因此没有开始后续检索与分析。</p>
+      <h1>{presentation.heading}</h1>
+      <p className="research-failure-summary">{presentation.summary}</p>
       <div className="research-failure-detail">
         <span>错误详情</span>
         <p>{visibleError}</p>
       </div>
-      <p className="research-failure-hint">请检查模型服务设置与网络连接后，重新发起研究。</p>
+      <p className="research-failure-hint">{presentation.hint}</p>
       <div className="research-failure-actions">
         <Button type="primary" loading={retrying} onClick={retry}>重新研究</Button>
       </div>
@@ -671,7 +752,7 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
         <section className="workspace-main">
           <PendingInput snapshot={snapshot} onUpdate={store.updateSnapshot} />
           {snapshot.status === "failed"
-            ? <ResearchFailure taskId={snapshot.id} error={snapshot.error} onRetry={(task) => onOpenTask(task.id, task.topic)} />
+            ? <ResearchFailure snapshot={snapshot} events={events} onRetry={(task) => onOpenTask(task.id, task.topic)} />
             : <CurrentExpert agentsByRole={agentsByRole} snapshot={snapshot} steps={steps} runtimes={runtimes} selectedId={activeExpertId} events={events} />}
           <footer className="workspace-summary">
             <span>研究耗时 {formatElapsed(liveElapsed(snapshot, now))}</span>

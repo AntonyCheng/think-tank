@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,6 +76,7 @@ test("persists editable model settings and encrypted keys in SQLite", () => {
     );
     first.setApiKey("replacement-secret");
     first.setEmbeddingApiKey("replacement-embedding-secret");
+    first.setRetrieverApiKeys({ tavily: "replacement-tavily-secret" });
     first.update({
       aoPlannerModel: "planner-v2",
       retrievers: ["duckduckgo", "openalex"],
@@ -86,6 +87,7 @@ test("persists editable model settings and encrypted keys in SQLite", () => {
     `).get() as { settings_json: string; secrets_ciphertext: string };
     assert.match(raw.settings_json, /planner-v2/);
     assert.doesNotMatch(raw.secrets_ciphertext, /replacement-secret/);
+    assert.doesNotMatch(raw.secrets_ciphertext, /replacement-tavily-secret/);
 
     const second = new RuntimeSettingsStore(
       baseEnv,
@@ -98,10 +100,40 @@ test("persists editable model settings and encrypted keys in SQLite", () => {
       second.getRuntimeSettings().gptrEmbeddingApiKey,
       "replacement-embedding-secret",
     );
+    assert.equal(
+      second.getRuntimeSettings().retrieverApiKeys.tavily,
+      "replacement-tavily-secret",
+    );
+    assert.deepEqual(
+      second.getPublicSettings().configuredRetrieverCredentials,
+      ["tavily"],
+    );
     assert.deepEqual(second.getRuntimeSettings().retrievers, [
       "duckduckgo",
       "openalex",
     ]);
+  } finally {
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("imports legacy file settings before creating the database record", () => {
+  const directory = mkdtempSync(join(tmpdir(), "think-tank-settings-import-"));
+  const database = new DatabaseSync(join(directory, "settings.sqlite"));
+  const legacyPath = join(directory, "settings.json");
+  try {
+    writeFileSync(legacyPath, JSON.stringify({
+      aoPlannerModel: "legacy-planner",
+      concurrency: 3,
+    }), "utf8");
+    const store = new RuntimeSettingsStore(
+      baseEnv,
+      legacyPath,
+      new SqliteRuntimeSettingsPersistence(database, "service-secret"),
+    );
+    assert.equal(store.getRuntimeSettings().planner.model, "legacy-planner");
+    assert.equal(store.getRuntimeSettings().concurrency, 3);
   } finally {
     database.close();
     rmSync(directory, { recursive: true, force: true });

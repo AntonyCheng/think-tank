@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { parseWorkflow } from "agency-orchestrator";
@@ -16,15 +15,17 @@ import {
   ResearchTaskManager,
   type ResearchTaskEvent,
 } from "./research-tasks.js";
-import { SqliteResearchTaskStore } from "./research-task-store.js";
+import { PostgresResearchTaskStore } from "./postgres-research-task-store.js";
+import { PostgresDatabase } from "./postgres.js";
 import {
   RuntimeSettingsStore,
-  SqliteRuntimeSettingsPersistence,
+  PostgresRuntimeSettingsPersistence,
 } from "./settings-store.js";
 import {
   ResearchProfileError,
   resolveResearchProfile,
   type ResearchProfile,
+  type ResearchRetriever,
 } from "./research-profile.js";
 import {
   currentResearchProfileEnvironment,
@@ -59,17 +60,16 @@ import {
 import {
   InMemoryReportDocumentStore,
   ReportDocumentConflictError,
-  SqliteReportTransactionRunner,
-  SqliteReportDocumentStore,
   type ReportDocumentStore,
 } from "./report-document-store.js";
+import { PostgresReportDocumentStore } from "./postgres-report-document-store.js";
 import {
   InMemoryReportEditorStore,
   OpenAIReportEditorModel,
   ReportEditorService,
-  SqliteReportEditorStore,
   UnavailableReportEditorModel,
 } from "./report-editor.js";
+import { PostgresReportEditorStore } from "./postgres-report-editor-store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 // Full-document report edits contain the complete Markdown document. Keep a
@@ -270,6 +270,7 @@ export function createApiServer(
             {
               apiKey: optionalApiKey(body.apiKey),
               embeddingApiKey: optionalApiKey(body.embeddingApiKey),
+              retrieverApiKeys: optionalRetrieverApiKeys(body.retrieverApiKeys, catalog),
             },
             {
               retrievers: catalog.retrievers.map((item) => item.id),
@@ -300,9 +301,13 @@ export function createApiServer(
         try {
           const apiKey = optionalApiKey(body.apiKey);
           const embeddingApiKey = optionalApiKey(body.embeddingApiKey);
+          const retrieverApiKeys = optionalRetrieverApiKeys(
+            body.retrieverApiKeys,
+            catalog,
+          );
           const candidate = settings.preview(
             body,
-            { apiKey, embeddingApiKey },
+            { apiKey, embeddingApiKey, retrieverApiKeys },
             {
               retrievers: catalog.retrievers.map((item) => item.id),
               maxRetrievers: catalog.maxRetrievers,
@@ -322,6 +327,9 @@ export function createApiServer(
             ...(embeddingApiKey
               ? { GPTR_EMBEDDING_API_KEY: embeddingApiKey }
               : {}),
+            ...(retrieverApiKeys.tavily
+              ? { TAVILY_API_KEY: retrieverApiKeys.tavily }
+              : {}),
           };
           if (!settings.persistsToDatabase) {
             await replaceEnvironmentValues(environmentFilePath, environmentValues);
@@ -329,6 +337,9 @@ export function createApiServer(
           if (apiKey) settings.setApiKey(apiKey);
           if (embeddingApiKey) {
             settings.setEmbeddingApiKey(embeddingApiKey);
+          }
+          if (Object.keys(retrieverApiKeys).length > 0) {
+            settings.setRetrieverApiKeys(retrieverApiKeys);
           }
           return sendJson(response, 200, {
             ...settings.update(body, {
@@ -564,6 +575,7 @@ export function createApiServer(
               urls: plan.urls,
               retrievers,
               limit: 5,
+              retrieverApiKeys: settings?.getRuntimeSettings().retrieverApiKeys,
             });
             const recorded = reportEditor.recordSearch({
               taskId: task.id,
@@ -693,6 +705,7 @@ export function createApiServer(
             query,
             retrievers,
             limit: 8,
+            retrieverApiKeys: settings?.getRuntimeSettings().retrieverApiKeys,
           });
           return sendJson(response, 201, reportEditor.recordSearch({
             taskId: task.id,
@@ -826,6 +839,7 @@ export function createApiServer(
               urls: plan.urls,
               retrievers,
               limit: 5,
+              retrieverApiKeys: settings?.getRuntimeSettings().retrieverApiKeys,
             });
             automaticSources = reportEditor.recordSearch({
               taskId: task.id,
@@ -1340,6 +1354,25 @@ function parsePreflightScope(value: unknown): SettingsPreflightScope {
   throw new Error("检测范围无效。");
 }
 
+function optionalRetrieverApiKeys(
+  value: unknown,
+  catalog: RetrieverCatalog,
+): Partial<Record<ResearchRetriever, string>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const credentialRetrievers = new Set(
+    catalog.retrievers
+      .filter((item) => item.credentialRequired)
+      .map((item) => item.id),
+  );
+  const result: Partial<Record<ResearchRetriever, string>> = {};
+  for (const [retriever, apiKey] of Object.entries(value)) {
+    if (!credentialRetrievers.has(retriever as ResearchRetriever)) continue;
+    const normalized = optionalApiKey(apiKey);
+    if (normalized) result[retriever as ResearchRetriever] = normalized;
+  }
+  return result;
+}
+
 function logSettingsPreflight(
   scope: SettingsPreflightScope,
   checks: readonly SettingsPreflightCheck[],
@@ -1371,7 +1404,12 @@ function diagnosticMessage(value: unknown): string | undefined {
 
 async function searchReportSources(
   serviceUrl: string,
-  input: { query: string; retrievers: string[]; limit: number },
+  input: {
+    query: string;
+    retrievers: string[];
+    limit: number;
+    retrieverApiKeys?: Partial<Record<ResearchRetriever, string>>;
+  },
 ): Promise<{ results: Array<{ provider: string; title: string; url: string; snippet?: string }> }> {
   const response = await fetch(new URL("/search", serviceUrl), {
     method: "POST",
@@ -1400,7 +1438,13 @@ async function searchReportSources(
 
 async function researchReportSources(
   serviceUrl: string,
-  input: { query?: string; urls: string[]; retrievers: string[]; limit: number },
+  input: {
+    query?: string;
+    urls: string[];
+    retrievers: string[];
+    limit: number;
+    retrieverApiKeys?: Partial<Record<ResearchRetriever, string>>;
+  },
 ): Promise<{
   sources: Array<{
     provider: string;
@@ -1848,37 +1892,43 @@ if (
   process.argv[1] &&
   fileURLToPath(import.meta.url) === resolve(process.argv[1])
 ) {
+  void startApi();
+}
+
+async function startApi(): Promise<void> {
   if (!process.stdout.isTTY) {
     process.stdout.write("\uFEFF");
   }
   if (!process.stderr.isTTY) {
     process.stderr.write("\uFEFF");
   }
-  const reportDatabasePath = resolve(".think-tank", "data", "think-tank.sqlite");
-  const reportDatabase = new DatabaseSync(reportDatabasePath);
-  reportDatabase.exec("PRAGMA foreign_keys = ON");
-  reportDatabase.exec("PRAGMA journal_mode = WAL");
-  reportDatabase.exec("PRAGMA busy_timeout = 5000");
+  const database = new PostgresDatabase(process.env.DATABASE_URL ?? "");
+  await database.migrate();
+  const settingsPersistence = new PostgresRuntimeSettingsPersistence(
+    database,
+    process.env.ORCHESTRATOR_SERVICE_API_KEY ?? "",
+  );
+  await settingsPersistence.initialize();
   const settings = new RuntimeSettingsStore(
     process.env,
     resolve(".think-tank", "settings.json"),
-    new SqliteRuntimeSettingsPersistence(
-      reportDatabase,
-      process.env.ORCHESTRATOR_SERVICE_API_KEY ?? "",
-    ),
+    settingsPersistence,
   );
   const initialSettings = settings.getRuntimeSettings();
-  const taskStore = new SqliteResearchTaskStore(
-    reportDatabasePath,
-  );
-  const reportDocuments = new SqliteReportDocumentStore(reportDatabasePath, reportDatabase);
+  const taskStore = new PostgresResearchTaskStore(database);
+  const reportDocuments = new PostgresReportDocumentStore(database);
+  const reportEditorStore = new PostgresReportEditorStore(database);
+  await Promise.all([
+    taskStore.initialize(),
+    reportDocuments.initialize(),
+    reportEditorStore.initialize(),
+  ]);
   const reportEditor = new ReportEditorService(
     reportDocuments,
-    new SqliteReportEditorStore(reportDatabasePath, reportDatabase),
+    reportEditorStore,
     new OpenAIReportEditorModel(
       () => settings.getRuntimeSettings().planner,
     ),
-    new SqliteReportTransactionRunner(reportDatabase),
   );
   const manager = new ResearchTaskManager(
     (topic, onEvent, controls) =>

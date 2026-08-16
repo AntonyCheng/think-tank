@@ -33,6 +33,7 @@ export interface ResearchRequest {
   embedding?: string;
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
+  retrieverApiKeys?: Partial<Record<ResearchRetriever, string>>;
 }
 
 export interface ResearchEvent {

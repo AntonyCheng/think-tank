@@ -69,6 +69,7 @@ export function createRuntimeConnector(
     embedding: settings.gptrEmbedding,
     embeddingBaseUrl: settings.gptrEmbeddingBaseUrl,
     embeddingApiKey: settings.gptrEmbeddingApiKey,
+    retrieverApiKeys: settings.retrieverApiKeys,
     signal,
     timeoutMs: settings.gptrResearchTimeoutMs,
     cleanupGraceMs: settings.gptrCleanupGraceMs,

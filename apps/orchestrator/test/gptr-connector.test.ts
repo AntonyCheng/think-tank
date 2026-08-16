@@ -114,6 +114,7 @@ test("maps an AO chat call to a GPT Researcher request", async () => {
     embedding: "openai:embedding-model",
     embeddingBaseUrl: "https://embeddings.example/v1/",
     embeddingApiKey: "embedding-secret",
+    retrieverApiKeys: { tavily: "tavily-secret" },
     evidenceLedger,
     onResearchEvent: (event, invocation) => {
       invocationTimes ??= {
@@ -162,6 +163,7 @@ test("maps an AO chat call to a GPT Researcher request", async () => {
     embedding: "openai:embedding-model",
     embeddingBaseUrl: "https://embeddings.example/v1/",
     embeddingApiKey: "embedding-secret",
+    retrieverApiKeys: { tavily: "tavily-secret" },
   });
   assert.match(receivedUrl, /\/research\/stream$/u);
   assert.deepEqual(progress, [{

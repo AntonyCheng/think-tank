@@ -161,12 +161,12 @@ interface RuntimeTask {
   remainingExecutionMs?: number;
   activeSince?: number;
   timedOut?: boolean;
-  transientUpdate?: {
+  transientProgress?: {
     changes: Partial<ResearchTaskSnapshot>;
-    type: Extract<ResearchTaskEvent["type"], "research.activity" | "research.progress">;
+    type: "research.progress";
     data: Record<string, unknown>;
   };
-  transientTimer?: NodeJS.Timeout;
+  transientProgressTimer?: NodeJS.Timeout;
 }
 
 export interface ResearchTaskManagerOptions {
@@ -520,7 +520,9 @@ export class ResearchTaskManager {
           }
           if (event.type === "research.activity") {
             changes.researchTelemetry = structuredClone(event.telemetry);
-            this.#scheduleTransientRecord(
+            // Activities describe distinct user-visible research work. They must
+            // not be coalesced with high-frequency progress refreshes.
+            this.#recordNow(
               id,
               changes,
               event.type,
@@ -531,7 +533,7 @@ export class ResearchTaskManager {
           }
           if (event.type === "research.progress") {
             changes.researchTelemetry = structuredClone(event.telemetry);
-            this.#scheduleTransientRecord(
+            this.#scheduleTransientProgress(
               id,
               changes,
               event.type,
@@ -729,7 +731,7 @@ export class ResearchTaskManager {
     type: ResearchTaskEvent["type"],
     data: Record<string, unknown>,
   ): void {
-    this.#flushTransientRecord(id);
+    this.#flushTransientProgress(id);
     this.#recordNow(id, changes, type, data);
   }
 
@@ -752,34 +754,34 @@ export class ResearchTaskManager {
     }
   }
 
-  #scheduleTransientRecord(
+  #scheduleTransientProgress(
     id: string,
     changes: Partial<ResearchTaskSnapshot>,
-    type: Extract<ResearchTaskEvent["type"], "research.activity" | "research.progress">,
+    type: "research.progress",
     data: Record<string, unknown>,
   ): void {
     const runtime = this.#runtimeFor(id);
-    runtime.transientUpdate = {
+    runtime.transientProgress = {
       changes,
       type,
       data,
     };
-    if (runtime.transientTimer) return;
-    runtime.transientTimer = setTimeout(() => {
-      runtime.transientTimer = undefined;
-      this.#flushTransientRecord(id);
+    if (runtime.transientProgressTimer) return;
+    runtime.transientProgressTimer = setTimeout(() => {
+      runtime.transientProgressTimer = undefined;
+      this.#flushTransientProgress(id);
     }, 750);
-    runtime.transientTimer.unref();
+    runtime.transientProgressTimer.unref();
   }
 
-  #flushTransientRecord(id: string): void {
+  #flushTransientProgress(id: string): void {
     const runtime = this.#runtimeFor(id);
-    if (runtime.transientTimer) {
-      clearTimeout(runtime.transientTimer);
-      runtime.transientTimer = undefined;
+    if (runtime.transientProgressTimer) {
+      clearTimeout(runtime.transientProgressTimer);
+      runtime.transientProgressTimer = undefined;
     }
-    const pending = runtime.transientUpdate;
-    runtime.transientUpdate = undefined;
+    const pending = runtime.transientProgress;
+    runtime.transientProgress = undefined;
     if (!pending) return;
     this.#recordNow(id, pending.changes, pending.type, pending.data);
   }

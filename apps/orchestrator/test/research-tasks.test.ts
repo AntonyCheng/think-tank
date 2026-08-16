@@ -318,6 +318,99 @@ test("persists safe research activities with live telemetry for SSE replay", asy
   assert.deepEqual(activities, [activity]);
 });
 
+test("keeps every research activity when progress is throttled", async () => {
+  const firstActivity: ResearchActivity = {
+    schemaVersion: 1,
+    aoStepId: "market_analysis",
+    researchRunId: "research-1",
+    sequence: 1,
+    timestamp: "2026-07-29T10:00:05.000Z",
+    phase: "searching",
+    kind: "query",
+    message: "正在查询相关资料。",
+    runSourceCount: 0,
+    taskUniqueSourceCount: 0,
+    taskActivityCount: 1,
+  };
+  const secondActivity: ResearchActivity = {
+    ...firstActivity,
+    sequence: 2,
+    timestamp: "2026-07-29T10:00:06.000Z",
+    kind: "fetch",
+    message: "正在抓取网页内容。",
+    taskActivityCount: 2,
+  };
+  const progress: ResearchRunProgress = {
+    schemaVersion: 1,
+    aoStepId: "market_analysis",
+    researchRunId: "research-1",
+    mode: "standard",
+    state: "running",
+    phase: "collecting",
+    startedAt: "2026-07-29T10:00:00.000Z",
+    updatedAt: "2026-07-29T10:00:06.000Z",
+    queueWaitMs: 0,
+    elapsedMs: 6_000,
+    sourceCount: 0,
+    activityCount: 2,
+    cost: {
+      status: "unavailable",
+      currency: "USD",
+      provenance: "gptr",
+      estimated: true,
+    },
+  };
+  const telemetry: ResearchTelemetrySnapshot = {
+    schemaVersion: 1,
+    runs: [progress],
+    summary: {
+      runCount: 1,
+      completedRunCount: 0,
+      uniqueSourceCount: 0,
+      activityCount: 2,
+      reportedCostUsd: 0,
+      reportedCostRuns: 0,
+      totalElapsedMs: 6_000,
+    },
+  };
+  const manager = new ResearchTaskManager(async (_topic, onEvent) => {
+    onEvent({ type: "research.activity", timestamp: firstActivity.timestamp, activity: firstActivity, telemetry });
+    onEvent({ type: "research.progress", timestamp: progress.updatedAt, progress, telemetry });
+    onEvent({ type: "research.activity", timestamp: secondActivity.timestamp, activity: secondActivity, telemetry });
+    return {
+      workflowPath: "workflow.yaml",
+      output: "# report",
+      researchTelemetry: telemetry,
+      workflow: {
+        name: "test",
+        success: true,
+        steps: [],
+        totalDuration: 1,
+        totalTokens: { input: 0, output: 0 },
+      },
+    };
+  });
+
+  const submitted = manager.submit("observable activity and progress");
+  await waitFor(() => manager.get(submitted.id)?.status === "completed");
+
+  const eventTypes: string[] = [];
+  const activities: string[] = [];
+  manager.subscribe(submitted.id, (event) => {
+    eventTypes.push(event.type);
+    if (event.type === "research.activity" && typeof event.data.message === "string") {
+      activities.push(event.data.message);
+    }
+  });
+  assert.deepEqual(activities, [firstActivity.message, secondActivity.message]);
+  assert.deepEqual(eventTypes.slice(-4), [
+    "research.activity",
+    "research.activity",
+    "research.progress",
+    "task.completed",
+  ]);
+});
+
 test("retains completed evidence when a later workflow step fails", async () => {
   const manager = new ResearchTaskManager(async (_topic, onEvent) => {
     onEvent({

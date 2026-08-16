@@ -1,17 +1,19 @@
 # Docker Compose 部署
 
-该部署由四个容器组成：
+该部署由六个容器组成：
 
 - `thinktank-web`：Nginx 托管前端，并把 API 和流式请求反向代理到 API 容器。
-- `thinktank-api`：任务编排、登录、设置、SQLite 和报告接口，仅在 Docker 内网开放。
+- `thinktank-api`：任务编排、登录、设置和报告接口，仅在 Docker 内网开放。
+- `thinktank-postgres`：平台唯一运行时数据库，仅在 Docker 内网开放，数据绑定挂载到 `docker/data/postgres`。
 - `thinktank-researcher`：GPT Researcher 与文档导出，仅在 Docker 内网开放。
-- `thinktank-searxng`：SearXNG 聚合搜索服务，仅在 Docker 内网开放，向 Researcher 提供 JSON 搜索接口。
+- `thinktank-searxng`：SearXNG 聚合搜索服务，向 Researcher 提供 JSON 搜索接口，并可选择映射宿主机端口供外部调试或检索使用。
 - `thinktank-mcp`：远程 Streamable HTTP MCP，对外开放下载接口。
 
-所有容器都加入 `thinktank_network`。宿主机仅映射前端 `5173` 和 MCP `7010`，不使用 Docker named volume，运行数据全部保存在 `docker/data`。
+所有容器都加入 `thinktank_network`。宿主机映射前端（默认 `7168`）、MCP（默认 `7169`）和 SearXNG（默认 `7170`），不使用 Docker named volume，运行数据全部保存在 `docker/data`。
 
 前端宿主机端口可通过 `WEB_PORT` 覆盖；例如 Windows 保留 `5173` 时，可使用 `WEB_PORT=5800`。
 MCP 宿主机端口可通过 `MCP_PUBLIC_PORT` 覆盖；容器内部服务端口始终为 `7010`。
+SearXNG 宿主机端口可通过 `SEARXNG_PUBLIC_PORT` 覆盖；容器内部服务端口始终为 `8080`。当前 SearXNG 未配置额外鉴权，应仅在可信网络中暴露该端口。
 
 MCP 默认关闭 Uvicorn HTTP 访问日志，因为 MCP 鉴权密钥位于连接 URL 的查询参数中。应用自身的启动、错误和工具调用日志仍会正常输出。
 
@@ -24,6 +26,7 @@ Copy-Item docker\data\config\runtime\runtime.env.example docker\data\config\runt
 Copy-Item docker\data\config\api\api.env.example docker\data\config\api\api.env
 Copy-Item docker\data\config\mcp\mcp.env.example docker\data\config\mcp\mcp.env
 Copy-Item docker\data\config\searxng\searxng.env.example docker\data\config\searxng\searxng.env
+Copy-Item docker\data\config\postgres\postgres.env.example docker\data\config\postgres\postgres.env
 ```
 
 Linux 服务器执行：
@@ -33,6 +36,7 @@ cp docker/data/config/runtime/runtime.env.example docker/data/config/runtime/run
 cp docker/data/config/api/api.env.example docker/data/config/api/api.env
 cp docker/data/config/mcp/mcp.env.example docker/data/config/mcp/mcp.env
 cp docker/data/config/searxng/searxng.env.example docker/data/config/searxng/searxng.env
+cp docker/data/config/postgres/postgres.env.example docker/data/config/postgres/postgres.env
 ```
 
 编辑四个新文件并替换 `change-me` 占位值。必须保证：
@@ -163,4 +167,16 @@ docker compose -f docker\docker-compose.yaml build
 docker compose -f docker\docker-compose.yaml up -d
 ```
 
-清理镜像不会删除 `docker/data`。备份前建议先执行 `down`，再整体备份 `docker/data`。SQLite 文件位于 `docker/data/app/data/think-tank.sqlite`，不要在 API 运行时复制或由其他容器直接访问。
+清理镜像不会删除 `docker/data`。备份前建议先执行 `down`，再整体备份 `docker/data`。
+
+## SQLite 到 PostgreSQL 升级
+
+升级时先保留原有 `docker/data/app/data/think-tank.sqlite`，停止旧 API 写入后执行一次导入；新 API 不会再读取该文件。
+
+```powershell
+docker compose -f docker\docker-compose.yaml up -d thinktank-postgres
+docker compose -f docker\docker-compose.yaml run --rm --no-deps thinktank-api node apps/orchestrator/dist/src/migrate-sqlite-to-postgres.js /app/.think-tank/data/think-tank.sqlite
+docker compose -f docker\docker-compose.yaml up -d --build
+```
+
+导入命令会输出任务、事件、报告和运行时设置的记录数。确认新 API 可用且数据完整后，再手工删除旧 SQLite 文件及其 `-wal`、`-shm` 文件；这些文件不会被新服务挂载或读取。

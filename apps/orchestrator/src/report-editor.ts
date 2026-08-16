@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 
 import {
   OpenAICompatibleConnector,
@@ -22,6 +23,10 @@ import {
   type ReportCitationAudit,
   type ReportEditorSource,
 } from "./report-editor-audit.js";
+
+const LegacyDatabaseSync = process.env.NODE_ENV === "production"
+  ? undefined
+  : createRequire(import.meta.url)("node:sqlite").DatabaseSync as typeof DatabaseSync;
 
 const WHOLE_DOCUMENT_CHUNK_CHARACTERS = 24_000;
 const WHOLE_DOCUMENT_EDIT_CONCURRENCY = 4;
@@ -439,6 +444,29 @@ export class InMemoryReportEditorStore implements ReportEditorStore {
     }
   }
 
+  hydrate(input: {
+    conversations: ReportConversation[];
+    messages: ReportMessage[];
+    operations: ReportEditOperation[];
+    searchSessions: ReportSearchSession[];
+    searchResults: ReportSearchResult[];
+  }): void {
+    this.#conversations.clear();
+    this.#messages.clear();
+    this.#operations.clear();
+    this.#searchSessions.clear();
+    this.#searchResults.clear();
+    for (const item of input.conversations) this.#conversations.set(item.id, structuredClone(item));
+    for (const item of input.messages) {
+      const messages = this.#messages.get(item.conversationId) ?? [];
+      messages.push(structuredClone(item));
+      this.#messages.set(item.conversationId, messages);
+    }
+    for (const item of input.operations) this.#operations.set(item.id, structuredClone(item));
+    for (const item of input.searchSessions) this.#searchSessions.set(item.id, structuredClone(item));
+    for (const item of input.searchResults) this.#searchResults.set(item.id, structuredClone(item));
+  }
+
   #touchConversation(id: string, updatedAt: string): void {
     const conversation = this.#conversations.get(id);
     if (conversation) this.#conversations.set(id, { ...conversation, updatedAt });
@@ -451,7 +479,8 @@ export class SqliteReportEditorStore implements ReportEditorStore {
 
   constructor(filePath: string, database?: DatabaseSync) {
     mkdirSync(dirname(filePath), { recursive: true });
-    this.#database = database ?? new DatabaseSync(filePath);
+    if (!database && !LegacyDatabaseSync) throw new Error("SQLite storage is not available in production.");
+    this.#database = database ?? new LegacyDatabaseSync!(filePath);
     this.#ownsDatabase = !database;
     this.#database.exec("PRAGMA journal_mode = WAL");
     this.#database.exec(`

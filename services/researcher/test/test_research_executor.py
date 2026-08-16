@@ -161,6 +161,21 @@ def test_managed_environment_activates_profile_retrievers_in_order() -> None:
     assert environment["RETRIEVER"] == "duckduckgo,openalex"
 
 
+def test_managed_environment_prefers_request_tavily_key() -> None:
+    request = ResearchRequest(
+        systemPrompt="Expert.",
+        task="Research.",
+        retrieverApiKeys={"tavily": "request-tavily-key"},
+    )
+
+    environment = _resolve_managed_environment(
+        request,
+        {"TAVILY_API_KEY": "deployment-tavily-key"},
+    )
+
+    assert environment["TAVILY_API_KEY"] == "request-tavily-key"
+
+
 def test_oversized_deep_profile_is_rejected_before_worker_start() -> None:
     executor = ProcessResearchExecutor(
         engine=unexpected_engine_probe,

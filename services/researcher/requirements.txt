@@ -1,4 +1,9 @@
 gpt-researcher==0.16.0
+# Keep the OpenAI-compatible client stack aligned with the verified SQLite
+# runtime. GPT Researcher leaves these transitive dependencies unpinned,
+# which otherwise lets a Docker rebuild silently change request behavior.
+openai==2.51.0
+langchain-openai==1.4.1
 # GPTR 0.16.0 imports this package for its DuckDuckGo retriever but omits it
 # from the published dependency metadata.
 ddgs==9.14.4

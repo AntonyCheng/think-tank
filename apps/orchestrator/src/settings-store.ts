@@ -12,13 +12,19 @@ import {
   randomBytes,
 } from "node:crypto";
 import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 
 import {
   settingsFromEnv,
   type RuntimeSettings,
 } from "./settings.js";
-import type { ResearchRetriever } from "./research-profile.js";
+import {
+  RESEARCH_RETRIEVERS,
+  type ResearchRetriever,
+} from "./research-profile.js";
+import type { PostgresDatabase } from "./postgres.js";
+import { postgresJson } from "./postgres.js";
+import { PostgresWriteQueue } from "./postgres-write-queue.js";
 
 export interface EditableRuntimeSettings {
   openaiBaseUrl: string;
@@ -36,6 +42,7 @@ export interface PublicRuntimeSettings extends EditableRuntimeSettings {
   retriever: ResearchRetriever;
   apiKeyConfigured: boolean;
   embeddingApiKeyConfigured: boolean;
+  configuredRetrieverCredentials: ResearchRetriever[];
 }
 
 export interface RetrieverSelectionConstraints {
@@ -50,6 +57,7 @@ type LegacyPersistedRuntimeSettings = Partial<EditableRuntimeSettings> & {
 interface RuntimeSettingSecrets {
   apiKey?: string;
   embeddingApiKey?: string;
+  retrieverApiKeys?: Partial<Record<ResearchRetriever, string>>;
 }
 
 interface PersistedRuntimeSettings {
@@ -170,6 +178,92 @@ export class SqliteRuntimeSettingsPersistence
   }
 }
 
+/** PostgreSQL-backed persistence with synchronous cache reads for runtime settings. */
+export class PostgresRuntimeSettingsPersistence
+  implements RuntimeSettingsPersistence {
+  readonly #key: Buffer;
+  readonly #writes: PostgresWriteQueue;
+  #value: PersistedRuntimeSettings | undefined;
+
+  constructor(database: PostgresDatabase, encryptionSecret: string) {
+    if (!encryptionSecret.trim()) {
+      throw new Error(
+        "ORCHESTRATOR_SERVICE_API_KEY is required to encrypt runtime settings.",
+      );
+    }
+    this.#key = createHash("sha256")
+      .update("think-tank/runtime-settings/v1\\0")
+      .update(encryptionSecret)
+      .digest();
+    this.#writes = new PostgresWriteQueue(database);
+  }
+
+  async initialize(): Promise<void> {
+    const rows = await this.#writes.connection.query<{
+      settings_json: Partial<EditableRuntimeSettings>;
+      secrets_ciphertext: string;
+    }>("SELECT settings_json, secrets_ciphertext FROM runtime_settings WHERE id = 1");
+    const row = rows[0];
+    this.#value = row
+      ? { settings: row.settings_json, secrets: this.#decrypt(row.secrets_ciphertext) }
+      : undefined;
+  }
+
+  load(): PersistedRuntimeSettings | undefined {
+    return this.#value ? structuredClone(this.#value) : undefined;
+  }
+
+  save(value: PersistedRuntimeSettings): void {
+    const copy = structuredClone(value);
+    this.#value = copy;
+    const ciphertext = this.#encrypt(copy.secrets);
+    this.#writes.enqueue(async () => {
+      await this.#writes.connection.query(`
+        INSERT INTO runtime_settings(id, settings_json, secrets_ciphertext, updated_at)
+        VALUES(1, $1::jsonb, $2, $3)
+        ON CONFLICT(id) DO UPDATE SET settings_json=EXCLUDED.settings_json,
+          secrets_ciphertext=EXCLUDED.secrets_ciphertext, updated_at=EXCLUDED.updated_at
+      `, [postgresJson(copy.settings), ciphertext, new Date().toISOString()]);
+    });
+  }
+
+  async drain(): Promise<void> { await this.#writes.drain(); }
+
+  #encrypt(secrets: RuntimeSettingSecrets): string {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", this.#key, iv);
+    const ciphertext = Buffer.concat([
+      cipher.update(JSON.stringify(secrets), "utf8"),
+      cipher.final(),
+    ]);
+    return JSON.stringify({
+      version: 1,
+      iv: iv.toString("base64"),
+      tag: cipher.getAuthTag().toString("base64"),
+      ciphertext: ciphertext.toString("base64"),
+    });
+  }
+
+  #decrypt(value: string): RuntimeSettingSecrets {
+    const envelope = JSON.parse(value) as {
+      version?: unknown; iv?: unknown; tag?: unknown; ciphertext?: unknown;
+    };
+    if (envelope.version !== 1 || typeof envelope.iv !== "string" ||
+      typeof envelope.tag !== "string" || typeof envelope.ciphertext !== "string") {
+      throw new Error("Runtime settings secrets are malformed.");
+    }
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", this.#key, Buffer.from(envelope.iv, "base64"));
+      decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
+      return JSON.parse(Buffer.concat([
+        decipher.update(Buffer.from(envelope.ciphertext, "base64")), decipher.final(),
+      ]).toString("utf8")) as RuntimeSettingSecrets;
+    } catch {
+      throw new Error("Runtime settings secrets cannot be decrypted with the current service key.");
+    }
+  }
+}
+
 export class RuntimeSettingsStore {
   readonly #baseEnv: NodeJS.ProcessEnv;
   readonly #filePath?: string;
@@ -186,12 +280,14 @@ export class RuntimeSettingsStore {
     this.#filePath = filePath;
     this.#persistence = persistence;
     const persisted = persistence?.load();
-    this.#overrides = persisted?.settings ?? this.#loadLegacy();
     this.#secrets = {
       apiKey: persisted?.secrets.apiKey ?? this.#baseEnv.OPENAI_API_KEY,
       embeddingApiKey: persisted?.secrets.embeddingApiKey ??
         this.#baseEnv.GPTR_EMBEDDING_API_KEY,
+      retrieverApiKeys: persisted?.secrets.retrieverApiKeys ??
+        retrieverApiKeysFromEnvironment(this.#baseEnv),
     };
+    this.#overrides = persisted?.settings ?? this.#loadLegacy();
     // A deployment's existing runtime.env/settings.json is imported once.
     // Subsequent UI saves use the database and never rewrite environment files.
     if (this.#persistence && !persisted) this.#persist();
@@ -220,6 +316,10 @@ export class RuntimeSettingsStore {
       concurrency: runtime.concurrency,
       apiKeyConfigured: Boolean(runtime.planner.api_key),
       embeddingApiKeyConfigured: Boolean(runtime.gptrEmbeddingApiKey),
+      configuredRetrieverCredentials: Object.keys(runtime.retrieverApiKeys)
+        .filter((retriever): retriever is ResearchRetriever =>
+          RESEARCH_RETRIEVERS.includes(retriever as ResearchRetriever)
+        ),
     };
   }
 
@@ -237,20 +337,47 @@ export class RuntimeSettingsStore {
     this.#secrets.embeddingApiKey = apiKey.trim();
   }
 
+  setRetrieverApiKeys(
+    apiKeys: Partial<Record<ResearchRetriever, string>>,
+  ): void {
+    const current = this.#secrets.retrieverApiKeys ?? {};
+    this.#secrets.retrieverApiKeys = {
+      ...current,
+      ...Object.fromEntries(
+        Object.entries(apiKeys).flatMap(([retriever, apiKey]) => {
+          const normalized = apiKey?.trim();
+          return normalized && RESEARCH_RETRIEVERS.includes(
+            retriever as ResearchRetriever,
+          )
+            ? [[retriever, normalized]]
+            : [];
+        }),
+      ) as Partial<Record<ResearchRetriever, string>>,
+    };
+  }
+
   preview(
     input: Record<string, unknown>,
-    secrets: { apiKey?: string; embeddingApiKey?: string } = {},
+    secrets: {
+      apiKey?: string;
+      embeddingApiKey?: string;
+      retrieverApiKeys?: Partial<Record<ResearchRetriever, string>>;
+    } = {},
     constraints?: RetrieverSelectionConstraints,
   ): RuntimeSettings {
     const candidate = this.#candidate(input);
     assertRetrieverSelection(candidate.retrievers, constraints);
-    return settingsFromEnv({
-      ...this.#mergedEnv(candidate),
-      ...(secrets.apiKey ? { OPENAI_API_KEY: secrets.apiKey } : {}),
+    return settingsFromEnv(this.#mergedEnv(candidate, {
+      ...this.#secrets,
+      ...(secrets.apiKey ? { apiKey: secrets.apiKey } : {}),
       ...(secrets.embeddingApiKey
-        ? { GPTR_EMBEDDING_API_KEY: secrets.embeddingApiKey }
+        ? { embeddingApiKey: secrets.embeddingApiKey }
         : {}),
-    });
+      retrieverApiKeys: {
+        ...(this.#secrets.retrieverApiKeys ?? {}),
+        ...(secrets.retrieverApiKeys ?? {}),
+      },
+    }));
   }
 
   update(
@@ -309,14 +436,18 @@ export class RuntimeSettingsStore {
 
   #mergedEnv(
     overrides: Partial<EditableRuntimeSettings>,
+    secrets: RuntimeSettingSecrets = this.#secrets,
   ): NodeJS.ProcessEnv {
     return {
       ...this.#baseEnv,
-      ...(this.#secrets.apiKey
-        ? { OPENAI_API_KEY: this.#secrets.apiKey }
+      ...(secrets.apiKey
+        ? { OPENAI_API_KEY: secrets.apiKey }
         : {}),
-      ...(this.#secrets.embeddingApiKey
-        ? { GPTR_EMBEDDING_API_KEY: this.#secrets.embeddingApiKey }
+      ...(secrets.embeddingApiKey
+        ? { GPTR_EMBEDDING_API_KEY: secrets.embeddingApiKey }
+        : {}),
+      ...(secrets.retrieverApiKeys?.tavily
+        ? { TAVILY_API_KEY: secrets.retrieverApiKeys.tavily }
         : {}),
       OPENAI_BASE_URL: overrides.openaiBaseUrl ??
         this.#baseEnv.OPENAI_BASE_URL,
@@ -380,6 +511,13 @@ export class RuntimeSettingsStore {
     );
     renameSync(temporary, this.#filePath);
   }
+}
+
+function retrieverApiKeysFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+): Partial<Record<ResearchRetriever, string>> {
+  const tavilyApiKey = environment.TAVILY_API_KEY?.trim();
+  return tavilyApiKey ? { tavily: tavilyApiKey } : {};
 }
 
 function assertRetrieverSelection(

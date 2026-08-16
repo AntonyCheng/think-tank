@@ -264,6 +264,7 @@ export async function runResearchTopic(
       timeoutMs: settings.gptrResearchTimeoutMs + settings.gptrCleanupGraceMs,
       lang,
       saveDir: resolve(".think-tank", "workflows"),
+      workflowFileName: `${options.taskId}.yaml`,
     }, undefined, { taskProfile, capabilities }, relativeYearScope, (repair) => {
       options.onEvent?.({
         type: "workflow.repairing",

@@ -528,7 +528,13 @@ def build_retriever_catalog(
     ready = []
     for provider_id in enabled:
         spec = _RETRIEVER_BY_ID[provider_id]
-        if any(not values.get(name, "").strip() for name in spec.required_environment):
+        if (
+            any(
+                not values.get(name, "").strip()
+                for name in spec.required_environment
+            )
+            and not spec.credential_required
+        ):
             continue
         try:
             adapter = load_adapter(provider_id)

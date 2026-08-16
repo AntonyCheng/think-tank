@@ -23,8 +23,13 @@ import { analyzeWorkflowTopology } from "./workflow-topology.js";
 
 const MAX_RECOMPOSITION_ATTEMPTS = 2;
 
-type ComposeWorkflowOptions = Parameters<typeof composeWorkflow>[0];
+type AgencyComposeWorkflowOptions = Parameters<typeof composeWorkflow>[0];
 type ComposeWorkflowResult = Awaited<ReturnType<typeof composeWorkflow>>;
+
+export interface ComposeWorkflowOptions extends AgencyComposeWorkflowOptions {
+  /** Stable internal filename for a task-owned workflow. */
+  workflowFileName?: string;
+}
 
 export type ResearchWorkflowComposer = (
   options: ComposeWorkflowOptions,
@@ -204,7 +209,7 @@ export async function composeResearchWorkflow(
 
   const saveDir = resolve(options.saveDir ?? ".think-tank/workflows");
   await mkdir(saveDir, { recursive: true });
-  const fileName = `${workflowFileStem(options.description)}-${randomUUID()}.yaml`;
+  const fileName = workflowFileName(options);
   const savedPath = resolve(saveDir, fileName);
   await writeFile(savedPath, `${yaml.trim()}\n`, "utf8");
   return {
@@ -283,6 +288,18 @@ function workflowFileStem(description: string): string {
     .replace(/-+/gu, "-")
     .replace(/^-|-$/gu, "");
   return safe.slice(0, 80) || "research-workflow";
+}
+
+export function workflowFileName(options: ComposeWorkflowOptions): string {
+  const requested = options.workflowFileName?.trim();
+  if (requested) {
+    // Task IDs are generated internally. Keep this guard for other callers.
+    if (!/^[a-zA-Z0-9_-]{1,120}\.yaml$/u.test(requested)) {
+      throw new Error("workflowFileName must contain only safe filename characters and end in .yaml");
+    }
+    return requested;
+  }
+  return `${workflowFileStem(options.description)}-${randomUUID()}.yaml`;
 }
 
 function withTopologyWarnings(

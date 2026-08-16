@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
+
+const LegacyDatabaseSync = process.env.NODE_ENV === "production"
+  ? undefined
+  : createRequire(import.meta.url)("node:sqlite").DatabaseSync as typeof DatabaseSync;
 
 export type ReportBlockKind =
   | "heading"
@@ -167,6 +172,22 @@ export class InMemoryReportDocumentStore implements ReportDocumentStore {
     return this.#documents.delete(taskId);
   }
 
+  hydrate(documents: ReportDocument[], versions: ReportDocumentVersion[]): void {
+    this.#documents.clear();
+    this.#versions.clear();
+    for (const document of documents) {
+      this.#documents.set(document.taskId, {
+        ...structuredClone(document),
+        blocks: parseReportBlocks(document.currentMarkdown),
+      });
+    }
+    for (const version of versions) {
+      const records = this.#versions.get(version.taskId) ?? [];
+      records.push(structuredClone(version));
+      this.#versions.set(version.taskId, records);
+    }
+  }
+
   #recordVersion(document: ReportDocument): void {
     const versions = this.#versions.get(document.taskId) ?? [];
     if (!versions.some((item) => item.version === document.version)) {
@@ -182,7 +203,8 @@ export class SqliteReportDocumentStore implements ReportDocumentStore {
 
   constructor(filePath: string, database?: DatabaseSync) {
     mkdirSync(dirname(filePath), { recursive: true });
-    this.#database = database ?? new DatabaseSync(filePath);
+    if (!database && !LegacyDatabaseSync) throw new Error("SQLite storage is not available in production.");
+    this.#database = database ?? new LegacyDatabaseSync!(filePath);
     this.#ownsDatabase = !database;
     this.#database.exec("PRAGMA foreign_keys = ON");
     this.#database.exec("PRAGMA journal_mode = WAL");

@@ -1,4 +1,7 @@
-use_default_settings: true
+use_default_settings:
+  engines:
+    keep_only:
+      - bing
 
 general:
   instance_name: "Think Tank Search"
@@ -14,3 +17,8 @@ server:
   limiter: false
   public_instance: false
   image_proxy: false
+
+engines:
+  - name: bing
+    disabled: false
+    base_url: https://cn.bing.com
