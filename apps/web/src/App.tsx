@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Popover, Tooltip } from "antd";
+import { Avatar, Dropdown, Popover, Tooltip } from "antd";
 import { Sender } from "@ant-design/x";
-import { HistoryOutlined, LinkOutlined, LoginOutlined, LogoutOutlined, PlusOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
+import { DownOutlined, HistoryOutlined, LinkOutlined, LoginOutlined, LogoutOutlined, PlusOutlined, ReloadOutlined, SettingOutlined, UserOutlined } from "@ant-design/icons";
 import {
   createResearchTask,
   getResearchTask,
@@ -9,20 +9,22 @@ import {
   uploadResearchDocument,
   type ResearchTopicRecommendation,
 } from "./services/api-client";
-import { HistoryDrawer } from "./components/history-drawer/HistoryDrawer";
+import { HistoryDrawer, HistorySidebar } from "./components/history-drawer/HistoryDrawer";
 import { ResearchSourcePopover, sourceLabels, type ResearchSourceConfig } from "./components/research-source/ResearchSourcePopover";
 import { ResearchLaunch, type ResearchLaunchStage } from "./components/research-launch/ResearchLaunch";
-import { SettingsDrawer } from "./components/settings-drawer/SettingsDrawer";
+import { SystemSettingsPage } from "./components/system-settings/SystemSettingsPage";
 import { BrandLockup } from "./components/brand/BrandLockup";
 import { ReportSessionLoading } from "./components/report-session/ReportSessionLoading";
 import { preloadReportSession } from "./services/report-api";
 import { AUTH_REQUIRED_EVENT, AuthRequiredError, getAuthStatus, login, logout, type AuthStatus } from "./services/auth-client";
 import { LoginModal, type LoginValues } from "./components/auth/LoginModal";
+import { ProfilePage } from "./components/profile/ProfilePage";
 
 const ResearchWorkspace = lazy(() => import("./components/research-workspace/ResearchWorkspace").then((module) => ({ default: module.ResearchWorkspace })));
 const loadReportSessionModule = () => import("./components/report-session/ReportSession");
 const ReportSession = lazy(() => loadReportSessionModule().then((module) => ({ default: module.ReportSession })));
 const RECOMMENDATIONS_PER_BATCH = 4;
+const HISTORY_SIDEBAR_COLLAPSED_KEY = "think-tank.history-sidebar-collapsed";
 
 type SessionState =
   | { phase: "idle" }
@@ -40,6 +42,26 @@ const defaultSource: ResearchSourceConfig = {
 
 function listValues(value: string): string[] {
   return [...new Set(value.split(/[\n,]/u).map((item) => item.trim()).filter(Boolean))];
+}
+
+function useDesktopHistorySidebar(): boolean {
+  const [desktop, setDesktop] = useState(() => window.matchMedia("(min-width: 960px)").matches);
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 960px)");
+    const update = () => setDesktop(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return desktop;
+}
+
+function readHistorySidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(HISTORY_SIDEBAR_COLLAPSED_KEY) === "true";
+  } catch {
+    return false;
+  }
 }
 
 function validateUrls(urls: string[]): void {
@@ -115,7 +137,9 @@ export function App() {
   const [error, setError] = useState("");
   const [session, setSession] = useState<SessionState>({ phase: "idle" });
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historySidebarCollapsed, setHistorySidebarCollapsed] = useState(readHistorySidebarCollapsed);
+  const [settingsRoute, setSettingsRoute] = useState(() => window.location.hash === "#/settings");
+  const [profileRoute, setProfileRoute] = useState(() => window.location.hash === "#/profile");
   const [sourceOpen, setSourceOpen] = useState(false);
   const [source, setSource] = useState<ResearchSourceConfig>(defaultSource);
   const [recommendedTopics, setRecommendedTopics] = useState<ResearchTopicRecommendation[]>([]);
@@ -129,6 +153,8 @@ export function App() {
   const pendingAction = useRef<(() => void) | undefined>(undefined);
   const welcomeTitleRef = useRef<HTMLSpanElement>(null);
   const welcomeTitleAiRef = useRef<HTMLSpanElement>(null);
+  const desktopHistorySidebar = useDesktopHistorySidebar();
+  const showHistorySidebar = auth.authenticated && desktopHistorySidebar;
 
   const requireLogin = (action?: () => void) => {
     if (!auth.enabled || auth.authenticated) {
@@ -145,9 +171,10 @@ export function App() {
       setAuth(status);
       setAuthLoading(false);
       if (status.enabled && !status.authenticated) {
-        const match = window.location.hash.match(/^#\/tasks\/([^/]+)(?:\/report)?$/u);
-        if (match) {
+        const protectedRoute = window.location.hash === "#/settings" || window.location.hash.match(/^#\/tasks\/([^/]+)(?:\/report)?$/u);
+        if (protectedRoute) {
           window.history.replaceState(null, "", "/");
+          setSettingsRoute(false);
           setSession({ phase: "idle" });
           setLoginOpen(true);
         }
@@ -161,9 +188,10 @@ export function App() {
 
   useEffect(() => {
     const handleUnauthorized = () => {
-      setAuth((current) => ({ ...current, enabled: true, authenticated: false, username: undefined }));
+      setAuth((current) => ({ ...current, enabled: true, authenticated: false, username: undefined, role: undefined }));
       setHistoryOpen(false);
-      setSettingsOpen(false);
+      setSettingsRoute(false);
+      setProfileRoute(false);
       setSession({ phase: "idle" });
       window.history.replaceState(null, "", "/");
       setLoginError("登录状态已失效，请重新登录");
@@ -193,7 +221,8 @@ export function App() {
   const handleLogout = async () => {
     await logout().then(setAuth).catch(() => undefined);
     setHistoryOpen(false);
-    setSettingsOpen(false);
+    setSettingsRoute(false);
+    setProfileRoute(false);
   };
 
   const syncWelcomeTitleLine = () => {
@@ -254,6 +283,20 @@ export function App() {
 
   useEffect(() => {
     const restoreFromHash = () => {
+      if (window.location.hash === "#/settings") {
+        setSettingsRoute(true);
+        setProfileRoute(false);
+        setSession({ phase: "idle" });
+        return;
+      }
+      if (window.location.hash === "#/profile") {
+        setSettingsRoute(false);
+        setProfileRoute(true);
+        setSession({ phase: "idle" });
+        return;
+      }
+      setSettingsRoute(false);
+      setProfileRoute(false);
       const match = window.location.hash.match(/^#\/tasks\/([^/]+)(?:\/(report))?$/u);
       if (!match) {
         setSession({ phase: "idle" });
@@ -265,6 +308,58 @@ export function App() {
     window.addEventListener("hashchange", restoreFromHash);
     return () => window.removeEventListener("hashchange", restoreFromHash);
   }, []);
+
+  useEffect(() => {
+    if (authLoading || !settingsRoute) return;
+    if (!auth.authenticated) {
+      window.history.replaceState(null, "", "/");
+      setSettingsRoute(false);
+      setLoginOpen(true);
+      return;
+    }
+    if (auth.role === "member") {
+      window.history.replaceState(null, "", "/");
+      setSettingsRoute(false);
+    }
+  }, [auth.authenticated, auth.role, authLoading, settingsRoute]);
+
+  useEffect(() => {
+    if (authLoading || !profileRoute) return;
+    if (!auth.authenticated || !auth.profileAvailable) {
+      window.history.replaceState(null, "", "/");
+      setProfileRoute(false);
+      if (!auth.authenticated) setLoginOpen(true);
+    }
+  }, [auth.authenticated, auth.profileAvailable, authLoading, profileRoute]);
+
+  useEffect(() => {
+    if (desktopHistorySidebar) setHistoryOpen(false);
+  }, [desktopHistorySidebar]);
+
+  const toggleHistorySidebar = () => {
+    setHistorySidebarCollapsed((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(HISTORY_SIDEBAR_COLLAPSED_KEY, String(next));
+      } catch {
+        // The sidebar remains usable when browser storage is unavailable.
+      }
+      return next;
+    });
+  };
+
+  const openProfile = () => {
+    window.history.pushState(null, "", "#/profile");
+    setProfileRoute(true);
+  };
+
+  const handlePasswordChanged = (status: AuthStatus) => {
+    setAuth(status);
+    setProfileRoute(false);
+    setLoginError("密码已更新，请使用新密码重新登录");
+    window.history.replaceState(null, "", "/");
+    setLoginOpen(true);
+  };
 
   async function startResearch(topic: string) {
     setError("");
@@ -326,6 +421,20 @@ export function App() {
 
   if (authLoading) return <div className="auth-loading" aria-busy="true">正在检查登录状态</div>;
 
+  if (settingsRoute && auth.authenticated && auth.role !== "member") {
+    return <SystemSettingsPage onBack={() => {
+      window.history.pushState(null, "", "/");
+      setSettingsRoute(false);
+    }} />;
+  }
+
+  if (profileRoute && auth.authenticated && auth.profileAvailable) {
+    return <ProfilePage onBack={() => {
+      window.history.pushState(null, "", "/");
+      setProfileRoute(false);
+    }} onPasswordChanged={handlePasswordChanged} />;
+  }
+
   if (session.phase !== "idle") {
     const exitToHome = () => { window.history.pushState(null, "", "/"); setSession({ phase: "idle" }); };
     if (session.phase === "starting") return <ResearchLaunch onExit={exitToHome} stage={session.stage} topic={session.topic} />;
@@ -347,14 +456,28 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="app-header">
-        <BrandLockup />
+    <main className={`app-shell ${showHistorySidebar ? "has-history-sidebar" : ""} ${showHistorySidebar && historySidebarCollapsed ? "is-history-sidebar-collapsed" : ""}`}>
+      {showHistorySidebar && <HistorySidebar collapsed={historySidebarCollapsed} onOpenTask={openTask} onToggle={toggleHistorySidebar} />}
+      <header className={`app-header ${showHistorySidebar ? "is-sidebar-layout" : ""}`}>
+        {!showHistorySidebar && <BrandLockup />}
         <nav className="header-actions" aria-label="应用导航">
           {auth.authenticated ? <>
-            <button type="button" title="历史研究" onClick={() => setHistoryOpen(true)}><HistoryOutlined />历史研究</button>
-            <button type="button" title="设置" onClick={() => setSettingsOpen(true)}><SettingOutlined />设置</button>
-            <button type="button" title="退出登录" onClick={() => void handleLogout()}><LogoutOutlined />退出</button>
+            {!showHistorySidebar && <button type="button" title="历史研究" onClick={() => setHistoryOpen(true)}><HistoryOutlined />历史研究</button>}
+            {auth.role !== "member" && <button type="button" title="系统设置" onClick={() => {
+              window.history.pushState(null, "", "#/settings");
+              setSettingsRoute(true);
+            }}><SettingOutlined />系统设置</button>}
+            {auth.profileAvailable ? <Dropdown menu={{ items: [
+              { key: "profile", icon: <UserOutlined />, label: "个人中心" },
+              { type: "divider" },
+              { key: "logout", danger: true, icon: <LogoutOutlined />, label: "退出登录" },
+            ], onClick: ({ key }) => { if (key === "profile") openProfile(); else if (key === "logout") void handleLogout(); } }} trigger={["click"]}>
+              <button aria-label={`账号 ${auth.username ?? "当前账号"}`} className="account-menu" title="账号菜单" type="button">
+                <Avatar size={28}>{(auth.username ?? "U").slice(0, 1).toUpperCase()}</Avatar>
+                <span>{auth.username}</span>
+                <DownOutlined />
+              </button>
+            </Dropdown> : <button type="button" title="退出登录" onClick={() => void handleLogout()}><LogoutOutlined />退出</button>}
           </> : <button type="button" title="登录" onClick={() => requireLogin()}><LoginOutlined />登录</button>}
         </nav>
       </header>
@@ -456,8 +579,7 @@ export function App() {
           </section>
         )}
       </section>
-      <HistoryDrawer onClose={() => setHistoryOpen(false)} onOpenTask={openTask} open={historyOpen} />
-      <SettingsDrawer onClose={() => setSettingsOpen(false)} open={settingsOpen} />
+      {!showHistorySidebar && <HistoryDrawer onClose={() => setHistoryOpen(false)} onOpenTask={openTask} open={historyOpen} />}
       <LoginModal error={loginError} loading={loginLoading} onCancel={() => {
         if (loginLoading) return;
         pendingAction.current = undefined;

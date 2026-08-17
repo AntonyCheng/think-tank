@@ -10,6 +10,7 @@ import pytest
 
 from app.main import ResearchEvent, ResearchRequest, ResearchResponse
 from app.research_executor import (
+    DynamicExecutionCapacity,
     ProcessResearchExecutor,
     ResearchExecutionError,
     _resolve_managed_environment,
@@ -136,6 +137,63 @@ async def unexpected_engine_probe(
     publish,
 ) -> ResearchResponse:
     raise AssertionError("invalid profile reached the research engine")
+
+
+def test_execution_capacity_expands_without_waiting_for_running_work() -> None:
+    capacity = DynamicExecutionCapacity(1)
+
+    async def execute() -> None:
+        first = await capacity.acquire()
+        queued: list[tuple[int, int]] = []
+        second_task = asyncio.create_task(
+            capacity.acquire(
+                lambda snapshot, position: _record_capacity_queue(
+                    queued,
+                    snapshot.concurrency,
+                    position,
+                )
+            )
+        )
+        while not queued:
+            await asyncio.sleep(0)
+        snapshot = await capacity.snapshot()
+        assert snapshot.concurrency == 1
+        assert snapshot.active == 1
+        assert snapshot.queued == 1
+        expanded = await capacity.set_concurrency(2)
+        second = await asyncio.wait_for(second_task, timeout=1)
+        assert queued == [(1, 1)]
+        assert expanded.concurrency == 2
+        assert second.waited_ms >= 0
+        assert second.snapshot.active == 2
+        await capacity.release()
+        await capacity.release()
+        assert first.queued is False
+
+    asyncio.run(execute())
+
+
+def test_execution_capacity_shrinks_without_interrupting_running_work() -> None:
+    capacity = DynamicExecutionCapacity(2)
+
+    async def execute() -> None:
+        await capacity.acquire()
+        await capacity.acquire()
+        await capacity.set_concurrency(1)
+        third_task = asyncio.create_task(capacity.acquire())
+        await asyncio.sleep(0)
+        assert not third_task.done()
+        assert (await capacity.snapshot()).active == 2
+        await capacity.release()
+        await asyncio.sleep(0)
+        assert not third_task.done()
+        await capacity.release()
+        third = await asyncio.wait_for(third_task, timeout=1)
+        assert third.snapshot.concurrency == 1
+        assert third.snapshot.active == 1
+        await capacity.release()
+
+    asyncio.run(execute())
 
 
 def test_managed_environment_activates_profile_retrievers_in_order() -> None:
@@ -345,7 +403,10 @@ def test_overlapping_research_runs_have_isolated_configuration(
         "apiKeyMatchesRequest": True,
     }
     assert reports[0]["pid"] != reports[1]["pid"]
-    assert published == [["probe.ready"], ["probe.ready"]]
+    assert published == [
+        ["research.execution.started", "probe.ready"],
+        ["research.execution.started", "probe.ready"],
+    ]
     assert {
         name: os.environ.get(name)
         for name in parent_environment
@@ -548,6 +609,14 @@ async def _record_event(
     event: ResearchEvent,
 ) -> None:
     events.append(event.type)
+
+
+async def _record_capacity_queue(
+    queues: list[tuple[int, int]],
+    concurrency: int,
+    position: int,
+) -> None:
+    queues.append((concurrency, position))
 
 
 def _process_exists(pid: int) -> bool:

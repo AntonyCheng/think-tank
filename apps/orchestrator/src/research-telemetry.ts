@@ -127,7 +127,7 @@ export class ResearchTelemetryTracker {
       aoStepId: identity.aoStepId,
       researchRunId: identity.researchRunId,
       mode: identity.mode,
-      state: "running",
+      state: stateForRawEvent(event),
       phase,
       startedAt: identity.startedAt,
       updatedAt: event.timestamp,
@@ -142,7 +142,11 @@ export class ResearchTelemetryTracker {
     };
     this.#runs.set(identity.researchRunId, progress);
 
-    const fingerprint = JSON.stringify({ phase, deep });
+    const fingerprint = JSON.stringify({
+      state: progress.state,
+      phase,
+      deep,
+    });
     const duplicate = this.#fingerprints.get(identity.researchRunId) ===
       fingerprint;
     this.#fingerprints.set(identity.researchRunId, fingerprint);
@@ -272,6 +276,7 @@ export class ResearchTelemetryTracker {
     };
     this.#runs.set(identity.researchRunId, progress);
     this.#fingerprints.set(identity.researchRunId, failure.state);
+    const errorMessage = sanitizeFailureMessage(failure.error);
     return {
       publicEvent: structuredClone(progress),
       diagnosticRecord: {
@@ -284,6 +289,7 @@ export class ResearchTelemetryTracker {
           errorName: failure.error instanceof Error
             ? failure.error.name
             : "Error",
+          ...(errorMessage ? { errorMessage } : {}),
         },
         truncated: true,
       },
@@ -318,6 +324,17 @@ export class ResearchTelemetryTracker {
       },
     };
   }
+}
+
+function sanitizeFailureMessage(error: unknown): string | undefined {
+  const value = error instanceof Error ? error.message : String(error ?? "");
+  const sanitized = value
+    .replace(/\b(api[_-]?key|authorization|token)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/giu, "$1: [redacted]")
+    .replace(/\bsk-[a-z0-9_-]+/giu, "[redacted]")
+    .replace(/<runtime_context>[\s\S]*?<\/runtime_context>/giu, "")
+    .replace(/<expert_system_prompt>[\s\S]*?<\/expert_system_prompt>/giu, "")
+    .trim();
+  return sanitized ? sanitized.slice(0, 600) : undefined;
 }
 
 function phaseForRawEvent(event: RawResearchEvent): ResearchPhase {
@@ -386,6 +403,14 @@ function phaseForRawEvent(event: RawResearchEvent): ResearchPhase {
     return "finalizing";
   }
   return "preparing";
+}
+
+function stateForRawEvent(
+  event: RawResearchEvent,
+): ResearchRunProgress["state"] {
+  return semanticResearchStage(event) === "research.execution.queued"
+    ? "queued"
+    : "running";
 }
 
 function elapsedMilliseconds(startedAt: string, updatedAt: string): number {

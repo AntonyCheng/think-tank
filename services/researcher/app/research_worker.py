@@ -43,15 +43,17 @@ from .source_access import (
     default_source_materializer,
 )
 from .synthesis_compression import (
-    DEFAULT_ROUTE_THRESHOLD,
     CompressionStats,
     SynthesisCompressor,
-    dedupe_sources,
-    estimate_original_characters,
+    estimate_report_characters,
     resolve_extraction_llm,
+    resolve_synthesis_context_budget,
 )
 from .document_extractors import PrivateDocumentEvidence, extract_document
 from .document_store import DocumentStore, DocumentStoreError
+
+
+_SEARCH_QUERY_MAX_CHARS = 320
 
 
 class LogCollector:
@@ -143,17 +145,17 @@ async def run_research(
         request.upstream_evidence,
     )
     runtime_context = _render_runtime_context(request.runtime_context)
-    query = (
-        f"{runtime_context}\n\n"
-        "Follow the expert identity and constraints below while completing the task.\n\n"
-        f"<expert_system_prompt>\n{request.system_prompt}\n</expert_system_prompt>\n\n"
-        f"<task>\n{request.task}\n</task>\n\n"
-        f"{render_citation_contract(report_policy)}"
-    )
+    # GPT Researcher uses ``query`` as the fallback Web search term when its
+    # sub-query planner cannot produce usable output. Keep it topical and
+    # bounded; prompts, runtime metadata, and citation rules must never reach
+    # a public search engine as part of that fallback.
+    query = _build_search_query(request.task)
     role = (
         f"{runtime_context}\n\n"
         "Preserve and follow the complete expert identity below.\n\n"
-        f"{request.system_prompt}"
+        f"<expert_system_prompt>\n{request.system_prompt}\n</expert_system_prompt>\n\n"
+        f"<research_task>\n{request.task}\n</research_task>\n\n"
+        f"{render_citation_contract(report_policy)}"
     )
 
     # This function only runs inside a dedicated spawned worker. GPTR and some
@@ -413,25 +415,35 @@ async def run_research(
             upstream_bundles = request.upstream_evidence or []
             compression_stats = None
             if upstream_bundles:
-                original_characters = estimate_original_characters(
+                report_characters = estimate_report_characters(
                     upstream_bundles
                 )
-                upstream_bundles, deduped_characters, duplicate_count = (
-                    dedupe_sources(upstream_bundles)
-                )
                 extraction_llm = resolve_extraction_llm(request)
-                if (
-                    deduped_characters > DEFAULT_ROUTE_THRESHOLD
-                    and extraction_llm is not None
-                ):
+                context_budget = resolve_synthesis_context_budget()
+                if report_characters > context_budget:
+                    if extraction_llm is None:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "The upstream expert reports exceed the synthesis "
+                                "context budget, but no OpenAI-compatible model is "
+                                "available to prepare temporary report briefs."
+                            ),
+                        )
                     base_url, api_key, model = extraction_llm
                     compressor = SynthesisCompressor(
-                        base_url, api_key, model
+                        base_url,
+                        api_key,
+                        model,
+                        fallback_base_url=request.fallback_base_url,
+                        fallback_api_key=request.fallback_api_key,
+                        fallback_model=request.fallback_fast_llm,
+                        route_threshold=context_budget,
                     )
                     started = time.monotonic()
                     upstream_bundles, compression_stats = (
-                        await compressor.compress(
-                            upstream_bundles, deduped_characters
+                        await compressor.compress_reports(
+                            upstream_bundles, report_characters
                         )
                     )
                     compression_stats.duration_ms = int(
@@ -439,22 +451,18 @@ async def run_research(
                     )
                 else:
                     compression_stats = CompressionStats(
-                        original_characters=original_characters,
-                        deduped_characters=deduped_characters,
-                        final_characters=deduped_characters,
+                        original_characters=report_characters,
+                        final_characters=report_characters,
+                        original_report_characters=report_characters,
+                        final_report_characters=report_characters,
                         source_count=sum(
                             len(b.get("sources") or [])
                             for b in upstream_bundles
                             if isinstance(b.get("sources"), list)
                         ),
-                        duplicate_count=duplicate_count,
                         passthrough=True,
                     )
                 if compression_stats is not None:
-                    compression_stats.original_characters = (
-                        original_characters
-                    )
-                    compression_stats.duplicate_count = duplicate_count
                     await collector.record(
                         "synthesis.compression",
                         compression_stats.event_data(),
@@ -850,3 +858,11 @@ def _render_runtime_context(context: TaskTemporalContext | None) -> str:
             "</runtime_context>",
         ]
     )
+
+
+def _build_search_query(task: str) -> str:
+    """Return a compact search seed suitable for public search URLs."""
+    normalized = " ".join(task.split())
+    if len(normalized) <= _SEARCH_QUERY_MAX_CHARS:
+        return normalized
+    return normalized[:_SEARCH_QUERY_MAX_CHARS].rstrip()

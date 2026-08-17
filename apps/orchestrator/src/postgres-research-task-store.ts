@@ -32,7 +32,7 @@ export class PostgresResearchTaskStore implements ResearchTaskStore {
   async initialize(): Promise<void> {
     const database = this.#writes.connection;
     const [taskRows, eventRows, diagnostics, checkpoints, bundles] = await Promise.all([
-      database.query<TaskRow>("SELECT id, snapshot_json FROM research_tasks"),
+      database.query<TaskRow>("SELECT id, owner_user_id, snapshot_json FROM research_tasks"),
       database.query<EventRow>("SELECT task_id, event_id, timestamp, type, data_json FROM research_task_events ORDER BY task_id, event_id"),
       database.query<DiagnosticRow>("SELECT task_id, diagnostic_id, timestamp, ao_step_id, research_run_id, raw_type, raw_stage, data_json, truncated FROM research_task_diagnostics ORDER BY task_id, diagnostic_id"),
       database.query<CheckpointRow>("SELECT checkpoint_json FROM research_task_checkpoints ORDER BY task_id, created_at, sequence"),
@@ -51,7 +51,13 @@ export class PostgresResearchTaskStore implements ResearchTaskStore {
       bundlesByTask.set(row.task_id, records);
     }
     this.#memory.hydrate({
-      tasks: taskRows.map((row) => ({ snapshot: row.snapshot_json, events: eventsByTask.get(row.id) ?? [] })),
+      tasks: taskRows.map((row) => ({
+        snapshot: {
+          ...row.snapshot_json,
+          ...(row.owner_user_id ? { ownerUserId: row.owner_user_id } : {}),
+        },
+        events: eventsByTask.get(row.id) ?? [],
+      })),
       diagnostics: diagnostics.map((row) => ({
         id: Number(row.diagnostic_id), taskId: row.task_id, timestamp: row.timestamp,
         aoStepId: row.ao_step_id, researchRunId: row.research_run_id,
@@ -157,9 +163,9 @@ export class PostgresResearchTaskStore implements ResearchTaskStore {
   async #upsertTask(snapshot: ResearchTaskSnapshot): Promise<void> {
     const { evidenceBundles: _evidenceBundles, ...persisted } = snapshot;
     await this.#writes.connection.query(`
-      INSERT INTO research_tasks(id,status,created_at,updated_at,snapshot_json) VALUES($1,$2,$3,$4,$5::jsonb)
-      ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status, updated_at=EXCLUDED.updated_at, snapshot_json=EXCLUDED.snapshot_json
-    `, [snapshot.id, snapshot.status, snapshot.createdAt, snapshot.updatedAt, postgresJson(persisted)]);
+      INSERT INTO research_tasks(id,owner_user_id,status,created_at,updated_at,snapshot_json) VALUES($1,$2,$3,$4,$5,$6::jsonb)
+      ON CONFLICT(id) DO UPDATE SET owner_user_id=EXCLUDED.owner_user_id, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at, snapshot_json=EXCLUDED.snapshot_json
+    `, [snapshot.id, snapshot.ownerUserId ?? null, snapshot.status, snapshot.createdAt, snapshot.updatedAt, postgresJson(persisted)]);
   }
 
   async #insertEvent(event: ResearchTaskTransition["event"]): Promise<void> {
@@ -176,7 +182,7 @@ export class PostgresResearchTaskStore implements ResearchTaskStore {
   }
 }
 
-interface TaskRow { id: string; snapshot_json: ResearchTaskSnapshot; }
+interface TaskRow { id: string; owner_user_id: string | null; snapshot_json: ResearchTaskSnapshot; }
 interface EventRow { task_id: string; event_id: number; timestamp: string; type: ResearchTaskTransition["event"]["type"]; data_json: Record<string, unknown>; }
 interface DiagnosticRow { task_id: string; diagnostic_id: number; timestamp: string; ao_step_id: string; research_run_id: string; raw_type: string; raw_stage: string; data_json: Record<string, unknown>; truncated: boolean; }
 interface CheckpointRow { checkpoint_json: WorkflowCheckpoint; }

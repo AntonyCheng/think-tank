@@ -11,7 +11,7 @@ import {
 } from "../src/research-profile.js";
 import type { EvidenceBundle } from "../src/evidence-bundle.js";
 import { InMemoryResearchTaskStore } from "../src/research-task-store.js";
-import type { WorkflowCheckpoint } from "../src/workflow-checkpoint.js";
+import type { WorkflowCheckpoint, WorkflowRunRequest } from "../src/workflow-checkpoint.js";
 import type {
   ResearchActivity,
   ResearchRunProgress,
@@ -967,6 +967,95 @@ test("records the previous report before a normal rerun", async () => {
     output: "# prior report",
   }]);
   assert.equal(manager.get(snapshot.id)?.output, "# rerun report");
+});
+
+test("continues from a failed expert while retaining completed expert results", async () => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot = checkpointTaskSnapshot("checkpoint-continue", "failed");
+  snapshot.workflowPlan = {
+    schemaVersion: 1,
+    workflowName: "test",
+    steps: [
+      {
+        id: "industry",
+        name: "Industry research expert",
+        role: "research/analyst",
+        task: "Research industry.",
+        type: "expert",
+        dependsOn: [],
+        terminal: false,
+      },
+      {
+        id: "finance",
+        name: "Finance research expert",
+        role: "research/analyst",
+        task: "Research finance.",
+        type: "expert",
+        dependsOn: [],
+        terminal: false,
+      },
+      {
+        id: "final",
+        name: "Synthesis expert",
+        role: "research/writer",
+        task: "Synthesize reports.",
+        type: "expert",
+        dependsOn: ["industry", "finance"],
+        terminal: true,
+      },
+    ],
+  };
+  store.create(snapshot, { type: "task.failed", data: {} });
+  store.record(snapshot.id, {}, {
+    type: "step.completed",
+    data: { stepId: "finance", status: "failed" },
+  });
+  const checkpoint = workflowCheckpoint(snapshot.id, {
+    completedSteps: [
+      {
+        id: "industry",
+        role: "research/analyst",
+        status: "completed",
+        output: "industry result",
+        output_var: "industry",
+        duration: 1,
+        tokens: { input: 0, output: 0 },
+      },
+      {
+        id: "final",
+        role: "research/writer",
+        status: "skipped",
+        duration: 0,
+        tokens: { input: 0, output: 0 },
+      },
+    ],
+    outputVariables: { industry: "industry result" },
+    evidenceBundles: [evidenceBundle],
+  });
+  store.saveCheckpoint(checkpoint);
+  let execution: WorkflowRunRequest | undefined;
+  const manager = new ResearchTaskManager(
+    async (_topic, _onEvent, controls) => {
+      execution = controls.execution;
+      return completedResult("# continued report");
+    },
+    store,
+  );
+
+  assert.deepEqual(manager.get(snapshot.id)?.continuation, {
+    failedStepId: "finance",
+    failedStepName: "Finance research expert",
+    completedExpertCount: 1,
+    evidenceBundleCount: 1,
+  });
+  assert.equal(manager.continue(snapshot.id), true);
+  await waitFor(() => manager.get(snapshot.id)?.status === "completed");
+  assert.equal(execution?.fromStep, "finance");
+  assert.deepEqual(
+    execution?.checkpoint.completedSteps.map((step) => step.id),
+    ["industry", "final"],
+  );
+  assert.equal(manager.get(snapshot.id)?.continuation, undefined);
 });
 
 test("delivers a report with normal citation warnings", async () => {

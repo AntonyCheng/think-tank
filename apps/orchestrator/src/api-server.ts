@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { createServer, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
+import express from "express";
+import rateLimit from "express-rate-limit";
+import helmet from "helmet";
 import { parseWorkflow } from "agency-orchestrator";
 
 import {
@@ -51,6 +54,7 @@ import {
   isServiceTaskApiRequest,
   type ApiAuthConfig,
 } from "./auth.js";
+import { DatabaseIdentityService, type AuthenticatedPrincipal, type IdentityService } from "./identity.js";
 import { TaskDocumentStore } from "./document-store.js";
 import {
   generateResearchTopicRecommendations,
@@ -69,6 +73,10 @@ import {
   ReportEditorService,
   UnavailableReportEditorModel,
 } from "./report-editor.js";
+import {
+  updateResearcherExecutionCapacity,
+  type ResearcherExecutionCapacityUpdater,
+} from "./researcher-control.js";
 import { PostgresReportEditorStore } from "./postgres-report-editor-store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -109,6 +117,9 @@ export function createApiServer(
     preflightRuntimeSettings(candidate, fetch, scope),
   topicRecommendationProvider?: ResearchTopicRecommendationProvider,
   authConfig: ApiAuthConfig = authConfigFromEnv(),
+  identity?: IdentityService,
+  updateExecutionCapacity: ResearcherExecutionCapacityUpdater =
+    updateResearcherExecutionCapacity,
 ) {
   const documents = new TaskDocumentStore();
   const topicRecommendations = topicRecommendationProvider ??
@@ -146,7 +157,7 @@ export function createApiServer(
       },
     });
   const auth = createAuthService(authConfig);
-  return createServer(async (request, response) => {
+  const legacyHandler = async (request: IncomingMessage, response: ServerResponse) => {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
       const segments = url.pathname.split("/").filter(Boolean);
@@ -168,35 +179,55 @@ export function createApiServer(
       }
 
       if (request.method === "GET" && url.pathname === "/api/auth/status") {
+        const principal = identity
+          ? await identity.principalFor(request)
+          : auth.isBrowserAuthenticated(request) && auth.username
+            ? { id: `legacy:${auth.username}`, username: auth.username, role: "admin" as const }
+            : undefined;
         return sendJson(response, 200, {
-          enabled: auth.enabled,
-          authenticated: auth.isBrowserAuthenticated(request),
-          ...(auth.isBrowserAuthenticated(request) && auth.username ? { username: auth.username } : {}),
+          enabled: identity ? true : auth.enabled,
+          authenticated: Boolean(principal) || (!identity && !auth.enabled),
+          ...(identity ? { profileAvailable: true } : {}),
+          ...(principal ? { username: principal.username, role: principal.role } : {}),
         });
       }
 
       if (request.method === "POST" && url.pathname === "/api/auth/login") {
-        if (!auth.enabled) return sendJson(response, 200, { enabled: false, authenticated: true });
         const body = await readJsonBody(request);
         const username = typeof body.username === "string" ? body.username.trim() : "";
         const password = typeof body.password === "string" ? body.password : "";
-        const token = auth.authenticate(username, password);
-        if (!token) return sendJson(response, 401, { error: "账号或密码错误" });
+        if (!identity && !auth.enabled) return sendJson(response, 200, { enabled: false, authenticated: true });
+        const login = identity
+          ? await identity.authenticate(username, password)
+          : (() => {
+              const token = auth.authenticate(username, password);
+              return token && auth.username
+                ? { token, principal: { id: `legacy:${auth.username}`, username: auth.username, role: "admin" as const } }
+                : undefined;
+            })();
+        if (!login) return sendJson(response, 401, { error: "账号或密码错误" });
         response.writeHead(200, {
           "Content-Type": "application/json; charset=utf-8",
-          "Set-Cookie": auth.cookie(token),
+          "Set-Cookie": identity ? identity.cookie(login.token) : auth.cookie(login.token),
         });
-        response.end(JSON.stringify({ enabled: true, authenticated: true, username }));
+        response.end(JSON.stringify({
+          enabled: true,
+          authenticated: true,
+          ...(identity ? { profileAvailable: true } : {}),
+          username: login.principal.username,
+          role: login.principal.role,
+        }));
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/auth/logout") {
-        auth.clear(request);
+        if (identity) await identity.logout(request);
+        else auth.clear(request);
         response.writeHead(200, {
           "Content-Type": "application/json; charset=utf-8",
-          "Set-Cookie": auth.expiredCookie(),
+          "Set-Cookie": identity ? identity.expiredCookie() : auth.expiredCookie(),
         });
-        response.end(JSON.stringify({ enabled: auth.enabled, authenticated: !auth.enabled }));
+        response.end(JSON.stringify({ enabled: identity ? true : auth.enabled, authenticated: !identity && !auth.enabled }));
         return;
       }
 
@@ -204,8 +235,43 @@ export function createApiServer(
       const isPublicApi = request.method === "GET" && url.pathname === "/api/recommendations/research-topics";
       const serviceAuthorized = isServiceTaskApiRequest(request.method, url.pathname) &&
         auth.isServiceAuthenticated(request);
-      if (!isStaticAsset && !isPublicApi && !serviceAuthorized && !auth.isBrowserAuthenticated(request)) {
+      const principal: AuthenticatedPrincipal | undefined = !isStaticAsset && !isPublicApi && !serviceAuthorized
+        ? identity
+          ? await identity.principalFor(request)
+          : auth.isBrowserAuthenticated(request) && auth.username
+            ? { id: `legacy:${auth.username}`, username: auth.username, role: "admin" }
+            : undefined
+        : undefined;
+      if (!isStaticAsset && !isPublicApi && !serviceAuthorized && !principal && (identity || auth.enabled)) {
         return sendJson(response, 401, { error: "请先登录" });
+      }
+
+      if (identity && request.method === "GET" && url.pathname === "/api/auth/me") {
+        const user = principal ? await identity.getUser(principal.id) : undefined;
+        return user
+          ? sendJson(response, 200, { user })
+          : sendJson(response, 401, { error: "登录状态已失效，请重新登录" });
+      }
+
+      if (identity && request.method === "POST" && url.pathname === "/api/auth/password") {
+        const body = await readJsonBody(request);
+        const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : undefined;
+        const nextPassword = typeof body.nextPassword === "string" ? body.nextPassword : undefined;
+        if (!currentPassword || !nextPassword) {
+          return sendJson(response, 422, { error: "当前密码和新密码不能为空" });
+        }
+        try {
+          const changed = principal && await identity.changePassword(principal.id, currentPassword, nextPassword);
+          if (!changed) return sendJson(response, 401, { error: "当前密码不正确" });
+          response.writeHead(200, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Set-Cookie": identity.expiredCookie(),
+          });
+          response.end(JSON.stringify({ enabled: true, authenticated: false }));
+          return;
+        } catch (error) {
+          return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+        }
       }
 
       if (isStaticAsset) {
@@ -219,6 +285,72 @@ export function createApiServer(
           });
           response.end(asset.content);
           return;
+        }
+      }
+
+      const isSettingsRequest = Boolean(settings) && [
+        "/api/settings",
+        "/api/settings/preflight",
+      ].includes(url.pathname);
+      if (identity && isSettingsRequest && principal?.role !== "admin") {
+        return sendJson(response, 403, { error: "只有管理员可以管理运行设置" });
+      }
+
+      if (identity && segments[0] === "api" && segments[1] === "admin") {
+        if (principal?.role !== "admin") {
+          return sendJson(response, 403, { error: "只有管理员可以管理用户" });
+        }
+        if (request.method === "GET" && segments[2] === "users" && segments.length === 3) {
+          return sendJson(response, 200, { users: await identity.listUsers() });
+        }
+        if (request.method === "POST" && segments[2] === "users" && segments.length === 3) {
+          const body = await readJsonBody(request);
+          try {
+            const role = body.role === "admin" ? "admin" : body.role === "member" || body.role === undefined ? "member" : undefined;
+            if (!role || typeof body.username !== "string" || typeof body.password !== "string") {
+              return sendJson(response, 422, { error: "username、password 和 role 参数无效" });
+            }
+            return sendJson(response, 201, { user: await identity.createUser({ username: body.username, password: body.password, role }) });
+          } catch (error) {
+            return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+        if (request.method === "DELETE" && segments[2] === "users" && segments[3] && segments.length === 4) {
+          if (segments[3] === principal.id) return sendJson(response, 409, { error: "不能删除当前登录管理员" });
+          try {
+            const deleted = await identity.deleteUser(segments[3]);
+            return deleted
+              ? sendJson(response, 204, {})
+              : sendJson(response, 404, { error: "用户不存在" });
+          } catch (error) {
+            return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+        if (request.method === "PATCH" && segments[2] === "users" && segments[3] && segments.length === 4) {
+          if (segments[3] === principal.id) return sendJson(response, 409, { error: "不能通过此接口修改当前登录管理员" });
+          const body = await readJsonBody(request);
+          try {
+            const role = body.role === undefined ? undefined : body.role === "admin" || body.role === "member" ? body.role : undefined;
+            const active = body.active === undefined ? undefined : typeof body.active === "boolean" ? body.active : undefined;
+            const password = body.password === undefined ? undefined : typeof body.password === "string" ? body.password : undefined;
+            if ((body.role !== undefined && !role) || (body.active !== undefined && active === undefined) || (body.password !== undefined && password === undefined)) {
+              return sendJson(response, 422, { error: "用户更新参数无效" });
+            }
+            const user = await identity.updateUser(segments[3], { role, active, password });
+            return user ? sendJson(response, 200, { user }) : sendJson(response, 404, { error: "用户不存在" });
+          } catch (error) {
+            return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+      }
+
+      const requestedTaskId = segments[0] === "api" && segments[1] === "tasks" && segments[2]
+        ? segments[2]
+        : undefined;
+      if (identity && requestedTaskId && !serviceAuthorized) {
+        const task = manager.get(requestedTaskId);
+        if (!task || task.ownerUserId !== principal?.id) {
+          return sendJson(response, 404, { error: "task not found" });
         }
       }
 
@@ -269,6 +401,7 @@ export function createApiServer(
             body,
             {
               apiKey: optionalApiKey(body.apiKey),
+              fallbackApiKey: optionalApiKey(body.fallbackApiKey),
               embeddingApiKey: optionalApiKey(body.embeddingApiKey),
               retrieverApiKeys: optionalRetrieverApiKeys(body.retrieverApiKeys, catalog),
             },
@@ -299,7 +432,9 @@ export function createApiServer(
           capabilityProvider,
         );
         try {
+          const scope = parsePreflightScope(body.scope);
           const apiKey = optionalApiKey(body.apiKey);
+          const fallbackApiKey = optionalApiKey(body.fallbackApiKey);
           const embeddingApiKey = optionalApiKey(body.embeddingApiKey);
           const retrieverApiKeys = optionalRetrieverApiKeys(
             body.retrieverApiKeys,
@@ -307,14 +442,14 @@ export function createApiServer(
           );
           const candidate = settings.preview(
             body,
-            { apiKey, embeddingApiKey, retrieverApiKeys },
+            { apiKey, fallbackApiKey, embeddingApiKey, retrieverApiKeys },
             {
               retrievers: catalog.retrievers.map((item) => item.id),
               maxRetrievers: catalog.maxRetrievers,
             },
           );
-          const checks = await settingsPreflight(candidate);
-          logSettingsPreflight("all", checks);
+          const checks = await settingsPreflight(candidate, scope);
+          logSettingsPreflight(scope, checks);
           const failedChecks = checks.filter((check) => check.status === "failed");
           if (failedChecks.length) {
             return sendJson(response, 422, {
@@ -322,8 +457,23 @@ export function createApiServer(
               checks,
             });
           }
+          if (scope === "scheduling") {
+            try {
+              await updateExecutionCapacity(
+                researcherServiceUrl(),
+                candidate.concurrency,
+              );
+            } catch (error) {
+              return sendJson(response, 503, {
+                error: error instanceof Error
+                  ? error.message
+                  : "研究执行服务暂不可用，设置未保存。",
+              });
+            }
+          }
           const environmentValues = {
             ...(apiKey ? { OPENAI_API_KEY: apiKey } : {}),
+            ...(fallbackApiKey ? { FALLBACK_OPENAI_API_KEY: fallbackApiKey } : {}),
             ...(embeddingApiKey
               ? { GPTR_EMBEDDING_API_KEY: embeddingApiKey }
               : {}),
@@ -335,6 +485,7 @@ export function createApiServer(
             await replaceEnvironmentValues(environmentFilePath, environmentValues);
           }
           if (apiKey) settings.setApiKey(apiKey);
+          if (fallbackApiKey) settings.setFallbackApiKey(fallbackApiKey);
           if (embeddingApiKey) {
             settings.setEmbeddingApiKey(embeddingApiKey);
           }
@@ -366,6 +517,20 @@ export function createApiServer(
           });
         }
         const runtimeSettings = settings?.getRuntimeSettings();
+        if (settings && runtimeSettings) {
+          try {
+            await updateExecutionCapacity(
+              researcherServiceUrl(),
+              runtimeSettings.concurrency,
+            );
+          } catch (error) {
+            return sendJson(response, 503, {
+              error: error instanceof Error
+                ? error.message
+                : "研究执行服务暂不可用，无法确认并发设置。",
+            });
+          }
+        }
         const catalog = settings
           ? await loadRetrieverCatalog(
               settings,
@@ -398,6 +563,7 @@ export function createApiServer(
           }
           const submitted = manager.submit(topic, {
               ...(typeof body.taskId === "string" ? { taskId: body.taskId } : {}),
+              ...(identity ? { ownerUserId: principal?.id ?? identity.serviceOwnerId } : {}),
               researchProfile,
               researchCapabilities: environment.capabilities,
             });
@@ -441,6 +607,7 @@ export function createApiServer(
           ...(url.searchParams.get("q")
             ? { query: url.searchParams.get("q")! }
             : {}),
+          ...(identity && principal ? { ownerUserId: principal.id } : {}),
           filter: filter as import("./research-tasks.js").ResearchHistoryFilter,
         }));
       }
@@ -1110,6 +1277,7 @@ export function createApiServer(
             : undefined;
           const retry = manager.submit(task.topic, {
             taskId: retryTaskId,
+            ...(task.ownerUserId === undefined ? {} : { ownerUserId: task.ownerUserId }),
             ...(researchProfile === undefined ? {} : { researchProfile }),
             ...(task.researchCapabilities === undefined
               ? {}
@@ -1143,6 +1311,30 @@ export function createApiServer(
         if (!manager.resume(task.id)) {
           return sendJson(response, 409, {
             error: "task is not recoverable",
+          });
+        }
+        return sendJson(response, 202, manager.get(task.id));
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" &&
+        segments[1] === "tasks" &&
+        segments[2] &&
+        segments[3] === "continue" && segments.length === 4
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        try {
+          assertCurrentCheckpointCompatibility(manager, task.id, settings);
+        } catch (error) {
+          return sendJson(response, 422, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        if (!manager.continue(task.id)) {
+          return sendJson(response, 409, {
+            error: "task does not contain a continuable failed expert step",
           });
         }
         return sendJson(response, 202, manager.get(task.id));
@@ -1263,6 +1455,20 @@ export function createApiServer(
             serviceAuthorized ? serviceTaskStatus(task) : enrichLegacyWorkflowPlan(task),
           );
         }
+        if (segments.length === 5 && segments[3] === "experts" && segments[4]) {
+          const bundle = manager.evidenceBundles(taskId)
+            .filter((candidate) => candidate.aoStepId === segments[4])
+            .at(-1);
+          if (!bundle) return sendJson(response, 404, { error: "expert research result not found" });
+          return sendJson(response, 200, {
+            aoStepId: bundle.aoStepId,
+            completedAt: bundle.completedAt,
+            report: bundle.report,
+            sources: bundle.sources.flatMap((source) => source.visibility === "public"
+              ? [{ title: source.title, visibility: source.visibility, url: source.url }]
+              : []),
+          });
+        }
         if (segments.length === 4 && segments[3] === "events") {
           return streamEvents(
             response,
@@ -1275,7 +1481,9 @@ export function createApiServer(
         if (segments.length === 4 && segments[3] === "diagnostics") {
           return sendJson(response, 200, {
             diagnostics: manager.diagnostics(taskId).flatMap((diagnostic) => {
-              const message = diagnosticMessage(diagnostic.data.message);
+              const message = diagnosticMessage(
+                diagnostic.data.message ?? diagnostic.data.errorMessage,
+              );
               return message ? [{
                 id: diagnostic.id,
                 timestamp: diagnostic.timestamp,
@@ -1319,7 +1527,30 @@ export function createApiServer(
       const message = error instanceof Error ? error.message : String(error);
       return sendJson(response, 400, { error: message });
     }
+  };
+
+  const app = express();
+  app.disable("x-powered-by");
+  app.use(helmet({
+    // The existing web bundle has no CSP contract yet. Keep its behavior intact
+    // while still enabling Helmet's transport and browser hardening headers.
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  }));
+  app.use("/api/auth/login", rateLimit({
+    windowMs: 15 * 60 * 1_000,
+    limit: 10,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }));
+  app.use(legacyHandler);
+  app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+    if (response.headersSent) return;
+    sendJson(response, 500, {
+      error: error instanceof Error ? error.message : "服务器内部错误",
+    });
   });
+  return createServer(app);
 }
 
 function preflightFailureMessage(checks: readonly SettingsPreflightCheck[]): string {
@@ -1349,7 +1580,9 @@ function parsePreflightScope(value: unknown): SettingsPreflightScope {
     value === "all" ||
     value === "models" ||
     value === "embedding" ||
-    value === "retrievers"
+    value === "retrievers" ||
+    value === "scheduling" ||
+    value === "fallbackModels"
   ) return value ?? "all";
   throw new Error("检测范围无效。");
 }
@@ -1762,12 +1995,18 @@ function streamEvents(
     response.write(`id: ${event.id}\n`);
     response.write(`event: ${event.type}\n`);
     response.write(`data: ${JSON.stringify(event)}\n\n`);
+    const currentStatus = manager.get(taskId)?.status;
+    const currentTaskIsTerminal = currentStatus === "completed" ||
+      currentStatus === "completed_with_warnings" ||
+      currentStatus === "failed" ||
+      currentStatus === "canceled";
     if (
       event.type === "task.completed" ||
       event.type === "task.completed_with_warnings" ||
       event.type === "task.failed" ||
       event.type === "task.canceled"
     ) {
+      if (!currentTaskIsTerminal) return;
       terminal = true;
       queueMicrotask(() => {
         close();
@@ -1904,6 +2143,8 @@ async function startApi(): Promise<void> {
   }
   const database = new PostgresDatabase(process.env.DATABASE_URL ?? "");
   await database.migrate();
+  const identity = new DatabaseIdentityService(database, authConfigFromEnv());
+  await identity.initialize();
   const settingsPersistence = new PostgresRuntimeSettingsPersistence(
     database,
     process.env.ORCHESTRATOR_SERVICE_API_KEY ?? "",
@@ -1958,6 +2199,11 @@ async function startApi(): Promise<void> {
     undefined,
     reportDocuments,
     reportEditor,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    identity,
   );
   server.listen(port, host, async () => {
     process.stdout.write(`Think Tank API 已启动：http://${host}:${port}\n`);

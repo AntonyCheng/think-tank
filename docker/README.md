@@ -39,7 +39,7 @@ cp docker/data/config/searxng/searxng.env.example docker/data/config/searxng/sea
 cp docker/data/config/postgres/postgres.env.example docker/data/config/postgres/postgres.env
 ```
 
-编辑四个新文件并替换 `change-me` 占位值。必须保证：
+编辑五个新文件并替换 `change-me` 占位值。必须保证：
 
 ```text
 api.env:ORCHESTRATOR_SERVICE_API_KEY
@@ -47,16 +47,22 @@ api.env:ORCHESTRATOR_SERVICE_API_KEY
 mcp.env:THINK_TANK_SERVICE_API_KEY
 ```
 
-`MCP_PUBLIC_BASE_URL` 必须是远程 Agent 能访问的地址。默认保留为 `http://10.9.0.106:7010`，部署服务器地址变化时需要同步修改。
+`MCP_PUBLIC_BASE_URL` 必须是远程 Agent 能访问的地址，并使用 MCP 的宿主机映射端口（默认 `7169`）；部署服务器地址变化时需要同步修改。
 
-`runtime.env` 默认启用 `searx,duckduckgo`，其中 `SEARX_URL` 必须保留为
+`runtime.env` 默认启用 `duckduckgo`；如启用 `searxng`，其中 `SEARX_URL` 必须保留为
 `http://thinktank-searxng:8080`。SearXNG 的 `settings.yml` 已启用 JSON
-格式，供 GPT Researcher 调用；该容器没有宿主机端口映射，不能从外网直接访问。
+格式，供 GPT Researcher 调用；默认同时映射宿主机端口 `7170`，应仅在可信网络中暴露。
 `searxng.env` 中的 `SEARXNG_SECRET` 是 SearXNG 的服务密钥，应替换为随机长字符串。
+
+模型服务仅接受 OpenAI 兼容协议。主模型与可选备用模型各自配置 AO 编排、AO 验证、
+GPTR 快速和 GPTR 深度四个模型；向量模型独立配置且不参与主备切换。管理员在系统设置页
+保存运行参数后，API 会写回 `runtime.env` 并立即应用到后续任务，无需重启容器。
 
 实际 `.env` 文件不会被 Git 跟踪。不要把模型密钥、登录密码或 MCP 密钥写进 Compose 和 Dockerfile。
 
-三个配置目录相互隔离。API 容器只挂载 `config/runtime`，因此可以保存设置页面提交的模型密钥，但无法读取 `mcp.env`。
+五个配置目录相互隔离。API 容器只读入 `api.env`、`postgres.env`，并挂载可写的
+`config/runtime`，因此可以保存设置页面提交的运行参数，但无法读取 `mcp.env` 或
+`searxng.env`。
 
 ## 2. 运行项目测试
 
@@ -83,7 +89,6 @@ npm run test:acceptance
 
 ```powershell
 docker compose -f docker\docker-compose.yaml config
-docker pull docker.io/searxng/searxng:2026.8.14-094c33d40
 docker compose -f docker\docker-compose.yaml build
 docker compose -f docker\docker-compose.yaml up -d
 docker compose -f docker\docker-compose.yaml ps
@@ -136,20 +141,20 @@ docker compose -f docker\docker-compose.yaml logs -f thinktank-mcp
 ## 4. 验证
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:5173/health
-Invoke-RestMethod http://127.0.0.1:5173/ready
+Invoke-RestMethod http://127.0.0.1:7168/health
+Invoke-RestMethod http://127.0.0.1:7168/ready
 ```
 
 浏览器访问：
 
 ```text
-http://部署服务器IP:5173
+http://部署服务器IP:7168
 ```
 
 MCP 客户端连接：
 
 ```text
-http://部署服务器IP:7010/mcp?api_key=<MCP_API_KEY>
+http://部署服务器IP:7169/mcp?api_key=<MCP_API_KEY>
 ```
 
 ## 5. 停止与更新

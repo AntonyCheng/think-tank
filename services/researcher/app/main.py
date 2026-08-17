@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from dotenv import dotenv_values
 
 from .contracts import (
+    ExecutionCapacityUpdate,
     EditorResearchRequest,
     EditorResearchResponse,
     EditorResearchSource,
@@ -376,6 +377,15 @@ async def research(request: ResearchRequest) -> ResearchResponse:
             status_code=exc.status_code,
             detail=exc.detail,
         ) from exc
+
+
+@app.post("/runtime/execution-capacity")
+async def update_execution_capacity(
+    request: ExecutionCapacityUpdate,
+) -> dict[str, int]:
+    return await research_executor.update_worker_concurrency(
+        request.concurrency,
+    )
 
 
 @app.post("/research/stream")

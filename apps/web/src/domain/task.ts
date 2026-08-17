@@ -45,6 +45,7 @@ export interface ResearchRunProgress {
   startedAt: string;
   updatedAt: string;
   completedAt?: string;
+  queueWaitMs?: number;
   elapsedMs: number;
   sourceCount: number;
   activityCount?: number;
@@ -79,9 +80,29 @@ export interface ResearchTaskSnapshot {
   output?: string;
   warnings?: string[];
   error?: string;
+  continuation?: {
+    failedStepId: string;
+    failedStepName: string;
+    completedExpertCount: number;
+    evidenceBundleCount: number;
+  };
   pendingInput?: PendingInput;
   researchTelemetry?: ResearchTelemetry;
-  evidenceBundles?: Array<{ aoStepId: string; sources?: unknown[] }>;
+  evidenceBundles?: ExpertEvidenceBundle[];
+}
+
+export interface ExpertEvidenceBundle {
+  aoStepId: string;
+  completedAt: string;
+  report: {
+    content: string;
+    revision: number;
+  };
+  sources: Array<{
+    title: string;
+    visibility: "public" | "private";
+    url?: string;
+  }>;
 }
 
 export type ResearchHistoryFilter = "all" | "completed" | "warnings" | "unfinished";

@@ -43,6 +43,32 @@ test("maps raw GPTR events to deduplicated user research phases", () => {
   assert.equal(collecting.diagnosticRecord.rawType, "scraping_urls");
 });
 
+test("distinguishes execution queueing from active GPTR research", () => {
+  const tracker = new ResearchTelemetryTracker();
+
+  const queued = tracker.observe({
+    timestamp: "2026-07-29T02:00:00.000Z",
+    type: "research.execution.queued",
+    data: { concurrency: 2, active: 2, queued: 1, queuePosition: 1 },
+  }, standardRun);
+  const started = tracker.observe({
+    timestamp: "2026-07-29T02:00:03.000Z",
+    type: "research.execution.started",
+    data: { concurrency: 2, active: 2, queued: 0, waitedMs: 3_000 },
+  }, standardRun);
+
+  assert.equal(queued.publicEvent?.state, "queued");
+  assert.equal(
+    queued.activityEvent?.message,
+    "正在等待研究执行资源（队列第 1 位）。",
+  );
+  assert.equal(started.publicEvent?.state, "running");
+  assert.equal(
+    started.activityEvent?.message,
+    "已获得研究执行资源，等待 3 秒后开始研究。",
+  );
+});
+
 test("projects safe research activities and counts sources before completion", () => {
   const tracker = new ResearchTelemetryTracker();
 
@@ -415,7 +441,7 @@ test("bounds and redacts diagnostic event data", () => {
   assert.equal(update.diagnosticRecord.truncated, true);
 });
 
-test("closes failed and canceled research runs without exposing error details", () => {
+test("records a bounded and redacted failure summary", () => {
   for (const [state, phase] of [
     ["failed", "failed"],
     ["canceled", "canceled"],
@@ -424,7 +450,7 @@ test("closes failed and canceled research runs without exposing error details", 
     const result = tracker.fail({
       timestamp: "2026-07-29T02:00:10.000Z",
       state,
-      error: new Error("provider secret detail"),
+      error: new Error("provider failed with apiKey: sk-secret-value"),
     }, standardRun);
 
     assert.equal(result.publicEvent.state, state);
@@ -432,6 +458,7 @@ test("closes failed and canceled research runs without exposing error details", 
     assert.equal(result.publicEvent.elapsedMs, 10_000);
     assert.deepEqual(result.diagnosticRecord.data, {
       errorName: "Error",
+      errorMessage: "provider failed with apiKey: [redacted]",
     });
   }
 });

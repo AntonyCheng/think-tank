@@ -193,6 +193,58 @@ test("returns redacted failure diagnostics without exposing raw diagnostic data"
   assert.equal(payload.diagnostics[0]?.message, "authorization: [redacted]");
 });
 
+test("returns a completed expert report with public sources only", async (t) => {
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+    evidenceBundles: [{
+      schemaVersion: 1,
+      aoStepId: "industry_expert",
+      researchRunId: "run-1",
+      attempt: 1,
+      mode: "standard",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      completedAt: "2026-08-18T00:01:00.000Z",
+      derivedFromStepIds: [],
+      queries: [],
+      sources: [
+        { id: "public-source", visibility: "public", title: "公开资料", url: "https://example.com/public", sourceType: "web", observedAt: "2026-08-18T00:00:30.000Z" },
+        { id: "private-source", visibility: "private", title: "内部文档", locator: "document-1", sourceType: "document", observedAt: "2026-08-18T00:00:30.000Z" },
+      ],
+      researchContext: { content: "private context", originalCharacters: 15, truncated: false },
+      method: { sourceMode: "web", retrievers: ["duckduckgo"] },
+      report: { format: "markdown", content: "# 专家结论", revision: 1 },
+      cost: null,
+    }],
+  }));
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = (server.address() as AddressInfo).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  const task = await fetch(`${baseUrl}/api/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic: "expert result" }),
+  }).then((response) => response.json()) as { id: string };
+  await waitFor(async () => (await fetch(`${baseUrl}/api/tasks/${task.id}`))
+    .json().then((value: { status: string }) => value.status === "completed"));
+
+  const response = await fetch(`${baseUrl}/api/tasks/${task.id}/experts/industry_expert`);
+  assert.equal(response.status, 200);
+  const payload = await response.json() as Record<string, unknown>;
+  assert.equal((payload.report as { content: string }).content, "# 专家结论");
+  assert.deepEqual(payload.sources, [{
+    title: "公开资料",
+    visibility: "public",
+    url: "https://example.com/public",
+  }]);
+  assert.equal("researchContext" in payload, false);
+});
+
 test("restarts a failed task as a new research session", async (t) => {
   let runs = 0;
   const manager = new ResearchTaskManager(async () => {
@@ -222,6 +274,114 @@ test("restarts a failed task as a new research session", async (t) => {
   assert.notEqual(retry.id, created.id);
   assert.equal(retry.topic, "retry the failed workflow");
   await waitFor(async () => runs >= 2);
+});
+
+test("continues a failed expert in the same research session", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot: ResearchTaskSnapshot = {
+    id: "failed-expert-task",
+    topic: "continue failed expert",
+    status: "failed",
+    createdAt: "2026-08-18T00:00:00.000Z",
+    updatedAt: "2026-08-18T00:00:00.000Z",
+    workflowPlan: {
+      schemaVersion: 1,
+      workflowName: "test",
+      steps: [
+        { id: "completed", name: "Completed expert", role: "research/analyst", task: "Research.", type: "expert", dependsOn: [], terminal: false },
+        { id: "failed", name: "Failed expert", role: "research/analyst", task: "Research.", type: "expert", dependsOn: [], terminal: false },
+        { id: "final", name: "Synthesis", role: "research/writer", task: "Write.", type: "expert", dependsOn: ["completed", "failed"], terminal: true },
+      ],
+    },
+  };
+  store.create(snapshot, { type: "task.failed", data: {} });
+  store.record(snapshot.id, {}, {
+    type: "step.completed",
+    data: { stepId: "failed", status: "failed" },
+  });
+  store.saveCheckpoint({
+    schemaVersion: 1,
+    taskId: snapshot.id,
+    runId: "failed-expert-run",
+    reason: "initial",
+    sequence: 2,
+    createdAt: "2026-08-18T00:01:00.000Z",
+    workflow: { yaml: "name: test", sha256: "workflow-hash" },
+    inputs: { topic: snapshot.topic },
+    inputHash: "input-hash",
+    runtimeFingerprint: "runtime-hash",
+    policyFingerprint: "policy-hash",
+    completedSteps: [
+      { id: "completed", role: "research/analyst", status: "completed", output: "completed", output_var: "completed", duration: 1, tokens: { input: 0, output: 0 } },
+      { id: "final", role: "research/writer", status: "skipped", duration: 0, tokens: { input: 0, output: 0 } },
+    ],
+    outputVariables: { completed: "completed" },
+    evidenceBundles: [],
+  });
+  let fromStep: string | undefined;
+  const manager = new ResearchTaskManager(async (_topic, _onEvent, controls) => {
+    fromStep = controls.execution?.fromStep;
+    return {
+      workflowPath: "workflow.yaml",
+      output: "# continued",
+      workflow: {
+        name: "test",
+        success: true,
+        steps: [{ id: "final", role: "research/writer", status: "completed", output: "# continued", duration: 1, tokens: { input: 0, output: 0 } }],
+        totalDuration: 1,
+        totalTokens: { input: 0, output: 0 },
+      },
+    };
+  }, store);
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const response = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/continue`, { method: "POST" });
+  assert.equal(response.status, 202);
+  const continued = await response.json() as { id: string; status: string };
+  assert.equal(continued.id, snapshot.id);
+  await waitFor(async () => manager.get(snapshot.id)?.status === "completed");
+  assert.equal(fromStep, "failed");
+});
+
+test("keeps an active event stream open when replaying a historical failure", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot: ResearchTaskSnapshot = {
+    id: "resumed-event-stream-task",
+    topic: "resume event stream",
+    status: "queued",
+    createdAt: "2026-08-18T00:00:00.000Z",
+    updatedAt: "2026-08-18T00:00:00.000Z",
+  };
+  const manager = new ResearchTaskManager(async () => new Promise(() => undefined), store);
+  store.create(snapshot, { type: "task.queued", data: {} });
+  store.record(snapshot.id, {}, { type: "task.failed", data: { error: "previous run" } });
+  const server = createApiServer(manager);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const response = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/events`, {
+    headers: { "Last-Event-ID": "1" },
+  });
+  assert.equal(response.status, 200);
+  const reader = response.body?.getReader();
+  assert.ok(reader);
+  const first = await reader.read();
+  assert.equal(first.done, false);
+  assert.match(new TextDecoder().decode(first.value), /event: task\.failed/u);
+
+  const nextRead = reader.read();
+  const result = await Promise.race([
+    nextRead,
+    new Promise<"still-open">((resolve) => setTimeout(() => resolve("still-open"), 50)),
+  ]);
+  assert.equal(result, "still-open");
+  await reader.cancel();
 });
 
 test("submits, observes, and retrieves a completed research task", async (t) => {
@@ -698,6 +858,19 @@ test("validates and snapshots task research profiles at submission", async (t) =
     settings,
     undefined,
     readyCapabilityProvider,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async (_serviceUrl, concurrency) => ({
+      concurrency,
+      active: 0,
+      queued: 0,
+    }),
   );
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -1276,6 +1449,63 @@ test("updates an API Key without exposing it through settings reads", async (t) 
     await readFile(environmentFilePath, "utf8"),
     'OPENAI_API_KEY="replacement-secret"\nGPTR_EMBEDDING_API_KEY="replacement-embedding-secret"\nTAVILY_API_KEY="replacement-tavily-secret"\n',
   );
+});
+
+test("applies scheduling settings to Researcher before persisting them", async (t) => {
+  const settings = new RuntimeSettingsStore({
+    OPENAI_API_KEY: "secret",
+    OPENAI_BASE_URL: "https://models.example/v1",
+    AO_PLANNER_MODEL: "planner",
+    GPTR_FAST_LLM: "fast",
+    GPTR_SMART_LLM: "smart",
+    GPTR_EMBEDDING: "m3e",
+    RETRIEVER: "duckduckgo",
+    AO_CONCURRENCY: "2",
+  });
+  const applied: number[] = [];
+  const server = createApiServer(
+    new ResearchTaskManager(async () => { throw new Error("runner should not be called"); }),
+    settings,
+    undefined,
+    readyCapabilityProvider,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    passingSettingsPreflight,
+    undefined,
+    undefined,
+    undefined,
+    async (_serviceUrl, concurrency) => {
+      applied.push(concurrency);
+      if (concurrency === 5) {
+        throw new Error("Researcher is unavailable");
+      }
+      return { concurrency, active: 0, queued: 0 };
+    },
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const appliedResponse = await fetch(`${baseUrl}/api/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope: "scheduling", concurrency: 4 }),
+  });
+  assert.equal(appliedResponse.status, 200);
+  assert.deepEqual(applied, [4]);
+  assert.equal(settings.getRuntimeSettings().concurrency, 4);
+
+  const rejectedResponse = await fetch(`${baseUrl}/api/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope: "scheduling", concurrency: 5 }),
+  });
+  assert.equal(rejectedResponse.status, 503);
+  assert.deepEqual(applied, [4, 5]);
+  assert.equal(settings.getRuntimeSettings().concurrency, 4);
 });
 
 test("does not persist settings when connection preflight fails", async (t) => {

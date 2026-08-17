@@ -68,6 +68,8 @@ export interface ResearchTaskHistoryPage {
 
 export interface ResearchTaskSnapshot {
   id: string;
+  /** Internal identity used by the API authorization layer. */
+  ownerUserId?: string;
   topic: string;
   status: ResearchTaskStatus;
   createdAt: string;
@@ -92,7 +94,15 @@ export interface ResearchTaskSnapshot {
     checkpointAt: string;
     reason: "restart";
   };
+  continuation?: ResearchTaskContinuation;
   revisions?: ResearchTaskRevision[];
+}
+
+export interface ResearchTaskContinuation {
+  failedStepId: string;
+  failedStepName: string;
+  completedExpertCount: number;
+  evidenceBundleCount: number;
 }
 
 export interface ResearchTaskRevision {
@@ -109,6 +119,7 @@ export interface ContentAcceptance {
 
 export interface ResearchTaskPolicy {
   taskId?: string;
+  ownerUserId?: string;
   researchProfile?: ResearchProfile;
   researchCapabilities?: ResearchCapabilities;
   deferredStart?: boolean;
@@ -210,6 +221,7 @@ export class ResearchTaskManager {
     const timestamp = new Date().toISOString();
     const snapshot: ResearchTaskSnapshot = {
       id: policy.taskId ?? randomUUID(),
+      ...(policy.ownerUserId === undefined ? {} : { ownerUserId: policy.ownerUserId }),
       topic: normalized,
       status: "queued",
       createdAt: timestamp,
@@ -268,7 +280,8 @@ export class ResearchTaskManager {
   }
 
   rerun(id: string, fromStep: string): boolean {
-    const task = this.#store.load(id)?.snapshot;
+    const stored = this.#store.load(id);
+    const task = stored?.snapshot;
     const checkpoint = this.#store.latestCheckpoint(id);
     if (
       !task ||
@@ -277,10 +290,13 @@ export class ResearchTaskManager {
     ) {
       return false;
     }
-    const target = checkpoint.completedSteps.find(
-      (step) => step.id === fromStep && step.status === "completed",
-    );
-    if (!target || !target.role.trim()) return false;
+    const target = checkpoint.completedSteps.find((step) => step.id === fromStep);
+    const planStep = task.workflowPlan?.steps.find((step) => step.id === fromStep);
+    const canRerunCompletedStep = target?.status === "completed" && Boolean(target.role.trim());
+    const continuation = failedExpertContinuation(task, checkpoint, stored.events);
+    const canContinueFailedExpert = continuation?.failedStepId === fromStep &&
+      planStep?.type === "expert";
+    if (!canRerunCompletedStep && !canContinueFailedExpert) return false;
     const revision: ResearchTaskRevision = {
       runId: checkpoint.runId,
       createdAt: new Date().toISOString(),
@@ -296,7 +312,7 @@ export class ResearchTaskManager {
         revisions: [...(task.revisions ?? []), revision],
       },
       "task.rerun_requested",
-      { fromStep },
+      { fromStep, continuation: canContinueFailedExpert },
     );
     this.#enqueue(id, {
       checkpoint,
@@ -305,10 +321,27 @@ export class ResearchTaskManager {
     return true;
   }
 
+  continue(id: string): boolean {
+    const stored = this.#store.load(id);
+    const task = stored?.snapshot;
+    const checkpoint = this.#store.latestCheckpoint(id);
+    const continuation = task && checkpoint && stored
+      ? failedExpertContinuation(task, checkpoint, stored.events)
+      : undefined;
+    return continuation ? this.rerun(id, continuation.failedStepId) : false;
+  }
+
   get(id: string): ResearchTaskSnapshot | undefined {
-    const stored = this.#store.load(id)?.snapshot;
-    const snapshot = stored
-      ? presentCurrentEvidenceQuality(stored)
+    const stored = this.#store.load(id);
+    const current = stored
+      ? presentCurrentEvidenceQuality(stored.snapshot)
+      : undefined;
+    const checkpoint = stored ? this.#store.latestCheckpoint(id) : undefined;
+    const continuation = current && checkpoint && stored
+      ? failedExpertContinuation(current, checkpoint, stored.events)
+      : undefined;
+    const snapshot = current
+      ? { ...current, ...(continuation ? { continuation } : {}) }
       : undefined;
     if (
       !snapshot?.output ||
@@ -336,6 +369,7 @@ export class ResearchTaskManager {
     limit?: number;
     query?: string;
     filter?: ResearchHistoryFilter;
+    ownerUserId?: string;
   } = {}): ResearchTaskHistoryPage {
     const limit = Math.min(Math.max(input.limit ?? 30, 1), 50);
     const filter = input.filter ?? "all";
@@ -343,6 +377,7 @@ export class ResearchTaskManager {
     const cursor = parseHistoryCursor(input.cursor);
     const entries = this.#store.list()
       .map(presentCurrentEvidenceQuality)
+      .filter((task) => !input.ownerUserId || task.ownerUserId === input.ownerUserId)
       .filter((task) => matchesHistoryFilter(task, filter))
       .filter((task) => !query || task.topic.toLocaleLowerCase().includes(query))
       .sort(compareHistoryTasks)
@@ -826,6 +861,45 @@ export class ResearchTaskManager {
     }
     runtime.activeSince = undefined;
   }
+}
+
+function failedExpertContinuation(
+  task: ResearchTaskSnapshot,
+  checkpoint: WorkflowCheckpoint,
+  events: readonly ResearchTaskEvent[],
+): ResearchTaskContinuation | undefined {
+  if (task.status !== "failed" || !task.workflowPlan) return undefined;
+  const checkpointSteps = new Map(
+    checkpoint.completedSteps.map((step) => [step.id, step]),
+  );
+  const stepStatuses = new Map<string, string>();
+  for (const event of events) {
+    if (event.type === "step.started" && typeof event.data.stepId === "string") {
+      stepStatuses.set(event.data.stepId, "running");
+    }
+    if (event.type === "step.completed" && typeof event.data.stepId === "string") {
+      stepStatuses.set(
+        event.data.stepId,
+        typeof event.data.status === "string" ? event.data.status : "completed",
+      );
+    }
+  }
+  const failedStep = task.workflowPlan.steps.find((step) =>
+    step.type === "expert" && (
+      checkpointSteps.get(step.id)?.status === "failed" ||
+      stepStatuses.get(step.id) === "failed"
+    )
+  );
+  if (!failedStep) return undefined;
+  const completedExpertCount = task.workflowPlan.steps.filter((step) =>
+    step.type === "expert" && checkpointSteps.get(step.id)?.status === "completed"
+  ).length;
+  return {
+    failedStepId: failedStep.id,
+    failedStepName: failedStep.name,
+    completedExpertCount,
+    evidenceBundleCount: checkpoint.evidenceBundles.length,
+  };
 }
 
 function historyEntry(task: ResearchTaskSnapshot): ResearchTaskHistoryEntry {

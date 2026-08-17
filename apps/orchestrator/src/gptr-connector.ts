@@ -28,6 +28,7 @@ import {
 } from "./evidence-bundle.js";
 import { collectObservedSources } from "./citations.js";
 import type { ResearchFailure } from "./research-telemetry.js";
+import { isRetryableProviderError } from "./model-provider-router.js";
 
 export interface GptrConnectorOptions {
   taskId?: string;
@@ -40,6 +41,9 @@ export interface GptrConnectorOptions {
   apiKey?: string;
   fastLlm?: string;
   smartLlm?: string;
+  fallbackBaseUrl?: string;
+  fallbackApiKey?: string;
+  fallbackFastLlm?: string;
   embedding?: string;
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;
@@ -67,6 +71,9 @@ export interface GptrConnectorOptions {
     bundle: EvidenceBundle,
     invocation: ResearchInvocation,
   ) => void;
+  fallback?: GptrConnector;
+  providerName?: string;
+  minimumPublicSources?: number;
 }
 
 export interface ResearchInvocation {
@@ -86,6 +93,11 @@ export interface ResearchInvocation {
   };
 }
 
+interface ResearchAttemptResult extends LLMResult {
+  invocation: ResearchInvocation;
+  publicSourceCount: number;
+}
+
 export class GptrConnector implements LLMConnector {
   readonly #options: GptrConnectorOptions;
   readonly #budget: WeightedConcurrencyBudget;
@@ -103,6 +115,62 @@ export class GptrConnector implements LLMConnector {
     userMessage: string,
     config: LLMConfig,
   ): Promise<LLMResult> {
+    const minimumPublicSources = normalizedMinimumPublicSources(
+      this.#options.minimumPublicSources,
+    );
+    const initial = await this.#chatOnce(systemPrompt, userMessage, config);
+    if (!requiresEvidenceRecovery(initial, config, minimumPublicSources)) {
+      return llmResult(initial);
+    }
+
+    this.#emitEvent("research.evidence_recovery_started", {
+      requiredPublicSources: minimumPublicSources,
+      observedPublicSources: initial.publicSourceCount,
+    }, initial.invocation);
+    try {
+      const recovered = await this.#chatOnce(
+        evidenceRecoveryPrompt(systemPrompt),
+        userMessage,
+        {
+          ...config,
+          params: {
+            ...(config.params ?? {}),
+            think_tank_evidence_recovery: "attempted",
+          },
+        },
+      );
+      const best = recovered.publicSourceCount >= initial.publicSourceCount
+        ? recovered
+        : initial;
+      if (
+        recovered.publicSourceCount >= minimumPublicSources
+      ) {
+        this.#emitEvent("research.evidence_recovery_succeeded", {
+          requiredPublicSources: minimumPublicSources,
+          observedPublicSources: recovered.publicSourceCount,
+        }, recovered.invocation);
+      } else {
+        this.#emitEvent("research.evidence_insufficient", {
+          requiredPublicSources: minimumPublicSources,
+          observedPublicSources: best.publicSourceCount,
+        }, best.invocation);
+      }
+      return llmResult(best);
+    } catch (error) {
+      this.#emitEvent("research.evidence_insufficient", {
+        requiredPublicSources: minimumPublicSources,
+        observedPublicSources: initial.publicSourceCount,
+        recoveryError: error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
+      }, initial.invocation);
+      return llmResult(initial);
+    }
+  }
+
+  async #chatOnce(
+    systemPrompt: string,
+    userMessage: string,
+    config: LLMConfig,
+  ): Promise<ResearchAttemptResult> {
     const fallback = defaultResearchProfile(this.#options.retriever);
     const taskProfile = this.#options.researchProfile ?? fallback.profile;
     const capabilities = this.#options.researchCapabilities ??
@@ -193,7 +261,7 @@ export class GptrConnector implements LLMConnector {
       ),
       researchProfile,
       ...(researchProfile.mode === "synthesis" &&
-          this.#options.evidenceLedger
+           this.#options.evidenceLedger
         ? {
             upstreamEvidence: this.#options.evidenceLedger.forSynthesis(
               runtime?.dependsOn ?? [],
@@ -206,6 +274,9 @@ export class GptrConnector implements LLMConnector {
       apiKey: this.#options.apiKey,
       fastLlm: this.#options.fastLlm,
       smartLlm: this.#options.smartLlm,
+      fallbackBaseUrl: this.#options.fallbackBaseUrl,
+      fallbackApiKey: this.#options.fallbackApiKey,
+      fallbackFastLlm: this.#options.fallbackFastLlm,
       embedding: this.#options.embedding,
       embeddingBaseUrl: this.#options.embeddingBaseUrl,
       embeddingApiKey: this.#options.embeddingApiKey,
@@ -300,11 +371,43 @@ export class GptrConnector implements LLMConnector {
           input_tokens: 0,
           output_tokens: 0,
         },
+        invocation,
+        publicSourceCount: publicSourceCount(result),
       };
     } catch (error) {
-      const normalized = error instanceof Error
+      let normalized = error instanceof Error
         ? error
         : new Error(String(error));
+      const fallbackAttempted = config.params?.think_tank_provider_attempt === "fallback";
+      if (
+        this.#options.fallback &&
+        !fallbackAttempted &&
+        isRetryableProviderError(normalized)
+      ) {
+        this.#emitEvent("model.provider.fallback_started", {
+          primary: this.#options.providerName ?? "primary",
+          reason: normalized.message.slice(0, 240),
+        }, invocation);
+        try {
+          const fallbackParams = {
+            ...(config.params ?? {}),
+            think_tank_provider_attempt: "fallback",
+          };
+          const result = await this.#options.fallback.#chatOnce(
+            systemPrompt,
+            userMessage,
+            { ...config, params: fallbackParams },
+          );
+          this.#emitEvent("model.provider.fallback_succeeded", {
+            provider: this.#options.fallback.#options.providerName ?? "fallback",
+          }, invocation);
+          return result;
+        } catch (fallbackError) {
+          normalized = new Error(
+            `主模型服务暂时不可用，备用模型服务也调用失败：${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+          );
+        }
+      }
       this.#options.onResearchFailure?.({
         timestamp: new Date().toISOString(),
         state: this.#options.signal?.aborted ? "canceled" : "failed",
@@ -328,6 +431,74 @@ export class GptrConnector implements LLMConnector {
       data,
     }, invocation);
   }
+}
+
+function requiresEvidenceRecovery(
+  result: ResearchAttemptResult,
+  config: LLMConfig,
+  minimumPublicSources: number,
+): boolean {
+  if (
+    minimumPublicSources < 1 ||
+    config.params?.think_tank_evidence_recovery === "attempted" ||
+    result.publicSourceCount >= minimumPublicSources
+  ) {
+    return false;
+  }
+  return result.invocation.researchProfile.mode !== "synthesis" &&
+    result.invocation.researchProfile.source.mode === "web";
+}
+
+function normalizedMinimumPublicSources(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.trunc(value ?? 0));
+}
+
+function evidenceRecoveryPrompt(systemPrompt: string): string {
+  return [
+    systemPrompt,
+    "",
+    "Evidence recovery requirement:",
+    "The prior research pass returned too few verifiable public sources.",
+    "Run a focused replacement search before writing the report. Prioritize direct government, academic, industry-association, or primary-source pages that directly support the assigned question.",
+    "Keep only claims supported by the collected URLs and retain those Markdown links beside the relevant facts.",
+  ].join("\n");
+}
+
+function publicSourceCount(result: ResearchResponse): number {
+  const sources = new Set<string>();
+  for (const value of result.sourceUrls) {
+    const normalized = normalizedPublicUrl(value);
+    if (normalized) sources.add(normalized);
+  }
+  for (const value of result.sources) {
+    if (!value || typeof value !== "object") continue;
+    const record = value as Record<string, unknown>;
+    const candidate = record.url ?? record.href ?? record.link;
+    if (typeof candidate !== "string") continue;
+    const normalized = normalizedPublicUrl(candidate);
+    if (normalized) sources.add(normalized);
+  }
+  return sources.size;
+}
+
+function normalizedPublicUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    url.hash = "";
+    if (url.pathname !== "/") url.pathname = url.pathname.replace(/\/+$/u, "");
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function llmResult(result: ResearchAttemptResult): LLMResult {
+  return {
+    content: result.content,
+    usage: result.usage,
+  };
 }
 
 

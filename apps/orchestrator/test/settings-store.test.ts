@@ -50,6 +50,45 @@ test("updates deployment settings without exposing the API key", () => {
   );
 });
 
+test("returns bare GPTR model names while preserving runtime provider prefixes", () => {
+  const store = new RuntimeSettingsStore(baseEnv);
+
+  const publicSettings = store.getPublicSettings();
+  assert.equal(publicSettings.gptrFastLlm, "fast");
+  assert.equal(publicSettings.gptrSmartLlm, "smart");
+  assert.equal(publicSettings.gptrEmbedding, "m3e");
+
+  store.update({ gptrFastLlm: "fast-v2", gptrEmbedding: "m3e-v2" });
+  const runtime = store.getRuntimeSettings();
+  assert.equal(runtime.gptrFastLlm, "openai:fast-v2");
+  assert.equal(runtime.gptrEmbedding, "custom:m3e-v2");
+});
+
+test("stores an optional fallback model provider without exposing its API key", () => {
+  const store = new RuntimeSettingsStore(baseEnv);
+  store.setFallbackApiKey("fallback-secret");
+  const updated = store.update({
+    fallbackEnabled: true,
+    fallbackOpenaiBaseUrl: "https://backup.example/v1",
+    fallbackAoPlannerModel: "backup-planner",
+    fallbackAoVerifierModel: "backup-verifier",
+    fallbackGptrFastLlm: "backup-fast",
+    fallbackGptrSmartLlm: "backup-smart",
+  });
+
+  assert.equal(updated.fallbackEnabled, true);
+  assert.equal(updated.fallbackApiKeyConfigured, true);
+  assert.equal("fallbackApiKey" in updated, false);
+  assert.deepEqual(store.getRuntimeSettings().fallback, {
+    baseUrl: "https://backup.example/v1",
+    apiKey: "fallback-secret",
+    plannerModel: "backup-planner",
+    verifierModel: "backup-verifier",
+    fastLlm: "openai:backup-fast",
+    smartLlm: "openai:backup-smart",
+  });
+});
+
 test("updates the default multi-retriever grant", () => {
   const store = new RuntimeSettingsStore(baseEnv);
 

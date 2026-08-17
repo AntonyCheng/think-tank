@@ -111,6 +111,9 @@ test("maps an AO chat call to a GPT Researcher request", async () => {
     apiKey: "test-key",
     fastLlm: "openai:fast-model",
     smartLlm: "openai:smart-model",
+    fallbackBaseUrl: "https://backup.example/v1/",
+    fallbackApiKey: "backup-key",
+    fallbackFastLlm: "openai:backup-fast-model",
     embedding: "openai:embedding-model",
     embeddingBaseUrl: "https://embeddings.example/v1/",
     embeddingApiKey: "embedding-secret",
@@ -160,6 +163,9 @@ test("maps an AO chat call to a GPT Researcher request", async () => {
     apiKey: "test-key",
     fastLlm: "openai:fast-model",
     smartLlm: "openai:smart-model",
+    fallbackBaseUrl: "https://backup.example/v1/",
+    fallbackApiKey: "backup-key",
+    fallbackFastLlm: "openai:backup-fast-model",
     embedding: "openai:embedding-model",
     embeddingBaseUrl: "https://embeddings.example/v1/",
     embeddingApiKey: "embedding-secret",
@@ -193,14 +199,153 @@ test("maps an AO chat call to a GPT Researcher request", async () => {
     kind: "subquery",
     text: "current evidence",
   }]);
-  assert.deepEqual(bundle?.sources, [{
-    id: "source-1",
+  assert.equal(bundle?.sources?.length, 1);
+  assert.match(
+    bundle?.sources?.[0]?.id ?? "",
+    /^source-market-analysis-1-[a-f0-9]{10}$/u,
+  );
+  assert.deepEqual(bundle?.sources?.[0], {
+    id: bundle?.sources?.[0]?.id,
     visibility: "public",
     url: "https://example.com/",
     title: "Example evidence",
     sourceType: "web",
     observedAt: bundle?.completedAt,
-  }]);
+  });
+});
+
+test("retries a transient GPTR provider failure through the backup provider", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const stages: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    if (requests.length === 1) {
+      return new Response("upstream temporarily unavailable", { status: 503 });
+    }
+    return new Response(`${JSON.stringify({
+      type: "result",
+      result: {
+        report: "# backup report",
+        sourceUrls: [],
+        sources: [],
+        cost: 0,
+        events: [],
+      },
+    })}\n`, {
+      status: 200,
+      headers: { "content-type": "application/x-ndjson" },
+    });
+  };
+
+  const fallback = new GptrConnector({
+    serviceUrl: "http://127.0.0.1:8010",
+    retriever: "duckduckgo",
+    baseUrl: "https://backup.example/v1",
+    apiKey: "backup-key",
+    fastLlm: "openai:backup-fast",
+    smartLlm: "openai:backup-smart",
+    embedding: "custom:shared-embedding",
+    embeddingBaseUrl: "https://embedding.example/v1",
+    embeddingApiKey: "embedding-key",
+    providerName: "fallback",
+  });
+  const primary = new GptrConnector({
+    serviceUrl: "http://127.0.0.1:8010",
+    retriever: "duckduckgo",
+    baseUrl: "https://primary.example/v1",
+    apiKey: "primary-key",
+    fastLlm: "openai:primary-fast",
+    smartLlm: "openai:primary-smart",
+    embedding: "custom:shared-embedding",
+    embeddingBaseUrl: "https://embedding.example/v1",
+    embeddingApiKey: "embedding-key",
+    fallback,
+    providerName: "primary",
+    onResearchEvent: (event) => stages.push(event.type),
+  });
+
+  const result = await primary.chat("expert role", "research task", {
+    provider: "openai",
+  });
+
+  assert.equal(result.content, "# backup report");
+  assert.equal(requests.length, 2);
+  assert.deepEqual(
+    {
+      baseUrl: requests[0]?.baseUrl,
+      apiKey: requests[0]?.apiKey,
+      fastLlm: requests[0]?.fastLlm,
+      smartLlm: requests[0]?.smartLlm,
+    },
+    {
+      baseUrl: "https://primary.example/v1",
+      apiKey: "primary-key",
+      fastLlm: "openai:primary-fast",
+      smartLlm: "openai:primary-smart",
+    },
+  );
+  assert.deepEqual(
+    {
+      baseUrl: requests[1]?.baseUrl,
+      apiKey: requests[1]?.apiKey,
+      fastLlm: requests[1]?.fastLlm,
+      smartLlm: requests[1]?.smartLlm,
+      embedding: requests[1]?.embedding,
+      embeddingBaseUrl: requests[1]?.embeddingBaseUrl,
+      embeddingApiKey: requests[1]?.embeddingApiKey,
+    },
+    {
+      baseUrl: "https://backup.example/v1",
+      apiKey: "backup-key",
+      fastLlm: "openai:backup-fast",
+      smartLlm: "openai:backup-smart",
+      embedding: "custom:shared-embedding",
+      embeddingBaseUrl: "https://embedding.example/v1",
+      embeddingApiKey: "embedding-key",
+    },
+  );
+  assert.ok(stages.includes("model.provider.fallback_started"));
+  assert.ok(stages.includes("model.provider.fallback_succeeded"));
+});
+
+test("performs one focused recovery when a Web expert returns too few public sources", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const stages: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    const sourceUrls = requests.length === 1
+      ? ["https://example.com/first"]
+      : ["https://example.com/first", "https://gov.example/second"];
+    return new Response(`${JSON.stringify({
+      type: "result",
+      result: {
+        report: requests.length === 1 ? "# initial report" : "# recovered report",
+        sourceUrls,
+        sources: [],
+        cost: 0,
+        events: [],
+      },
+    })}\n`, {
+      status: 200,
+      headers: { "content-type": "application/x-ndjson" },
+    });
+  };
+  const connector = new GptrConnector({
+    serviceUrl: "http://127.0.0.1:8010",
+    retriever: "duckduckgo",
+    minimumPublicSources: 2,
+    onResearchEvent: (event) => stages.push(event.type),
+  });
+
+  const result = await connector.chat("expert role", "research task", {
+    provider: "openai",
+  });
+
+  assert.equal(result.content, "# recovered report");
+  assert.equal(requests.length, 2);
+  assert.match(String(requests[1]?.systemPrompt), /Evidence recovery requirement/u);
+  assert.ok(stages.includes("research.evidence_recovery_started"));
+  assert.ok(stages.includes("research.evidence_recovery_succeeded"));
 });
 
 test("maps a URL-only profile without requiring a Web policy", async () => {

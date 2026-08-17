@@ -10,6 +10,7 @@ import {
   parseWorkflow,
   validateWorkflow,
 } from "agency-orchestrator";
+import type { LLMConnector } from "agency-orchestrator";
 
 import { preflightWorkflow } from "./ao-runtime.js";
 import type {
@@ -29,6 +30,7 @@ type ComposeWorkflowResult = Awaited<ReturnType<typeof composeWorkflow>>;
 export interface ComposeWorkflowOptions extends AgencyComposeWorkflowOptions {
   /** Stable internal filename for a task-owned workflow. */
   workflowFileName?: string;
+  connector?: LLMConnector;
 }
 
 export type ResearchWorkflowComposer = (
@@ -173,7 +175,7 @@ export async function composeResearchWorkflow(
     );
   }
 
-  const connector = createConnector(options.llmConfig);
+  const connector = options.connector ?? createConnector(options.llmConfig);
   let rawOutput: string;
   try {
     const result = await connector.chat(

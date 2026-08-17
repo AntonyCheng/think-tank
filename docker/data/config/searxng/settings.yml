@@ -6,7 +6,11 @@ use_default_settings:
 general:
   instance_name: "Think Tank Search"
 
+ui:
+  default_locale: zh-Hans-CN
+
 search:
+  default_lang: zh-CN
   safe_search: 0
   autocomplete: ""
   formats:
@@ -21,4 +25,4 @@ server:
 engines:
   - name: bing
     disabled: false
-    base_url: https://cn.bing.com
+    base_url: https://www.bing.com

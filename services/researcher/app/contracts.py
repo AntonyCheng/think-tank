@@ -47,6 +47,9 @@ class ResearchRequest(BaseModel):
     api_key: str | None = Field(alias="apiKey", default=None)
     fast_llm: str | None = Field(alias="fastLlm", default=None)
     smart_llm: str | None = Field(alias="smartLlm", default=None)
+    fallback_base_url: str | None = Field(alias="fallbackBaseUrl", default=None)
+    fallback_api_key: str | None = Field(alias="fallbackApiKey", default=None)
+    fallback_fast_llm: str | None = Field(alias="fallbackFastLlm", default=None)
     embedding: str | None = None
     embedding_base_url: str | None = Field(
         alias="embeddingBaseUrl",
@@ -66,6 +69,10 @@ class ResearchEvent(BaseModel):
     timestamp: str
     type: str
     data: dict[str, Any]
+
+
+class ExecutionCapacityUpdate(BaseModel):
+    concurrency: int = Field(ge=1, le=16)
 
 
 class EvidenceQueryCapture(BaseModel):

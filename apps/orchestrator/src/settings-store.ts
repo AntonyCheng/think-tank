@@ -36,6 +36,12 @@ export interface EditableRuntimeSettings {
   gptrEmbeddingBaseUrl: string;
   retrievers: ResearchRetriever[];
   concurrency: number;
+  fallbackEnabled: boolean;
+  fallbackOpenaiBaseUrl: string;
+  fallbackAoPlannerModel: string;
+  fallbackAoVerifierModel: string;
+  fallbackGptrFastLlm: string;
+  fallbackGptrSmartLlm: string;
 }
 
 export interface PublicRuntimeSettings extends EditableRuntimeSettings {
@@ -43,6 +49,13 @@ export interface PublicRuntimeSettings extends EditableRuntimeSettings {
   apiKeyConfigured: boolean;
   embeddingApiKeyConfigured: boolean;
   configuredRetrieverCredentials: ResearchRetriever[];
+  fallbackEnabled: boolean;
+  fallbackOpenaiBaseUrl: string;
+  fallbackAoPlannerModel: string;
+  fallbackAoVerifierModel: string;
+  fallbackGptrFastLlm: string;
+  fallbackGptrSmartLlm: string;
+  fallbackApiKeyConfigured: boolean;
 }
 
 export interface RetrieverSelectionConstraints {
@@ -56,6 +69,7 @@ type LegacyPersistedRuntimeSettings = Partial<EditableRuntimeSettings> & {
 
 interface RuntimeSettingSecrets {
   apiKey?: string;
+  fallbackApiKey?: string;
   embeddingApiKey?: string;
   retrieverApiKeys?: Partial<Record<ResearchRetriever, string>>;
 }
@@ -282,6 +296,7 @@ export class RuntimeSettingsStore {
     const persisted = persistence?.load();
     this.#secrets = {
       apiKey: persisted?.secrets.apiKey ?? this.#baseEnv.OPENAI_API_KEY,
+      fallbackApiKey: persisted?.secrets.fallbackApiKey ?? this.#baseEnv.FALLBACK_OPENAI_API_KEY,
       embeddingApiKey: persisted?.secrets.embeddingApiKey ??
         this.#baseEnv.GPTR_EMBEDDING_API_KEY,
       retrieverApiKeys: persisted?.secrets.retrieverApiKeys ??
@@ -307,9 +322,9 @@ export class RuntimeSettingsStore {
       openaiBaseUrl: runtime.planner.base_url ?? "",
       aoPlannerModel: runtime.planner.model,
       aoVerifierModel: runtime.verifierModel ?? "",
-      gptrFastLlm: runtime.gptrFastLlm,
-      gptrSmartLlm: runtime.gptrSmartLlm,
-      gptrEmbedding: runtime.gptrEmbedding,
+      gptrFastLlm: publicModelName(runtime.gptrFastLlm, "openai:"),
+      gptrSmartLlm: publicModelName(runtime.gptrSmartLlm, "openai:"),
+      gptrEmbedding: publicModelName(runtime.gptrEmbedding, "custom:"),
       gptrEmbeddingBaseUrl: runtime.gptrEmbeddingBaseUrl ?? "",
       retrievers: [...runtime.retrievers],
       retriever: runtime.retriever,
@@ -320,6 +335,13 @@ export class RuntimeSettingsStore {
         .filter((retriever): retriever is ResearchRetriever =>
           RESEARCH_RETRIEVERS.includes(retriever as ResearchRetriever)
         ),
+      fallbackEnabled: Boolean(runtime.fallback),
+      fallbackOpenaiBaseUrl: runtime.fallback?.baseUrl ?? "",
+      fallbackAoPlannerModel: runtime.fallback?.plannerModel ?? "",
+      fallbackAoVerifierModel: runtime.fallback?.verifierModel ?? "",
+      fallbackGptrFastLlm: publicModelName(runtime.fallback?.fastLlm ?? "", "openai:"),
+      fallbackGptrSmartLlm: publicModelName(runtime.fallback?.smartLlm ?? "", "openai:"),
+      fallbackApiKeyConfigured: Boolean(runtime.fallback?.apiKey),
     };
   }
 
@@ -335,6 +357,13 @@ export class RuntimeSettingsStore {
       throw new Error("Embedding API Key must not be empty.");
     }
     this.#secrets.embeddingApiKey = apiKey.trim();
+  }
+
+  setFallbackApiKey(apiKey: string): void {
+    if (!apiKey.trim()) {
+      throw new Error("Fallback API Key must not be empty.");
+    }
+    this.#secrets.fallbackApiKey = apiKey.trim();
   }
 
   setRetrieverApiKeys(
@@ -360,6 +389,7 @@ export class RuntimeSettingsStore {
     input: Record<string, unknown>,
     secrets: {
       apiKey?: string;
+      fallbackApiKey?: string;
       embeddingApiKey?: string;
       retrieverApiKeys?: Partial<Record<ResearchRetriever, string>>;
     } = {},
@@ -370,6 +400,7 @@ export class RuntimeSettingsStore {
     return settingsFromEnv(this.#mergedEnv(candidate, {
       ...this.#secrets,
       ...(secrets.apiKey ? { apiKey: secrets.apiKey } : {}),
+      ...(secrets.fallbackApiKey ? { fallbackApiKey: secrets.fallbackApiKey } : {}),
       ...(secrets.embeddingApiKey
         ? { embeddingApiKey: secrets.embeddingApiKey }
         : {}),
@@ -408,6 +439,15 @@ export class RuntimeSettingsStore {
         input.aoVerifierModel,
         current.aoVerifierModel,
       ),
+      fallbackEnabled: booleanValue(
+        input.fallbackEnabled,
+        current.fallbackEnabled,
+      ),
+      fallbackOpenaiBaseUrl: optionalStringValue(input.fallbackOpenaiBaseUrl, current.fallbackOpenaiBaseUrl),
+      fallbackAoPlannerModel: optionalStringValue(input.fallbackAoPlannerModel, current.fallbackAoPlannerModel),
+      fallbackAoVerifierModel: optionalStringValue(input.fallbackAoVerifierModel, current.fallbackAoVerifierModel),
+      fallbackGptrFastLlm: optionalStringValue(input.fallbackGptrFastLlm, current.fallbackGptrFastLlm),
+      fallbackGptrSmartLlm: optionalStringValue(input.fallbackGptrSmartLlm, current.fallbackGptrSmartLlm),
       gptrFastLlm: stringValue(
         input.gptrFastLlm,
         current.gptrFastLlm,
@@ -443,6 +483,9 @@ export class RuntimeSettingsStore {
       ...(secrets.apiKey
         ? { OPENAI_API_KEY: secrets.apiKey }
         : {}),
+      ...(secrets.fallbackApiKey
+        ? { FALLBACK_OPENAI_API_KEY: secrets.fallbackApiKey }
+        : {}),
       ...(secrets.embeddingApiKey
         ? { GPTR_EMBEDDING_API_KEY: secrets.embeddingApiKey }
         : {}),
@@ -468,6 +511,19 @@ export class RuntimeSettingsStore {
       AO_CONCURRENCY: overrides.concurrency === undefined
         ? this.#baseEnv.AO_CONCURRENCY
         : String(overrides.concurrency),
+      FALLBACK_MODEL_ENABLED: overrides.fallbackEnabled === undefined
+        ? this.#baseEnv.FALLBACK_MODEL_ENABLED
+        : String(overrides.fallbackEnabled),
+      FALLBACK_OPENAI_BASE_URL: overrides.fallbackOpenaiBaseUrl ??
+        this.#baseEnv.FALLBACK_OPENAI_BASE_URL,
+      FALLBACK_AO_PLANNER_MODEL: overrides.fallbackAoPlannerModel ??
+        this.#baseEnv.FALLBACK_AO_PLANNER_MODEL,
+      FALLBACK_AO_VERIFIER_MODEL: overrides.fallbackAoVerifierModel ??
+        this.#baseEnv.FALLBACK_AO_VERIFIER_MODEL,
+      FALLBACK_GPTR_FAST_LLM: overrides.fallbackGptrFastLlm ??
+        this.#baseEnv.FALLBACK_GPTR_FAST_LLM,
+      FALLBACK_GPTR_SMART_LLM: overrides.fallbackGptrSmartLlm ??
+        this.#baseEnv.FALLBACK_GPTR_SMART_LLM,
     };
   }
 
@@ -513,6 +569,10 @@ export class RuntimeSettingsStore {
   }
 }
 
+function publicModelName(value: string, internalPrefix: string): string {
+  return value.startsWith(internalPrefix) ? value.slice(internalPrefix.length) : value;
+}
+
 function retrieverApiKeysFromEnvironment(
   environment: NodeJS.ProcessEnv,
 ): Partial<Record<ResearchRetriever, string>> {
@@ -543,6 +603,12 @@ function stringValue(value: unknown, fallback: string): string {
     throw new Error("required setting must not be empty");
   }
   return result;
+}
+
+function booleanValue(value: unknown, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value === "boolean") return value;
+  return String(value).toLowerCase() === "true";
 }
 
 function optionalStringValue(value: unknown, fallback: string): string {

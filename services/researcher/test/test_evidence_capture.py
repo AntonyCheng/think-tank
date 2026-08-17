@@ -101,7 +101,49 @@ def test_synthesis_context_avoids_duplicate_raw_context_when_report_exists() -> 
 
     assert "# Market" in context
     assert "https://example.com/source" in context
+    assert "verified source" not in context
     assert "RAW-CONTEXT-MUST-NOT-APPEAR" not in context
+
+
+def test_synthesis_context_uses_a_deduplicated_source_directory() -> None:
+    context = render_synthesis_context(
+        "Combine the expert reports.",
+        [
+            {
+                "aoStepId": "market",
+                "report": {"content": "# Market\n\nFinding A."},
+                "claimCitations": [{
+                    "claim": "Finding A is supported by the shared source.",
+                    "sourceIds": ["source-market-1"],
+                }],
+                "sources": [{
+                    "id": "source-market-1",
+                    "visibility": "public",
+                    "url": "https://example.com/source",
+                    "title": "Shared source",
+                    "summary": "Large raw page text must not be repeated.",
+                }],
+            },
+            {
+                "aoStepId": "policy",
+                "report": {"content": "# Policy\n\nFinding B."},
+                "sources": [{
+                    "visibility": "public",
+                    "url": "https://example.com/source#duplicate",
+                    "title": "Shared source copy",
+                    "summary": "Another raw page copy.",
+                }],
+            },
+        ],
+    )
+
+    assert "<upstream_expert_reports>" in context
+    assert "<source_directory>" in context
+    assert context.count("https://example.com/source") == 1
+    assert "source-market-1" in context
+    assert "Verified claim-source bindings" in context
+    assert "Large raw page text" not in context
+    assert "Another raw page copy" not in context
 
 
 def test_synthesis_context_hides_private_source_locator() -> None:

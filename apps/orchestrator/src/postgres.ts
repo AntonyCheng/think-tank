@@ -51,10 +51,35 @@ export class PostgresDatabase {
           status TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL,
-          snapshot_json JSONB NOT NULL
+          snapshot_json JSONB NOT NULL,
+          owner_user_id TEXT
         );
         CREATE INDEX IF NOT EXISTS research_tasks_status_updated
           ON research_tasks(status, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS app_users (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL,
+          username_normalized TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('admin', 'member')),
+          active BOOLEAN NOT NULL DEFAULT true,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          last_login_at TIMESTAMPTZ
+        );
+        CREATE TABLE IF NOT EXISTS app_sessions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+          token_hash TEXT NOT NULL UNIQUE,
+          expires_at TIMESTAMPTZ NOT NULL,
+          revoked_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS app_sessions_active_token
+          ON app_sessions(token_hash) WHERE revoked_at IS NULL;
+        ALTER TABLE research_tasks ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
+        CREATE INDEX IF NOT EXISTS research_tasks_owner_updated
+          ON research_tasks(owner_user_id, updated_at DESC);
         CREATE TABLE IF NOT EXISTS research_task_events (
           task_id TEXT NOT NULL REFERENCES research_tasks(id) ON DELETE CASCADE,
           event_id INTEGER NOT NULL,

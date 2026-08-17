@@ -49,7 +49,7 @@ function taskEvent(id: number, type: TaskEvent["type"]): TaskEvent {
   };
 }
 
-test("closes the event stream after every terminal task event", () => {
+test("forwards terminal events without closing the source during history replay", () => {
   const originalEventSource = globalThis.EventSource;
   Object.defineProperty(globalThis, "EventSource", {
     configurable: true,
@@ -77,9 +77,9 @@ test("closes the event stream after every terminal task event", () => {
       assert.equal(source.closed, false);
       source.emit(taskEvent(2, terminalType));
 
-      assert.equal(source.closed, true);
+      assert.equal(source.closed, false);
       assert.deepEqual(received.map((event) => event.id), [1, 2]);
-      assert.deepEqual(states, ["closed"]);
+      assert.deepEqual(states, []);
       unsubscribe();
     }
   } finally {

@@ -11,10 +11,14 @@
   },
   "dependencies": {
     "agency-orchestrator": "0.12.1",
+    "express": "5.2.1",
+    "express-rate-limit": "8.6.1",
+    "helmet": "8.1.0",
     "markdown-it": "14.3.0",
     "pg": "^8.16.3"
   },
   "devDependencies": {
+    "@types/express": "5.0.3",
     "@types/node": "24.1.0",
     "@types/pg": "^8.15.6",
     "tsx": "4.20.3",

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import MarkdownIt from "markdown-it";
-import { Button, Empty, Popover, Tag } from "antd";
-import { Bubble, Sender, ThoughtChain, type ThoughtChainItem } from "@ant-design/x";
+import { Button, Empty, Popover, Tag, Tooltip } from "antd";
+import { Sender, ThoughtChain, type ThoughtChainItem } from "@ant-design/x";
 import {
   CheckCircleFilled,
   ClockCircleOutlined,
@@ -16,9 +16,9 @@ import {
   UpOutlined,
 } from "@ant-design/icons";
 import { activityFromEvent, type TaskEvent } from "../../domain/research-events";
-import type { ResearchTaskSnapshot, TaskStatus, WorkflowStep } from "../../domain/task";
+import type { ExpertEvidenceBundle, ResearchRunProgress, ResearchTaskSnapshot, TaskStatus, WorkflowStep } from "../../domain/task";
 import type { AgentCatalogEntry } from "../../domain/agent";
-import { answerResearchInput, cancelResearchTask, getAgentCatalog, getTaskDiagnostics, retryResearchTask } from "../../services/api-client";
+import { answerResearchInput, cancelResearchTask, continueResearchTask, getAgentCatalog, getExpertResearchResult, getTaskDiagnostics, retryResearchTask } from "../../services/api-client";
 import { activitiesFromEvents, formatElapsed, formatTime } from "../../services/task-events";
 import { useOrderedEvents, useResearchStore } from "../../stores/research-store";
 import { ResearchLaunch } from "../research-launch/ResearchLaunch";
@@ -36,7 +36,7 @@ interface ResearchWorkspaceProps {
 }
 
 interface ExpertRuntime {
-  status: "waiting" | "working" | "completed" | "failed" | "skipped";
+  status: "waiting" | "queued" | "working" | "completed" | "failed" | "skipped";
   event?: TaskEvent;
 }
 
@@ -77,6 +77,7 @@ const researchPhaseCopy: Record<string, string> = {
 
 const expertRuntimeCopy: Record<ExpertRuntime["status"], string> = {
   waiting: "等待执行",
+  queued: "排队中",
   working: "执行中",
   completed: "已完成",
   failed: "未完成",
@@ -91,7 +92,10 @@ function researchPhaseLabel(phase: string): string {
   return researchPhaseCopy[phase] ?? "研究处理中";
 }
 
-function expertRuntime(events: TaskEvent[]): Map<string, ExpertRuntime> {
+function expertRuntime(
+  events: TaskEvent[],
+  researchRuns: ResearchRunProgress[] = [],
+): Map<string, ExpertRuntime> {
   const state = new Map<string, ExpertRuntime>();
   for (const event of events) {
     if (event.type === "step.started" && typeof event.data.stepId === "string") {
@@ -105,6 +109,18 @@ function expertRuntime(events: TaskEvent[]): Map<string, ExpertRuntime> {
           : "completed";
       state.set(event.data.stepId, { status: outcome, event });
     }
+  }
+  for (const run of researchRuns) {
+    if (run.state !== "queued" && run.state !== "running") continue;
+    const previous = state.get(run.aoStepId);
+    if (
+      previous?.status === "completed" ||
+      previous?.status === "failed" ||
+      previous?.status === "skipped"
+    ) continue;
+    state.set(run.aoStepId, {
+      status: run.state === "queued" ? "queued" : "working",
+    });
   }
   return state;
 }
@@ -149,8 +165,11 @@ function researchFailurePresentation(
     .map(([stepId]) => stepNames.get(stepId) ?? stepId);
   const retrieverUnavailable = events
     .map(activityFromEvent)
-    .find((activity) => activity?.message.includes("暂时不可用"));
-  const noUsableSources = snapshot.researchTelemetry?.summary.uniqueSourceCount === 0;
+    .find((activity) => activity?.aoStepId === snapshot.continuation?.failedStepId && activity?.message.includes("暂时不可用"));
+  const failedRun = snapshot.researchTelemetry?.runs.find((run) =>
+    run.state === "failed" && run.aoStepId === snapshot.continuation?.failedStepId
+  );
+  const failedWithoutSources = failedRun?.sourceCount === 0;
   const summaryParts = ["专家团队已创建并开始执行。"];
   if (failedSteps.length) summaryParts.push(`${failedSteps.length} 位专家未能完成研究。`);
   if (skippedSteps.length) summaryParts.push(`${skippedSteps.length} 个汇总步骤因依赖失败未执行。`);
@@ -160,12 +179,14 @@ function researchFailurePresentation(
     summary: summaryParts.join(""),
     detail: retrieverUnavailable
       ? `${retrieverUnavailable.message} 未获取到可用于专家研究的网页资料。`
-      : noUsableSources
-        ? "网页搜索未返回可用资料，无法为专家研究提供所需上下文。"
+      : failedRun && snapshot.continuation
+        ? `${snapshot.continuation.failedStepName}在${researchPhaseLabel(failedRun.phase)}阶段失败${failedWithoutSources ? "，未获得可用来源" : ""}。`
         : failedSteps.length
           ? `未完成的专家步骤：${failedSteps.join("、")}。`
           : undefined,
-    hint: "请检查已选搜索引擎与网络连接后，重新发起研究。",
+    hint: snapshot.continuation
+      ? `可复用 ${snapshot.continuation.completedExpertCount} 位已完成专家的研究成果，仅重试失败专家并继续综合。`
+      : "请检查已选搜索引擎与网络连接后，重新发起研究。",
   };
 }
 
@@ -225,6 +246,7 @@ function ExpertRosterItem({
   >
     <button
       className={`expert-row ${selected ? "is-selected" : ""}`}
+      data-expert-step-id={stepId}
       onClick={() => onSelect(stepId)}
       type="button"
     >
@@ -317,13 +339,16 @@ function ResearchFailure({
   snapshot,
   events,
   onRetry,
+  onContinue,
 }: {
   snapshot: ResearchTaskSnapshot;
   events: TaskEvent[];
   onRetry: (task: ResearchTaskSnapshot) => void;
+  onContinue: (task: ResearchTaskSnapshot) => void;
 }) {
   const [detail, setDetail] = useState("");
   const [retrying, setRetrying] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [retryError, setRetryError] = useState("");
   const presentation = researchFailurePresentation(snapshot, events);
   useEffect(() => {
@@ -333,7 +358,24 @@ function ResearchFailure({
       .catch(() => undefined);
     return () => { active = false; };
   }, [snapshot.id]);
-  const visibleError = presentation.detail || detail || snapshot.error || "研究任务在启动阶段遇到问题，尚未开始资料检索。";
+  const rawDetail = detail || snapshot.error;
+  const visibleRawDetail = presentation.heading === "专家研究未完成"
+    ? rawDetail?.replace(/\s*AO workflow failed\.?\s*$/iu, "").trim()
+    : rawDetail;
+  const visibleError = [presentation.detail, visibleRawDetail]
+    .filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index)
+    .join(" ") || "研究任务在启动阶段遇到问题，尚未开始资料检索。";
+  const continueResearch = async () => {
+    setContinuing(true);
+    setRetryError("");
+    try {
+      onContinue(await continueResearchTask(snapshot.id));
+    } catch (reason) {
+      setRetryError(reason instanceof Error ? reason.message : "继续研究失败，请稍后再试。");
+    } finally {
+      setContinuing(false);
+    }
+  };
   const retry = async () => {
     setRetrying(true);
     setRetryError("");
@@ -357,11 +399,57 @@ function ResearchFailure({
       </div>
       <p className="research-failure-hint">{presentation.hint}</p>
       <div className="research-failure-actions">
-        <Button type="primary" loading={retrying} onClick={retry}>重新研究</Button>
+        {snapshot.continuation && <Button type="primary" loading={continuing} onClick={continueResearch}>继续研究</Button>}
+        <Button loading={retrying} onClick={retry}>重新研究</Button>
       </div>
       {retryError && <p className="research-failure-retry-error" role="alert">{retryError}</p>}
     </section>
   );
+}
+
+function CompletedExpertReport({
+  expert,
+  agent,
+  bundle,
+}: {
+  expert: WorkflowStep;
+  agent?: AgentCatalogEntry;
+  bundle: ExpertEvidenceBundle;
+}) {
+  const reportHtml = useMemo(
+    () => taskMarkdown.render(bundle.report.content),
+    [bundle.report.content],
+  );
+  const publicSources = bundle.sources.filter((source) => source.visibility === "public");
+
+  return <section className="expert-stage completed-expert-report">
+    <div className="current-expert-header">
+      <span className="expert-avatar expert-avatar-large">{agent?.emoji ?? expert.name.slice(0, 1)}</span>
+      <div>
+        <p>已完成研究</p>
+        <h1>{expert.name}</h1>
+        <span>{expert.mode ? researchModeLabel(expert.mode) : "研究专家"}</span>
+      </div>
+      <Tag className="runtime-tag status-completed" icon={<CheckCircleFilled />}>已完成</Tag>
+    </div>
+    <article className="completed-expert-report-card">
+      <div className="completed-expert-report-heading">
+        <span>研究成果</span>
+        <small>第 {bundle.report.revision} 版</small>
+      </div>
+      <div className="completed-expert-report-content" dangerouslySetInnerHTML={{ __html: reportHtml }} />
+    </article>
+    {publicSources.length > 0 && <section className="completed-expert-sources">
+      <div className="section-heading"><span>本次使用的来源</span><small>{publicSources.length} 个来源</small></div>
+      <ol>
+        {publicSources.map((source, index) => <li key={`${index}-${source.url ?? source.title}`}>
+          {source.url
+            ? <a href={source.url} rel="noreferrer" target="_blank">{source.title}</a>
+            : <span>{source.title}</span>}
+        </li>)}
+      </ol>
+    </section>}
+  </section>;
 }
 
 function ExpertRoster({
@@ -370,12 +458,14 @@ function ExpertRoster({
   agentsByRole,
   selectedId,
   onSelect,
+  compact = false,
 }: {
   steps: WorkflowStep[];
   runtimes: Map<string, ExpertRuntime>;
   agentsByRole: ReadonlyMap<string, AgentCatalogEntry>;
   selectedId?: string;
   onSelect: (id: string) => void;
+  compact?: boolean;
 }) {
   const expertSteps = useMemo(() => steps.filter((step) => step.type === "expert"), [steps]);
   const pageSize = 6;
@@ -384,6 +474,7 @@ function ExpertRoster({
     (_, pageIndex) => expertSteps.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize),
   ), [expertSteps]);
   const [pageIndex, setPageIndex] = useState(0);
+  const compactListRef = useRef<HTMLDivElement>(null);
   const activeStepId = selectedId
     ?? expertSteps.find((step) => runtimes.get(step.id)?.status === "working")?.id
     ?? expertSteps[0]?.id;
@@ -395,6 +486,43 @@ function ExpertRoster({
     const activeIndex = expertSteps.findIndex((step) => step.id === activeStepId);
     if (activeIndex >= 0) setPageIndex(Math.floor(activeIndex / pageSize));
   }, [activeStepId]);
+  useEffect(() => {
+    if (!compact || !activeStepId) return;
+    const activeItem = compactListRef.current?.querySelector<HTMLElement>(
+      `[data-expert-step-id="${CSS.escape(activeStepId)}"]`,
+    );
+    activeItem?.scrollIntoView({ block: "nearest" });
+  }, [activeStepId, compact]);
+
+  const expertItem = (step: WorkflowStep, index: number) => {
+    const runtime = runtimes.get(step.id) ?? { status: "waiting" as const };
+    const agent = agentsByRole.get(step.role);
+    return <ExpertRosterItem
+      agent={agent}
+      index={index}
+      key={step.id}
+      mode={step.mode ? researchModeLabel(step.mode) : "研究专家"}
+      name={step.name}
+      onSelect={onSelect}
+      runtime={runtime}
+      selected={activeStepId === step.id}
+      stepId={step.id}
+    />;
+  };
+
+  if (compact) {
+    return (
+      <section className="expert-roster is-compact" aria-label="专家组">
+        <div className="section-heading">
+          <span>专家组</span>
+          <div className="expert-roster-meta"><small>{expertSteps.length} 位专家</small></div>
+        </div>
+        <div className="expert-scroll-list" ref={compactListRef}>
+          {expertSteps.map(expertItem)}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="expert-roster" aria-label="专家组">
@@ -412,22 +540,7 @@ function ExpertRoster({
         <div className="expert-carousel-viewport">
           <div className="expert-carousel-track" style={{ transform: `translateX(-${pageIndex * 100}%)` }}>
             {pages.map((page, currentPageIndex) => <div className="expert-carousel-page" key={currentPageIndex}>
-              {page.map((step, index) => {
-                const runtime = runtimes.get(step.id) ?? { status: "waiting" as const };
-                const agent = agentsByRole.get(step.role);
-                const stepIndex = currentPageIndex * pageSize + index;
-                return <ExpertRosterItem
-                  agent={agent}
-                  index={stepIndex}
-                  key={step.id}
-                  mode={step.mode ? researchModeLabel(step.mode) : "研究专家"}
-                  name={step.name}
-                  onSelect={onSelect}
-                  runtime={runtime}
-                  selected={activeStepId === step.id}
-                  stepId={step.id}
-                />;
-              })}
+              {page.map((step, index) => expertItem(step, currentPageIndex * pageSize + index))}
             </div>)}
           </div>
         </div>
@@ -437,6 +550,30 @@ function ExpertRoster({
       </div>
     </section>
   );
+}
+
+function WorkspaceTitle({ topic }: { topic: string }) {
+  const topicRef = useRef<HTMLElement>(null);
+  const [isTruncated, setIsTruncated] = useState(false);
+
+  useLayoutEffect(() => {
+    const title = topicRef.current;
+    if (!title) return undefined;
+    const updateTruncation = () => setIsTruncated(
+      title.scrollHeight > title.clientHeight + 1 || title.scrollWidth > title.clientWidth + 1,
+    );
+    const observer = new ResizeObserver(updateTruncation);
+    observer.observe(title);
+    updateTruncation();
+    return () => observer.disconnect();
+  }, [topic]);
+
+  return <div className="workspace-title">
+    <span>深度研究</span>
+    <Tooltip mouseEnterDelay={0.25} title={isTruncated ? topic : undefined}>
+      <strong ref={topicRef}>{topic}</strong>
+    </Tooltip>
+  </div>;
 }
 
 function CurrentExpert({
@@ -662,6 +799,12 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
   const events = useOrderedEvents(store.events);
   const snapshot = store.snapshot;
   const [selectedExpertId, setSelectedExpertId] = useState<string>();
+  const [selectedExpertResult, setSelectedExpertResult] = useState<{
+    stepId: string;
+    bundle: ExpertEvidenceBundle;
+  }>();
+  const [expertResultLoading, setExpertResultLoading] = useState(false);
+  const [expertResultError, setExpertResultError] = useState("");
   const [canceling, setCanceling] = useState(false);
   const [agents, setAgents] = useState<AgentCatalogEntry[]>([]);
   const [now, setNow] = useState(() => Date.now());
@@ -675,7 +818,10 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [hasLiveDuration]);
-  const runtimes = useMemo(() => expertRuntime(events), [events]);
+  const runtimes = useMemo(
+    () => expertRuntime(events, snapshot?.researchTelemetry?.runs),
+    [events, snapshot?.researchTelemetry?.runs],
+  );
   const agentsByRole = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const steps = snapshot?.workflowPlan?.steps ?? [];
   const expertSteps = useMemo(() => steps.filter((step) => step.type === "expert"), [steps]);
@@ -683,6 +829,20 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
     ? selectedExpertId
     : expertSteps.find((step) => runtimes.get(step.id)?.status === "working")?.id ?? expertSteps[0]?.id;
   const canCancel = snapshot && ["queued", "running", "needs_input", "recoverable"].includes(snapshot.status);
+  const selectedExpert = selectedExpertId
+    ? expertSteps.find((step) => step.id === selectedExpertId)
+    : undefined;
+  const selectedRuntime = selectedExpert
+    ? runtimes.get(selectedExpert.id)
+    : undefined;
+  const snapshotCompletedBundle = selectedExpert && selectedRuntime?.status === "completed"
+    ? snapshot?.evidenceBundles?.filter((bundle) => bundle.aoStepId === selectedExpert.id).at(-1)
+    : undefined;
+  const selectedCompletedBundle = snapshotCompletedBundle ??
+    (selectedExpertResult && selectedExpertResult.stepId === selectedExpert?.id
+      ? selectedExpertResult.bundle
+      : undefined);
+  const selectedCompletedExpert = Boolean(selectedExpert && selectedRuntime?.status === "completed");
   const connection = snapshot ? connectionCopy(snapshot.status, store.connection) : undefined;
   const cancel = async () => {
     if (!snapshot) return;
@@ -695,6 +855,29 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
     getAgentCatalog().then((catalog) => { if (active) setAgents(catalog); }).catch(() => undefined);
     return () => { active = false; };
   }, []);
+  useEffect(() => {
+    if (!snapshot || !selectedExpert || selectedRuntime?.status !== "completed") {
+      setExpertResultLoading(false);
+      setExpertResultError("");
+      return undefined;
+    }
+    if (snapshotCompletedBundle || selectedExpertResult?.stepId === selectedExpert.id) {
+      setExpertResultLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setExpertResultLoading(true);
+    setExpertResultError("");
+    getExpertResearchResult(snapshot.id, selectedExpert.id)
+      .then((bundle) => {
+        if (active) setSelectedExpertResult({ stepId: selectedExpert.id, bundle });
+      })
+      .catch((reason) => {
+        if (active) setExpertResultError(reason instanceof Error ? reason.message : "读取专家研究成果失败。");
+      })
+      .finally(() => { if (active) setExpertResultLoading(false); });
+    return () => { active = false; };
+  }, [selectedExpert, selectedExpertResult?.stepId, selectedRuntime?.status, snapshot, snapshotCompletedBundle]);
   useEffect(() => {
     if (!snapshot) return;
     const handoff = reportHandoff.current;
@@ -741,25 +924,42 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
     <main className="workspace-shell">
       <header className="workspace-header">
         <BrandLockup onClick={onExit} />
-        <div className="workspace-title"><span>深度研究</span><strong>{snapshot.topic}</strong></div>
+        <WorkspaceTitle topic={snapshot.topic} />
         <div className="workspace-actions"><span className={`connection-label ${connection?.className ?? ""}`}>{connection?.label}</span><Button onClick={onExit}>返回首页</Button>{snapshot.output && <Button className="report-open-button" onClick={() => onOpenReport(snapshot.id, snapshot.topic)} onFocus={() => onPreloadReport(snapshot.id)} onMouseEnter={() => onPreloadReport(snapshot.id)}>查看报告</Button>}{canCancel && <Button className="stop-research-button" loading={canceling} onClick={cancel}>停止研究</Button>}</div>
       </header>
       <div className="workspace-layout">
         <aside className="workspace-sidebar">
-          <Bubble placement="end" content={snapshot.topic} />
+          {expertSteps.length > 0 && <ExpertRoster agentsByRole={agentsByRole} compact steps={steps} runtimes={runtimes} selectedId={activeExpertId} onSelect={setSelectedExpertId} />}
           <ResearchTimeline events={events} steps={steps} />
         </aside>
         <section className="workspace-main">
           <PendingInput snapshot={snapshot} onUpdate={store.updateSnapshot} />
-          {snapshot.status === "failed"
-            ? <ResearchFailure snapshot={snapshot} events={events} onRetry={(task) => onOpenTask(task.id, task.topic)} />
+          {selectedExpert && selectedCompletedBundle
+            ? <CompletedExpertReport
+              agent={agentsByRole.get(selectedExpert.role)}
+              bundle={selectedCompletedBundle}
+              expert={selectedExpert}
+            />
+            : selectedCompletedExpert
+              ? <section className="expert-stage completed-expert-report">
+                <Empty description={expertResultError || (expertResultLoading ? "正在读取已完成的研究成果" : "未找到已完成的研究成果")} />
+              </section>
+            : snapshot.status === "failed"
+            ? <ResearchFailure
+              snapshot={snapshot}
+              events={events}
+              onContinue={(task) => {
+                store.updateSnapshot(task);
+                store.reconnect();
+              }}
+              onRetry={(task) => onOpenTask(task.id, task.topic)}
+            />
             : <CurrentExpert agentsByRole={agentsByRole} snapshot={snapshot} steps={steps} runtimes={runtimes} selectedId={activeExpertId} events={events} />}
           <footer className="workspace-summary">
             <span>研究耗时 {formatElapsed(liveElapsed(snapshot, now))}</span>
             <span>已收集 {snapshot.researchTelemetry?.summary.uniqueSourceCount ?? 0} 个来源</span>
             <span>专家步骤 {steps.length}</span>
           </footer>
-          {expertSteps.length > 0 && <ExpertRoster agentsByRole={agentsByRole} steps={steps} runtimes={runtimes} selectedId={activeExpertId} onSelect={setSelectedExpertId} />}
         </section>
       </div>
       {snapshot.error && snapshot.status !== "failed" && <div className="workspace-error"><CloseCircleFilled />{snapshot.error}</div>}

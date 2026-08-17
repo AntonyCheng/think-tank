@@ -6,6 +6,7 @@ import {
 
 export interface RuntimeSettings {
   planner: LLMConfig & { api_key: string; model: string };
+  fallback?: ModelProviderSettings;
   verifierModel?: string;
   gptrServiceUrl: string;
   retriever: ResearchRetriever;
@@ -30,6 +31,15 @@ export interface RuntimeSettings {
   };
 }
 
+export interface ModelProviderSettings {
+  baseUrl: string;
+  apiKey: string;
+  plannerModel: string;
+  verifierModel: string;
+  fastLlm: string;
+  smartLlm: string;
+}
+
 export function settingsFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): RuntimeSettings {
@@ -45,6 +55,7 @@ export function settingsFromEnv(
   const gptrEmbedding = normalizeEmbedding(
     required(env, "GPTR_EMBEDDING"),
   );
+  const fallback = fallbackProviderFromEnv(env);
   const retrievers = parseRetrievers(env.RETRIEVER ?? "duckduckgo");
   const retriever = retrievers[0]!;
   const timeZone = applicationTimeZone(env.APP_TIMEZONE);
@@ -101,6 +112,7 @@ export function settingsFromEnv(
       model: plannerModel,
       max_tokens: plannerMaxTokens,
     },
+    ...(fallback ? { fallback } : {}),
     verifierModel: env.AO_VERIFIER_MODEL || undefined,
     gptrServiceUrl: env.GPTR_SERVICE_URL ?? "http://127.0.0.1:8010",
     retriever,
@@ -122,6 +134,51 @@ export function settingsFromEnv(
     taskExecutionTimeoutMs,
     gptrTaskConcurrencyBudget,
     gptrDeepLimits,
+  };
+}
+
+function fallbackProviderFromEnv(
+  env: NodeJS.ProcessEnv,
+): ModelProviderSettings | undefined {
+  const enabled = env.FALLBACK_MODEL_ENABLED?.trim().toLowerCase();
+  if (enabled === "false") {
+    return undefined;
+  }
+  const values = {
+    baseUrl: env.FALLBACK_OPENAI_BASE_URL?.trim() ?? "",
+    apiKey: env.FALLBACK_OPENAI_API_KEY?.trim() ?? "",
+    plannerModel: env.FALLBACK_AO_PLANNER_MODEL?.trim() ?? "",
+    verifierModel: env.FALLBACK_AO_VERIFIER_MODEL?.trim() ?? "",
+    fastLlm: env.FALLBACK_GPTR_FAST_LLM?.trim() ?? "",
+    smartLlm: env.FALLBACK_GPTR_SMART_LLM?.trim() ?? "",
+  };
+  // A stored API key alone must not activate the backup route. This allows an
+  // administrator to save that secret before filling in the provider fields.
+  const hasProviderFields = [
+    values.baseUrl,
+    values.plannerModel,
+    values.verifierModel,
+    values.fastLlm,
+    values.smartLlm,
+  ].some(Boolean);
+  if (enabled !== "true" && !hasProviderFields) return undefined;
+  const requiredValues: Array<[string, string]> = [
+    ["FALLBACK_OPENAI_BASE_URL", values.baseUrl],
+    ["FALLBACK_OPENAI_API_KEY", values.apiKey],
+    ["FALLBACK_AO_PLANNER_MODEL", values.plannerModel],
+    ["FALLBACK_AO_VERIFIER_MODEL", values.verifierModel],
+    ["FALLBACK_GPTR_FAST_LLM", values.fastLlm],
+    ["FALLBACK_GPTR_SMART_LLM", values.smartLlm],
+  ];
+  const missing = requiredValues.find(([, value]) => !value);
+  if (missing) throw new Error(`${missing[0]} is required when fallback provider is configured.`);
+  return {
+    baseUrl: values.baseUrl,
+    apiKey: values.apiKey,
+    plannerModel: values.plannerModel,
+    verifierModel: values.verifierModel,
+    fastLlm: normalizeGptrModel(values.fastLlm),
+    smartLlm: normalizeGptrModel(values.smartLlm),
   };
 }
 

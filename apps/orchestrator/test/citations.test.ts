@@ -44,6 +44,8 @@ test("normalizes verified source links into numbered report citations", () => {
     result.markdown,
     /\n {4}https:\/\/stats\.example\/ai-2026/u,
   );
+  assert.match(result.markdown, /## 本次检索来源（正文未直接引用）/u);
+  assert.match(result.markdown, /https:\/\/policy\.example\/rules/u);
   assert.doesNotMatch(result.markdown, /legacy list/u);
   assert.deepEqual(result.citations, [{
     id: 1,
@@ -53,6 +55,31 @@ test("normalizes verified source links into numbered report citations", () => {
   assert.equal(result.numericClaimParagraphs, 1);
   assert.equal(result.citedNumericClaimParagraphs, 1);
   assert.deepEqual(result.warnings, []);
+});
+
+test("keeps verified but uncited research sources separate from body citations", () => {
+  const citedUrl = "https://stats.example/2026";
+  const supplementaryUrl = "https://policy.example/guide";
+  const result = normalizeFinalCitations(
+    `数据增长 12%。[统计公报](${citedUrl})`,
+    [
+      { title: "统计公报", url: citedUrl },
+      { title: "政策指南", url: supplementaryUrl },
+    ],
+  );
+
+  assert.equal(result.citations.length, 1);
+  assert.match(result.markdown, /## 参考来源/u);
+  assert.match(result.markdown, /## 本次检索来源（正文未直接引用）/u);
+  assert.match(result.markdown, /政策指南/u);
+  assert.match(result.markdown, /policy\.example\/guide/u);
+  assert.equal(
+    formatCitationReport(result.markdown, [
+      { title: "统计公报", url: citedUrl },
+      { title: "政策指南", url: supplementaryUrl },
+    ]),
+    result.markdown,
+  );
 });
 
 test("keeps semantic links and appends the matching numbered citation", () => {

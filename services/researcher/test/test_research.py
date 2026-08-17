@@ -228,6 +228,32 @@ class TrackingExecutor(FakeExecutor):
         self.closed = True
 
 
+def test_execution_capacity_endpoint_updates_the_running_executor(
+    monkeypatch,
+) -> None:
+    class CapacityExecutor(FakeExecutor):
+        async def update_worker_concurrency(
+            self,
+            concurrency: int,
+        ) -> dict[str, int]:
+            return {"concurrency": concurrency, "active": 2, "queued": 1}
+
+    monkeypatch.setattr(
+        main,
+        "research_executor",
+        CapacityExecutor(),
+        raising=False,
+    )
+
+    response = TestClient(main.app).post(
+        "/runtime/execution-capacity",
+        json={"concurrency": 4},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"concurrency": 4, "active": 2, "queued": 1}
+
+
 def test_research_endpoint_delegates_to_executor(monkeypatch) -> None:
     executor = FakeExecutor()
     monkeypatch.setattr(main, "research_executor", executor, raising=False)
@@ -246,6 +272,9 @@ def test_research_endpoint_delegates_to_executor(monkeypatch) -> None:
             "task": "Investigate the evidence.",
             "baseUrl": "https://models.example/v1",
             "apiKey": "request-secret",
+            "fallbackBaseUrl": "https://backup.example/v1",
+            "fallbackApiKey": "backup-secret",
+            "fallbackFastLlm": "openai:backup-fast-model",
         },
     )
 
@@ -254,6 +283,9 @@ def test_research_endpoint_delegates_to_executor(monkeypatch) -> None:
     assert len(executor.requests) == 1
     assert executor.requests[0].system_prompt == "Complete expert identity."
     assert executor.requests[0].api_key == "request-secret"
+    assert executor.requests[0].fallback_base_url == "https://backup.example/v1"
+    assert executor.requests[0].fallback_api_key == "backup-secret"
+    assert executor.requests[0].fallback_fast_llm == "openai:backup-fast-model"
 
 
 def test_application_shutdown_closes_research_executor(monkeypatch) -> None:
@@ -394,23 +426,15 @@ def test_research_contract_and_active_configuration(monkeypatch) -> None:
     }
 
     query = FakeResearcher.init_kwargs["query"]
-    assert "complete expert identity" in query
-    assert "Investigate the evidence" in query
-    assert "Current local date: 2026-07-29" in query
-    assert "Current local time: 11:20:00" in query
-    assert "Weekday: 星期三" in query
-    assert "Time zone: Asia/Shanghai" in query
-    assert "Do not present a historical event as a current event" in query
-    assert (
-        "Recent N-year requests include the current year through the task "
-        "start date" in query
-    )
+    assert query == "Investigate the evidence."
     assert FakeResearcher.init_kwargs["report_type"] == "custom_report"
     assert FakeResearcher.init_kwargs["report_source"] == "web"
     assert FakeResearcher.init_kwargs["agent"] == "Agency Orchestrator Expert"
     role = FakeResearcher.init_kwargs["role"]
     assert "Current local date: 2026-07-29" in role
     assert "You are the complete expert identity." in role
+    assert "Investigate the evidence." in role
+    assert "<citation_contract>" in role
 
     assert main.os.environ["RETRIEVER"] == "duckduckgo"
     assert main.os.environ["OPENAI_BASE_URL"] == "https://models.example/v1"
@@ -430,6 +454,16 @@ def test_research_contract_and_active_configuration(monkeypatch) -> None:
     assert FakeResearcher.init_openai_api_key == "request-embedding-secret"
     assert main.os.environ["OPENAI_BASE_URL"] == "https://models.example/v1"
     assert main.os.environ["OPENAI_API_KEY"] == "secret"
+
+
+def test_search_query_seed_is_compact_and_excludes_internal_instructions() -> None:
+    task = "  研究中国企业供应链韧性。\n\n" + ("补充背景信息。" * 100)
+
+    query = main.research_worker._build_search_query(task)
+
+    assert len(query) == 320
+    assert "\n" not in query
+    assert query.startswith("研究中国企业供应链韧性。 补充背景信息。")
 
 
 def test_research_rejects_deep_profile_beyond_deployment_limit(
@@ -667,6 +701,7 @@ def test_synthesis_mode_skips_research_and_writes_from_dependency_context(
         event["type"]
         for event in response.json()["events"]
     ] == [
+        "synthesis.compression",
         "synthesis.started",
         "synthesis.completed",
     ]

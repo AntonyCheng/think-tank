@@ -1,4 +1,5 @@
 import type {
+  ExpertEvidenceBundle,
   ResearchHistoryFilter,
   ResearchHistoryPage,
   ResearchTaskDiagnostic,
@@ -12,7 +13,6 @@ import type {
 } from "../domain/settings";
 import type { AgentCatalogEntry } from "../domain/agent";
 import {
-  isTerminalTaskEvent,
   TASK_EVENT_TYPES,
   type TaskEvent,
   type TaskEventType,
@@ -37,6 +37,16 @@ export interface ResearchTopicRecommendationResponse {
   nextRefreshAt: string | null;
   source: "generated" | "fallback";
   refreshing: boolean;
+}
+
+export interface ManagedUser {
+  id: string;
+  username: string;
+  role: "admin" | "member";
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt?: string;
 }
 
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
@@ -71,6 +81,10 @@ export function uploadResearchDocument(taskId: string, name: string, contentBase
 
 export function getResearchTask(taskId: string): Promise<ResearchTaskSnapshot> {
   return requestJson<ResearchTaskSnapshot>(`/api/tasks/${encodeURIComponent(taskId)}`);
+}
+
+export function getExpertResearchResult(taskId: string, stepId: string): Promise<ExpertEvidenceBundle> {
+  return requestJson(`/api/tasks/${encodeURIComponent(taskId)}/experts/${encodeURIComponent(stepId)}`);
 }
 
 export async function getTaskDiagnostics(taskId: string): Promise<ResearchTaskDiagnostic[]> {
@@ -122,16 +136,43 @@ export function getRuntimeSettings(): Promise<RuntimeSettings> {
   return requestJson<RuntimeSettings>("/api/settings");
 }
 
-export function updateRuntimeSettings(input: RuntimeSettingsUpdate): Promise<RuntimeSettingsSaveResult> {
-  return requestSettingsSave("/api/settings", input, "PUT");
+export function updateRuntimeSettings(
+  input: RuntimeSettingsUpdate,
+  scope: "models" | "fallbackModels" | "embedding" | "retrievers" | "scheduling" = "models",
+): Promise<RuntimeSettingsSaveResult> {
+  return requestSettingsSave("/api/settings", { ...input, scope }, "PUT");
 }
 
 export function preflightRuntimeSettings(
   input: RuntimeSettingsUpdate,
-  scope: "models" | "embedding" | "retrievers",
+  scope: "models" | "fallbackModels" | "embedding" | "retrievers",
 ): Promise<SettingsPreflightCheck[]> {
   return requestSettingsSave("/api/settings/preflight", { ...input, scope }, "POST")
     .then((result) => result.checks);
+}
+
+export function listManagedUsers(): Promise<{ users: ManagedUser[] }> {
+  return requestJson<{ users: ManagedUser[] }>("/api/admin/users");
+}
+
+export function createManagedUser(input: { username: string; password: string; role: "admin" | "member" }): Promise<{ user: ManagedUser }> {
+  return requestJson<{ user: ManagedUser }>("/api/admin/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateManagedUser(id: string, input: { active?: boolean; role?: "admin" | "member"; password?: string }): Promise<{ user: ManagedUser }> {
+  return requestJson<{ user: ManagedUser }>(`/api/admin/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteManagedUser(id: string): Promise<void> {
+  await requestJson(`/api/admin/users/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 async function requestSettingsSave(
@@ -175,6 +216,10 @@ export function retryResearchTask(taskId: string) {
   return requestJson<ResearchTaskSnapshot>(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
 }
 
+export function continueResearchTask(taskId: string) {
+  return requestJson<ResearchTaskSnapshot>(`/api/tasks/${encodeURIComponent(taskId)}/continue`, { method: "POST" });
+}
+
 export function subscribeToTaskEvents(
   taskId: string,
   onEvent: (event: TaskEvent) => void,
@@ -187,10 +232,6 @@ export function subscribeToTaskEvents(
       const payload = JSON.parse(message.data) as TaskEvent;
       if (payload && typeof payload.id === "number") {
         onEvent(payload);
-        if (isTerminalTaskEvent(payload)) {
-          source.close();
-          onState("closed");
-        }
       }
     } catch {
       // Ignore malformed event frames; the snapshot remains the source of truth.

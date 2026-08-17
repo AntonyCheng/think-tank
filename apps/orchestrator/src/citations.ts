@@ -111,7 +111,9 @@ export function normalizeFinalCitations(
 
   const sections = [
     normalizedBody,
-    preserveSemanticLinks ? "" : referenceSection(citations),
+    ...(preserveSemanticLinks
+      ? []
+      : referenceSections(citations, observedSources)),
   ].filter(
     Boolean,
   );
@@ -133,7 +135,7 @@ export function formatCitationReport(
 ): string {
   const body = stripReferenceSections(markdown);
   const formatted = formatBodyCitations(body, sources);
-  return [formatted.markdown, referenceSection(formatted.citations)]
+  return [formatted.markdown, ...referenceSections(formatted.citations, sources)]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -272,6 +274,38 @@ function referenceSection(citations: readonly VerifiedCitation[]): string {
   return ["## 参考来源", "", ...entries].join("\n").trim();
 }
 
+function referenceSections(
+  citations: readonly VerifiedCitation[],
+  observedSources: readonly ObservedSource[],
+): string[] {
+  const cited = new Set(
+    citations.map((citation) => canonicalUrl(citation.url)).filter(Boolean),
+  );
+  const supplementary = observedSources.filter((source) => {
+    const url = canonicalUrl(source.url);
+    return url && !cited.has(url);
+  });
+  return [
+    referenceSection(citations),
+    supplementarySourceSection(supplementary),
+  ].filter(Boolean);
+}
+
+function supplementarySourceSection(
+  sources: readonly ObservedSource[],
+): string {
+  if (sources.length === 0) return "";
+  const entries = sources.flatMap((source) => [
+    `- [${escapeMarkdownLinkLabel(conciseSourceTitle(source))}](${source.url})`,
+    `  ${source.url}`,
+  ]);
+  return [
+    "## 本次检索来源（正文未直接引用）",
+    "",
+    ...entries,
+  ].join("\n").trim();
+}
+
 function stripReferenceSections(markdown: string): string {
   const headings = [...markdown.matchAll(MARKDOWN_HEADING)].map((match) => ({
     start: match.index ?? 0,
@@ -318,7 +352,12 @@ function isReferenceHeadingLabel(value: string): boolean {
   if (
     /^(?:references?|sources?)(?:\s*[（(](?:references?|sources?)[）)])?$/u
       .test(plainLabel) ||
-    ["\u53c2\u8003\u6765\u6e90", "\u53c2\u8003\u6587\u732e", "\u5df2\u9a8c\u8bc1\u6765\u6e90"].includes(plainLabel)
+    [
+      "\u53c2\u8003\u6765\u6e90",
+      "\u53c2\u8003\u6587\u732e",
+      "\u5df2\u9a8c\u8bc1\u6765\u6e90",
+      "\u672c\u6b21\u68c0\u7d22\u6765\u6e90\uff08\u6b63\u6587\u672a\u76f4\u63a5\u5f15\u7528\uff09",
+    ].includes(plainLabel)
   ) {
     return true;
   }

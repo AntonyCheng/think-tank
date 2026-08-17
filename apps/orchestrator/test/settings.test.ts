@@ -43,6 +43,48 @@ test("loads the deployment-global v1 settings and normalizes GPTR models", () =>
   });
 });
 
+test("loads a complete optional fallback OpenAI-compatible provider", () => {
+  const settings = settingsFromEnv({
+    OPENAI_API_KEY: "primary-key",
+    OPENAI_BASE_URL: "https://primary.example/v1",
+    AO_PLANNER_MODEL: "primary-planner",
+    GPTR_FAST_LLM: "primary-fast",
+    GPTR_SMART_LLM: "primary-smart",
+    GPTR_EMBEDDING: "embedding",
+    FALLBACK_MODEL_ENABLED: "true",
+    FALLBACK_OPENAI_BASE_URL: "https://backup.example/v1",
+    FALLBACK_OPENAI_API_KEY: "backup-key",
+    FALLBACK_AO_PLANNER_MODEL: "backup-planner",
+    FALLBACK_AO_VERIFIER_MODEL: "backup-verifier",
+    FALLBACK_GPTR_FAST_LLM: "backup-fast",
+    FALLBACK_GPTR_SMART_LLM: "backup-smart",
+  });
+
+  assert.deepEqual(settings.fallback, {
+    baseUrl: "https://backup.example/v1",
+    apiKey: "backup-key",
+    plannerModel: "backup-planner",
+    verifierModel: "backup-verifier",
+    fastLlm: "openai:backup-fast",
+    smartLlm: "openai:backup-smart",
+  });
+});
+
+test("rejects an incomplete enabled fallback provider", () => {
+  assert.throws(
+    () => settingsFromEnv({
+      OPENAI_API_KEY: "key",
+      AO_PLANNER_MODEL: "planner",
+      GPTR_FAST_LLM: "fast",
+      GPTR_SMART_LLM: "smart",
+      GPTR_EMBEDDING: "embedding",
+      FALLBACK_MODEL_ENABLED: "true",
+      FALLBACK_OPENAI_BASE_URL: "https://backup.example/v1",
+    }),
+    /FALLBACK_OPENAI_API_KEY is required/u,
+  );
+});
+
 test("accepts a configurable OpenAI-compatible planner output budget", () => {
   const settings = settingsFromEnv({
     OPENAI_API_KEY: "key",

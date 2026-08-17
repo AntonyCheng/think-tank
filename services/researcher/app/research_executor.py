@@ -4,9 +4,13 @@ import asyncio
 import multiprocessing
 import os
 import sys
+from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from multiprocessing.process import BaseProcess
 from queue import Empty
+from time import monotonic
 from typing import Any, Protocol
 
 from .contracts import ResearchEvent, ResearchRequest, ResearchResponse
@@ -71,6 +75,117 @@ class ResearchExecutionError(RuntimeError):
         self.detail = detail
 
 
+@dataclass(frozen=True)
+class ExecutionCapacitySnapshot:
+    concurrency: int
+    active: int
+    queued: int
+
+
+@dataclass(frozen=True)
+class ExecutionCapacityLease:
+    queued: bool
+    queue_position: int | None
+    waited_ms: int
+    snapshot: ExecutionCapacitySnapshot
+
+
+class DynamicExecutionCapacity:
+    """FIFO execution limiter whose capacity can change without restarts."""
+
+    def __init__(self, concurrency: int) -> None:
+        if concurrency < 1:
+            raise ValueError("worker_concurrency must be at least 1")
+        self._concurrency = concurrency
+        self._active = 0
+        self._waiters: deque[asyncio.Future[None]] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire(
+        self,
+        on_queued: Callable[[ExecutionCapacitySnapshot, int], Awaitable[None]]
+        | None = None,
+    ) -> ExecutionCapacityLease:
+        queued_at = monotonic()
+        waiter: asyncio.Future[None] | None = None
+        queue_position: int | None = None
+        async with self._lock:
+            if self._active < self._concurrency and not self._waiters:
+                self._active += 1
+                return ExecutionCapacityLease(
+                    queued=False,
+                    queue_position=None,
+                    waited_ms=0,
+                    snapshot=self._snapshot_locked(),
+                )
+            waiter = asyncio.get_running_loop().create_future()
+            self._waiters.append(waiter)
+            queue_position = len(self._waiters)
+            queued_snapshot = self._snapshot_locked()
+
+        if on_queued:
+            await on_queued(queued_snapshot, queue_position)
+
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            async with self._lock:
+                if waiter.done() and not waiter.cancelled():
+                    self._active -= 1
+                else:
+                    self._discard_waiter_locked(waiter)
+                self._grant_waiters_locked()
+            raise
+
+        async with self._lock:
+            return ExecutionCapacityLease(
+                queued=True,
+                queue_position=queue_position,
+                waited_ms=round((monotonic() - queued_at) * 1_000),
+                snapshot=self._snapshot_locked(),
+            )
+
+    async def release(self) -> None:
+        async with self._lock:
+            if self._active < 1:
+                raise RuntimeError("execution capacity released without a lease")
+            self._active -= 1
+            self._grant_waiters_locked()
+
+    async def set_concurrency(self, concurrency: int) -> ExecutionCapacitySnapshot:
+        if concurrency < 1:
+            raise ValueError("worker_concurrency must be at least 1")
+        async with self._lock:
+            self._concurrency = concurrency
+            self._grant_waiters_locked()
+            return self._snapshot_locked()
+
+    async def snapshot(self) -> ExecutionCapacitySnapshot:
+        async with self._lock:
+            return self._snapshot_locked()
+
+    def _grant_waiters_locked(self) -> None:
+        while self._active < self._concurrency and self._waiters:
+            waiter = self._waiters.popleft()
+            if waiter.cancelled():
+                continue
+            self._active += 1
+            waiter.set_result(None)
+
+    def _discard_waiter_locked(self, waiter: asyncio.Future[None]) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            pass
+
+    def _snapshot_locked(self) -> ExecutionCapacitySnapshot:
+        return ExecutionCapacitySnapshot(
+            concurrency=self._concurrency,
+            active=self._active,
+            queued=sum(1 for waiter in self._waiters if not waiter.cancelled()),
+        )
+
+
 class ProcessResearchExecutor:
     def __init__(
         self,
@@ -82,11 +197,10 @@ class ProcessResearchExecutor:
         if worker_concurrency < 1:
             raise ValueError("worker_concurrency must be at least 1")
         self._engine = engine
-        self._worker_concurrency = worker_concurrency
         self._base_environment = dict(
             os.environ if base_environment is None else base_environment
         )
-        self._semaphore: asyncio.Semaphore | None = None
+        self._execution_capacity = DynamicExecutionCapacity(worker_concurrency)
         self._closed = False
         self._active_processes: set[BaseProcess] = set()
 
@@ -127,10 +241,35 @@ class ProcessResearchExecutor:
             }
         )
 
-        semaphore = self._get_semaphore()
-        async with semaphore:
+        async def publish_queued(
+            snapshot: ExecutionCapacitySnapshot,
+            queue_position: int,
+        ) -> None:
+            await _publish_execution_event(
+                publish,
+                "research.execution.queued",
+                {
+                    "concurrency": snapshot.concurrency,
+                    "active": snapshot.active,
+                    "queued": snapshot.queued,
+                    "queuePosition": queue_position,
+                },
+            )
+
+        lease = await self._execution_capacity.acquire(publish_queued)
+        try:
             if self._closed:
                 raise RuntimeError("research executor is closed")
+            await _publish_execution_event(
+                publish,
+                "research.execution.started",
+                {
+                    "concurrency": lease.snapshot.concurrency,
+                    "active": lease.snapshot.active,
+                    "queued": lease.snapshot.queued,
+                    "waitedMs": lease.waited_ms,
+                },
+            )
             timeout_ms = request.execution_timeout_ms
             if timeout_ms is None:
                 return await self._execute_in_process(request, publish)
@@ -151,6 +290,8 @@ class ProcessResearchExecutor:
                         "researchRunId": request.research_run_id,
                     },
                 ) from exc
+        finally:
+            await self._execution_capacity.release()
 
     async def close(self) -> None:
         self._closed = True
@@ -167,10 +308,21 @@ class ProcessResearchExecutor:
                 )
             )
 
-    def _get_semaphore(self) -> asyncio.Semaphore:
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self._worker_concurrency)
-        return self._semaphore
+    async def update_worker_concurrency(self, value: int) -> dict[str, int]:
+        snapshot = await self._execution_capacity.set_concurrency(value)
+        return {
+            "concurrency": snapshot.concurrency,
+            "active": snapshot.active,
+            "queued": snapshot.queued,
+        }
+
+    async def execution_capacity(self) -> dict[str, int]:
+        snapshot = await self._execution_capacity.snapshot()
+        return {
+            "concurrency": snapshot.concurrency,
+            "active": snapshot.active,
+            "queued": snapshot.queued,
+        }
 
     async def _execute_in_process(
         self,
@@ -225,6 +377,22 @@ class ProcessResearchExecutor:
             await asyncio.to_thread(_stop_process, process)
             messages.close()
             messages.join_thread()
+
+
+async def _publish_execution_event(
+    publish: EventPublisher | None,
+    event_type: str,
+    data: dict[str, int],
+) -> None:
+    if publish is None:
+        return
+    await publish(
+        ResearchEvent(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            type=event_type,
+            data=data,
+        )
+    )
 
 
 def _resolve_managed_environment(

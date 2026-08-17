@@ -47,9 +47,16 @@ export interface RawResearchActivityEvent {
 }
 
 const PUBLIC_ACTIVITY_STAGES = new Set([
+  "research.execution.queued",
+  "research.execution.started",
   "research.mode.selected",
   "research.budget.adjusted",
   "research.budget.waited",
+  "research.evidence_recovery_started",
+  "research.evidence_recovery_succeeded",
+  "research.evidence_insufficient",
+  "model.provider.fallback_started",
+  "model.provider.fallback_succeeded",
   "source.validation_started",
   "source.materialized",
   "source.unavailable",
@@ -327,6 +334,18 @@ export function localizeResearchProgress(
       ? "已选择综合模式，将复用上游研究材料。"
       : "已选择标准研究模式。";
   }
+  if (stage === "research.execution.queued") {
+    const position = numberFromObject(data, "queuePosition");
+    return position !== undefined
+      ? `正在等待研究执行资源（队列第 ${position} 位）。`
+      : "正在等待研究执行资源。";
+  }
+  if (stage === "research.execution.started") {
+    const waitedMs = numberFromObject(data, "waitedMs");
+    return waitedMs && waitedMs > 0
+      ? `已获得研究执行资源，等待 ${Math.ceil(waitedMs / 1_000)} 秒后开始研究。`
+      : "已获得研究执行资源，开始研究。";
+  }
   if (stage === "research.budget.adjusted") {
     const capacity = numberFromObject(data, "capacity");
     const requested = numberFromObject(data, "requestedWeight");
@@ -342,6 +361,21 @@ export function localizeResearchProgress(
     return waitedMs !== undefined
       ? `研究已等待任务并发预算 ${waitedMs} 毫秒后开始。`
       : "研究已等待任务并发预算后开始。";
+  }
+  if (stage === "research.evidence_recovery_started") {
+    return "已发现上游公开来源不足，正在补充定向检索。";
+  }
+  if (stage === "research.evidence_recovery_succeeded") {
+    return "定向补检索已完成，已补充可验证公开来源。";
+  }
+  if (stage === "research.evidence_insufficient") {
+    return "补检索后公开来源仍不足，报告将明确保留证据边界。";
+  }
+  if (stage === "model.provider.fallback_started") {
+    return "主模型服务暂时不可用，正在切换备用模型服务。";
+  }
+  if (stage === "model.provider.fallback_succeeded") {
+    return "已切换至备用模型服务，当前专家研究继续执行。";
   }
   if (stage === "deep_research.initialize") {
     const breadth = numberFromObject(data, "breadth");

@@ -30,6 +30,9 @@ export interface ResearchRequest {
   apiKey?: string;
   fastLlm?: string;
   smartLlm?: string;
+  fallbackBaseUrl?: string;
+  fallbackApiKey?: string;
+  fallbackFastLlm?: string;
   embedding?: string;
   embeddingBaseUrl?: string;
   embeddingApiKey?: string;

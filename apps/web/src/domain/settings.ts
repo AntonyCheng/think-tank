@@ -21,6 +21,13 @@ export interface RuntimeSettings {
   apiKeyConfigured: boolean;
   embeddingApiKeyConfigured: boolean;
   configuredRetrieverCredentials: string[];
+  fallbackEnabled: boolean;
+  fallbackOpenaiBaseUrl: string;
+  fallbackAoPlannerModel: string;
+  fallbackAoVerifierModel: string;
+  fallbackGptrFastLlm: string;
+  fallbackGptrSmartLlm: string;
+  fallbackApiKeyConfigured: boolean;
   retrieverCapabilities: RetrieverCapability[];
   maxRetrievers: number;
 }
@@ -36,8 +43,9 @@ export interface RuntimeSettingsSaveResult extends RuntimeSettings {
   checks: SettingsPreflightCheck[];
 }
 
-export type RuntimeSettingsUpdate = Omit<RuntimeSettings, "retriever" | "apiKeyConfigured" | "embeddingApiKeyConfigured" | "configuredRetrieverCredentials" | "retrieverCapabilities" | "maxRetrievers"> & {
+export type RuntimeSettingsUpdate = Partial<Omit<RuntimeSettings, "retriever" | "apiKeyConfigured" | "embeddingApiKeyConfigured" | "configuredRetrieverCredentials" | "fallbackApiKeyConfigured" | "retrieverCapabilities" | "maxRetrievers">> & {
   apiKey?: string;
+  fallbackApiKey?: string;
   embeddingApiKey?: string;
   retrieverApiKeys?: Record<string, string>;
 };

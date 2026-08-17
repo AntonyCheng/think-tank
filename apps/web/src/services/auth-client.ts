@@ -1,7 +1,19 @@
 export interface AuthStatus {
   enabled: boolean;
   authenticated: boolean;
+  profileAvailable?: boolean;
   username?: string;
+  role?: "admin" | "member";
+}
+
+export interface CurrentUserProfile {
+  id: string;
+  username: string;
+  role: "admin" | "member";
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt?: string;
 }
 
 export const AUTH_REQUIRED_EVENT = "think-tank:auth-required";
@@ -40,4 +52,20 @@ export function login(username: string, password: string): Promise<AuthStatus> {
 
 export function logout(): Promise<AuthStatus> {
   return requestAuth<AuthStatus>("/api/auth/logout", { method: "POST" });
+}
+
+export async function getCurrentUserProfile(): Promise<CurrentUserProfile> {
+  const response = await requestAuth<{ user: CurrentUserProfile }>("/api/auth/me");
+  return response.user;
+}
+
+export function changeCurrentUserPassword(
+  currentPassword: string,
+  nextPassword: string,
+): Promise<AuthStatus> {
+  return requestAuth<AuthStatus>("/api/auth/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, nextPassword }),
+  });
 }

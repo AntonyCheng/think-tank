@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   ResearchMode,
   ResearchProfile,
@@ -66,6 +68,11 @@ export type EvidenceSource =
       observedAt: string;
     };
 
+export interface EvidenceClaimCitation {
+  claim: string;
+  sourceIds: string[];
+}
+
 export interface EvidenceBundle {
   schemaVersion: 1;
   aoStepId: string;
@@ -77,6 +84,7 @@ export interface EvidenceBundle {
   derivedFromStepIds: string[];
   queries: EvidenceQuery[];
   sources: EvidenceSource[];
+  claimCitations?: EvidenceClaimCitation[];
   researchContext: {
     content: string;
     originalCharacters: number;
@@ -148,6 +156,12 @@ export class EvidenceLedger {
       input.capture.researchContext.content.length,
       input.capture.researchContext.originalCharacters,
     );
+    const sources = normalizeSources(
+      input.capture.sources,
+      input.completedAt,
+      input.aoStepId,
+    );
+    const claimCitations = claimCitationsForReport(input.report, sources);
     const bundle: EvidenceBundle = {
       schemaVersion: 1,
       aoStepId: input.aoStepId,
@@ -158,10 +172,8 @@ export class EvidenceLedger {
       completedAt: input.completedAt,
       derivedFromStepIds: uniqueText(input.dependsOn),
       queries: normalizeQueries(input.capture.queries),
-      sources: normalizeSources(
-        input.capture.sources,
-        input.completedAt,
-      ),
+      sources,
+      ...(claimCitations.length > 0 ? { claimCitations } : {}),
       researchContext: {
         content: contextContent,
         originalCharacters: originalContextCharacters,
@@ -214,6 +226,9 @@ export class EvidenceLedger {
         const latestContext = [...attempts].reverse().find(
           (bundle) => bundle.researchContext.content.length > 0,
         )?.researchContext ?? latest.researchContext;
+        const sources = mergeEvidenceSources(
+          attempts.flatMap((bundle) => bundle.sources),
+        );
         return [{
           ...latest,
           queries: normalizeQueries(
@@ -221,8 +236,10 @@ export class EvidenceLedger {
               bundle.queries.map(({ kind, text }) => ({ kind, text }))
             ),
           ),
-          sources: mergeEvidenceSources(
-            attempts.flatMap((bundle) => bundle.sources),
+          sources,
+          claimCitations: claimCitationsForReport(
+            latest.report.content,
+            sources,
           ),
           researchContext: latestContext,
         }];
@@ -265,6 +282,7 @@ function normalizeQueries(
 function normalizeSources(
   captures: readonly EvidenceSourceCapture[],
   observedAt: string,
+  aoStepId: string,
 ): EvidenceSource[] {
   const normalized: NormalizedEvidenceSource[] = [];
   for (const capture of captures) {
@@ -301,7 +319,7 @@ function normalizeSources(
         ? `public\u0000${canonicalHttpUrl(source.url)}`
         : `private\u0000${source.locator}`,
   ).map((source, index): EvidenceSource => ({
-    id: `source-${index + 1}`,
+    id: evidenceSourceId(aoStepId, source, index),
     ...source,
     observedAt,
   }));
@@ -316,10 +334,56 @@ function mergeEvidenceSources(
       source.visibility === "public"
         ? `public\u0000${canonicalHttpUrl(source.url)}`
         : `private\u0000${source.locator}`,
-  ).map((source, index): EvidenceSource => ({
-    ...source,
-    id: `source-${index + 1}`,
-  }));
+  );
+}
+
+function claimCitationsForReport(
+  report: string,
+  sources: readonly EvidenceSource[],
+): EvidenceClaimCitation[] {
+  const sourceIdsByUrl = new Map(
+    sources.flatMap((source) => source.visibility === "public"
+      ? [[canonicalHttpUrl(source.url), source.id] as const]
+      : []),
+  );
+  const seen = new Set<string>();
+  return report
+    .split(/\n\s*\n/u)
+    .flatMap((paragraph) => {
+      const claim = paragraph.trim();
+      if (!claim || /^#{1,6}\s/u.test(claim)) return [];
+      const sourceIds = [...new Set(
+        [...claim.matchAll(/https?:\/\/[^\s)<]+/giu)]
+          .map((match) => canonicalHttpUrl(match[0]))
+          .map((url) => sourceIdsByUrl.get(url))
+          .filter((id): id is string => Boolean(id)),
+      )];
+      if (sourceIds.length === 0) return [];
+      const key = `${sourceIds.join("\u0000")}\u0000${claim}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{
+        claim: claim.length > 700 ? `${claim.slice(0, 697)}...` : claim,
+        sourceIds,
+      }];
+    })
+    .slice(0, 40);
+}
+
+function evidenceSourceId(
+  aoStepId: string,
+  source: NormalizedEvidenceSource,
+  index: number,
+): string {
+  const identity = source.visibility === "public"
+    ? canonicalHttpUrl(source.url)
+    : source.locator;
+  const step = aoStepId
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-|-$/gu, "") || "expert";
+  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 10);
+  return `source-${step}-${index + 1}-${digest}`;
 }
 
 function sourceRetrievers(

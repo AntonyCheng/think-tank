@@ -18,6 +18,7 @@ workflows/generated/
 __pycache__/
 .pytest_cache/
 .pytest-*/
+.test-tmp/
 .ruff_cache/
 .think-tank/
 mcp-server/.env

@@ -8,6 +8,7 @@ import {
   createAuthService,
   isServiceTaskApiRequest,
 } from "../src/auth.js";
+import type { IdentityService } from "../src/identity.js";
 import { ResearchTaskManager } from "../src/research-tasks.js";
 
 function cookieFrom(response: Response): string {
@@ -114,4 +115,157 @@ test("protects browser APIs and limits the MCP key to its required task routes",
   const logout = await fetch(`${baseUrl}/api/auth/logout`, { headers: { Cookie: browserCookie }, method: "POST" });
   assert.equal(logout.status, 200);
   assert.equal((await fetch(`${baseUrl}/api/tasks`, { headers: { Cookie: browserCookie } })).status, 401);
+});
+
+test("isolates every task route by the authenticated task owner", async (t) => {
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }));
+  const users = {
+    alice: { id: "user-alice", username: "alice", role: "member" as const },
+    bob: { id: "user-bob", username: "bob", role: "member" as const },
+  };
+  const identity: IdentityService = {
+    serviceOwnerId: "user-admin",
+    async initialize() {},
+    async authenticate() { return undefined; },
+    async principalFor(request) {
+      const cookie = request.headers.cookie;
+      return cookie === "session=alice" ? users.alice : cookie === "session=bob" ? users.bob : undefined;
+    },
+    async logout() {},
+    async getUser(id) {
+      const user = Object.values(users).find((candidate) => candidate.id === id);
+      return user && { ...user, active: true, createdAt: "2026-08-01T00:00:00.000Z", updatedAt: "2026-08-01T00:00:00.000Z" };
+    },
+    async changePassword(id, currentPassword, nextPassword) {
+      return id === users.alice.id && currentPassword === "old-password" && nextPassword === "new-password";
+    },
+    async listUsers() { return []; },
+    async createUser() { throw new Error("not used"); },
+    async updateUser() { return undefined; },
+    async deleteUser() { return false; },
+    cookie(token) { return `session=${token}`; },
+    expiredCookie() { return "session=; Max-Age=0"; },
+  };
+  const server = createApiServer(
+    manager,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    identity,
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const profile = await fetch(`${baseUrl}/api/auth/me`, { headers: { Cookie: "session=alice" } });
+  assert.equal(profile.status, 200);
+  assert.deepEqual(await profile.json(), {
+    user: {
+      id: "user-alice",
+      username: "alice",
+      role: "member",
+      active: true,
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    },
+  });
+  const rejectedPassword = await fetch(`${baseUrl}/api/auth/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: "session=alice" },
+    body: JSON.stringify({ currentPassword: "wrong", nextPassword: "new-password" }),
+  });
+  assert.equal(rejectedPassword.status, 401);
+  const changedPassword = await fetch(`${baseUrl}/api/auth/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: "session=alice" },
+    body: JSON.stringify({ currentPassword: "old-password", nextPassword: "new-password" }),
+  });
+  assert.equal(changedPassword.status, 200);
+  assert.match(changedPassword.headers.get("set-cookie") ?? "", /Max-Age=0/u);
+
+  const created = await fetch(`${baseUrl}/api/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: "session=alice" },
+    body: JSON.stringify({ topic: "Alice 的私有研究" }),
+  });
+  assert.equal(created.status, 202);
+  const task = await created.json() as { id: string };
+
+  assert.equal((await fetch(`${baseUrl}/api/tasks/${task.id}`, { headers: { Cookie: "session=bob" } })).status, 404);
+  assert.equal((await fetch(`${baseUrl}/api/tasks/${task.id}/diagnostics`, { headers: { Cookie: "session=bob" } })).status, 404);
+  assert.equal((await fetch(`${baseUrl}/api/tasks/${task.id}/events`, { headers: { Cookie: "session=bob" } })).status, 404);
+  const history = await fetch(`${baseUrl}/api/tasks`, { headers: { Cookie: "session=bob" } }).then((response) => response.json()) as { items: unknown[] };
+  assert.deepEqual(history.items, []);
+  assert.equal((await fetch(`${baseUrl}/api/tasks/${task.id}`, { headers: { Cookie: "session=alice" } })).status, 200);
+});
+
+test("allows an administrator to delete another user but never itself", async (t) => {
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }));
+  let deletedId: string | undefined;
+  const identity: IdentityService = {
+    serviceOwnerId: "user-admin",
+    async initialize() {},
+    async authenticate() { return undefined; },
+    async principalFor(request) {
+      return request.headers.cookie === "session=admin"
+        ? { id: "user-admin", username: "admin", role: "admin" }
+        : undefined;
+    },
+    async logout() {},
+    async getUser() { return undefined; },
+    async changePassword() { return false; },
+    async listUsers() { return []; },
+    async createUser() { throw new Error("not used"); },
+    async updateUser() { return undefined; },
+    async deleteUser(id) { deletedId = id; return true; },
+    cookie(token) { return `session=${token}`; },
+    expiredCookie() { return "session=; Max-Age=0"; },
+  };
+  const server = createApiServer(
+    manager,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    identity,
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const other = await fetch(`${baseUrl}/api/admin/users/user-member`, {
+    headers: { Cookie: "session=admin" },
+    method: "DELETE",
+  });
+  assert.equal(other.status, 204);
+  assert.equal(deletedId, "user-member");
+
+  const self = await fetch(`${baseUrl}/api/admin/users/user-admin`, {
+    headers: { Cookie: "session=admin" },
+    method: "DELETE",
+  });
+  assert.equal(self.status, 409);
 });

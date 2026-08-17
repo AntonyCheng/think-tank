@@ -11,7 +11,9 @@ export type SettingsPreflightScope =
   | "all"
   | "models"
   | "embedding"
-  | "retrievers";
+  | "retrievers"
+  | "scheduling"
+  | "fallbackModels";
 
 const MODEL_TIMEOUT_MS = 10_000;
 const EMBEDDING_TIMEOUT_MS = 10_000;
@@ -25,6 +27,9 @@ export async function preflightRuntimeSettings(
   const checks = await Promise.all([
     ...(scope === "all" || scope === "models"
       ? [preflightModels(settings, fetchAdapter)]
+      : []),
+    ...(scope === "all" || scope === "fallbackModels"
+      ? [preflightFallbackModels(settings, fetchAdapter)]
       : []),
     ...(scope === "all" || scope === "embedding"
       ? [preflightEmbedding(settings, fetchAdapter).then((check) => [check])]
@@ -40,27 +45,93 @@ function preflightModels(
   settings: RuntimeSettings,
   fetchAdapter: typeof fetch,
 ): Promise<SettingsPreflightCheck[]> {
+  return preflightModelProvider({
+    baseUrl: settings.planner.base_url,
+    apiKey: settings.planner.api_key,
+    plannerModel: settings.planner.model,
+    verifierModel: settings.verifierModel,
+    fastLlm: settings.gptrFastLlm,
+    smartLlm: settings.gptrSmartLlm,
+  }, fetchAdapter, "主模型");
+}
+
+async function preflightFallbackModels(
+  settings: RuntimeSettings,
+  fetchAdapter: typeof fetch,
+): Promise<SettingsPreflightCheck[]> {
+  if (!settings.fallback) {
+    return [{
+      id: "model",
+      label: "备用模型服务",
+      status: "passed",
+      detail: "备用模型服务未启用",
+    }];
+  }
+  return preflightModelProvider(settings.fallback, fetchAdapter, "备用模型");
+}
+
+async function preflightModelProvider(
+  provider: {
+    baseUrl?: string;
+    apiKey: string;
+    plannerModel: string;
+    verifierModel?: string;
+    fastLlm: string;
+    smartLlm: string;
+  },
+  fetchAdapter: typeof fetch,
+  labelPrefix: string,
+): Promise<SettingsPreflightCheck[]> {
   const candidates = [
-    ["AO 编排模型", settings.planner.model],
-    ...(settings.verifierModel ? [["AO 验证模型", settings.verifierModel]] : []),
-    ["GPTR 快速模型", settings.gptrFastLlm],
-    ["GPTR 深度模型", settings.gptrSmartLlm],
+    [`${labelPrefix}·AO 编排模型`, provider.plannerModel],
+    ...(provider.verifierModel ? [[`${labelPrefix}·AO 验证模型`, provider.verifierModel]] : []),
+    [`${labelPrefix}·GPTR 快速模型`, provider.fastLlm],
+    [`${labelPrefix}·GPTR 深度模型`, provider.smartLlm],
   ] as const;
   const checks = new Map<string, Promise<void>>();
   return Promise.all(candidates.map(async ([label, model]) => {
-    const key = `${settings.planner.base_url ?? ""}\u0000${settings.planner.api_key}\u0000${modelName(model)}`;
+    const key = `${provider.baseUrl ?? ""}\u0000${provider.apiKey}\u0000${modelName(model)}`;
     let check = checks.get(key);
     if (!check) {
-      check = probeChatModel(settings.planner.base_url, settings.planner.api_key, model, fetchAdapter);
+      check = probeChatModel(provider.baseUrl, provider.apiKey, model, fetchAdapter);
       checks.set(key, check);
     }
     try {
       await check;
       return { id: "model", label, status: "passed" };
     } catch (error) {
-      return failed("model", label, error, settings);
+      return failed("model", label, error, settingsFromProvider(provider));
     }
   }));
+}
+
+function settingsFromProvider(provider: {
+  baseUrl?: string;
+  apiKey: string;
+}): RuntimeSettings {
+  return {
+    planner: {
+      provider: "openai",
+      api_key: provider.apiKey,
+      base_url: provider.baseUrl,
+      model: "preflight",
+    },
+    gptrServiceUrl: "",
+    retriever: "duckduckgo",
+    retrievers: ["duckduckgo"],
+    retrieverApiKeys: {},
+    gptrFastLlm: "openai:preflight",
+    gptrSmartLlm: "openai:preflight",
+    gptrEmbedding: "custom:preflight",
+    timeZone: "UTC",
+    concurrency: 1,
+    gptrHealthTimeoutMs: 1,
+    gptrResearchTimeoutMs: 2,
+    gptrCleanupGraceMs: 1,
+    taskExecutionTimeoutMs: 1,
+    gptrTaskConcurrencyBudget: 1,
+    gptrDeepLimits: { maxBreadth: 1, maxDepth: 1, maxResearchCalls: 1 },
+  };
 }
 
 async function preflightEmbedding(

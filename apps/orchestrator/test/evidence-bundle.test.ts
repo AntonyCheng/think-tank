@@ -95,7 +95,7 @@ test("records one auditable evidence bundle for an AO research step", () => {
       text: "2026 AI 市场规模",
     }],
     sources: [{
-      id: "source-1",
+      id: "source-market-analysis-1-b5dd7b3544",
       visibility: "public",
       url: "https://example.com/report/",
       title: "行业报告",
@@ -122,6 +122,28 @@ test("records one auditable evidence bundle for an AO research step", () => {
     cost: 0.25,
   });
   assert.deepEqual(ledger.snapshot(), [bundle]);
+});
+
+test("maps cited expert conclusions to stable evidence source IDs", () => {
+  const ledger = new EvidenceLedger();
+  const bundle = ledger.record(record({
+    report: "市场规模在 2026 年继续增长。[行业报告](https://example.com/report)",
+    capture: {
+      queries: [],
+      sources: [{
+        visibility: "public",
+        url: "https://example.com/report",
+        title: "行业报告",
+      }],
+      researchContext: { content: "", originalCharacters: 0, truncated: false },
+    },
+  }));
+
+  assert.equal(bundle.claimCitations?.length, 1);
+  assert.deepEqual(bundle.claimCitations?.[0]?.sourceIds, [
+    bundle.sources[0]?.id,
+  ]);
+  assert.match(bundle.claimCitations?.[0]?.claim ?? "", /市场规模/u);
 });
 
 test("preserves complete source summaries and research context", () => {

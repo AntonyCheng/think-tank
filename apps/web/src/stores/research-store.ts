@@ -12,12 +12,17 @@ export interface ResearchStoreState {
   connection: ConnectionState;
   error?: string;
   updateSnapshot: (snapshot: ResearchTaskSnapshot) => void;
+  reconnect: () => void;
 }
 
 export function useResearchStore(taskId: string): ResearchStoreState {
-  const [state, setState] = useState<Omit<ResearchStoreState, "updateSnapshot">>({ events: [], connection: "loading" });
+  const [state, setState] = useState<Omit<ResearchStoreState, "updateSnapshot" | "reconnect">>({ events: [], connection: "loading" });
+  const [connectionGeneration, setConnectionGeneration] = useState(0);
   const updateSnapshot = useCallback((snapshot: ResearchTaskSnapshot) => {
     setState((current) => ({ ...current, snapshot }));
+  }, []);
+  const reconnect = useCallback(() => {
+    setConnectionGeneration((current) => current + 1);
   }, []);
   useEffect(() => {
     let active = true;
@@ -63,8 +68,8 @@ export function useResearchStore(taskId: string): ResearchStoreState {
       snapshotRefresh.dispose();
       unsubscribe();
     };
-  }, [taskId]);
-  return { ...state, updateSnapshot };
+  }, [taskId, connectionGeneration]);
+  return { ...state, updateSnapshot, reconnect };
 }
 
 export function useOrderedEvents(events: TaskEvent[]): TaskEvent[] {

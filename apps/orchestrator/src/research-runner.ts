@@ -30,7 +30,10 @@ import {
   type EvidenceQualityAssessment,
 } from "./evidence-quality.js";
 import { researchCompositionDescription } from "./research-compose.js";
-import { createRuntimeConnector } from "./runtime-connector.js";
+import {
+  createPlannerConnector,
+  createRuntimeConnector,
+} from "./runtime-connector.js";
 import {
   settingsFromEnv,
   type RuntimeSettings,
@@ -260,6 +263,7 @@ export async function runResearchTopic(
       agentsDir,
       agentsDirName: lang === "zh" ? "agency-agents-zh" : "agency-agents",
       llmConfig: settings.planner,
+      connector: createPlannerConnector(settings),
       autoRun: true,
       timeoutMs: settings.gptrResearchTimeoutMs + settings.gptrCleanupGraceMs,
       lang,
