@@ -240,10 +240,28 @@ class SourceMaterializer:
                 redirect_chain.append(current_url)
                 continue
             if response.status < 200 or response.status >= 300:
-                raise SourceAccessError(
-                    "source_unavailable",
+                fallback = await self._fetch_fallback(
+                    current_url,
+                    addresses,
                     requested_url,
-                    "The source returned an unsuccessful response.",
+                )
+                if fallback is None:
+                    raise SourceAccessError(
+                        "source_unavailable",
+                        requested_url,
+                        "The source returned an unsuccessful response.",
+                    )
+                response, media_type, title, text = fallback
+                return MaterializedSource(
+                    requested_url=requested_url,
+                    canonical_url=current_url,
+                    title=title,
+                    media_type=media_type,
+                    text=text,
+                    byte_size=len(response.body),
+                    redirect_chain=tuple(redirect_chain),
+                    fetch_strategy=self._fallback_strategy,
+                    fallback_reason="unsuccessful_response",
                 )
             if len(response.body) > self._limits.max_response_bytes:
                 raise SourceAccessError(
@@ -274,52 +292,15 @@ class SourceMaterializer:
                 and self._fallback_transport is not None
                 and self._limits.fallback_max_attempts > 0
             ):
-                try:
-                    fallback_response = await self._fallback_transport.fetch(
-                        current_url,
-                        addresses=addresses,
-                        max_bytes=self._limits.max_response_bytes,
-                        timeout_seconds=self._limits.timeout_seconds,
-                    )
-                    _assert_verified_peer(
-                        fallback_response.peer_ip,
-                        addresses,
-                        requested_url,
-                    )
-                    if (
-                        fallback_response.status < 200
-                        or fallback_response.status >= 300
-                        or len(fallback_response.body)
-                        > self._limits.max_response_bytes
-                    ):
-                        raise SourceAccessError(
-                            "source_fallback_failed",
-                            requested_url,
-                            "The rendered source could not be downloaded.",
-                        )
-                    fallback_media_type, fallback_charset = _content_type(
-                        fallback_response.headers.get("content-type", "")
-                    )
-                    fallback_title, fallback_text = _extract_source_text(
-                        fallback_response.body,
-                        current_url,
-                        fallback_media_type,
-                        fallback_charset,
-                        requested_url,
-                    )
-                    if fallback_text.strip():
-                        response = fallback_response
-                        media_type = fallback_media_type
-                        title = fallback_title
-                        text = fallback_text
-                        strategy = self._fallback_strategy
-                        fallback_reason = decision.reason
-                except SourceAccessError:
-                    # The static response remains authoritative when it had
-                    # extractable text; empty pages keep the stable failure.
-                    pass
-                except Exception:
-                    pass
+                fallback = await self._fetch_fallback(
+                    current_url,
+                    addresses,
+                    requested_url,
+                )
+                if fallback is not None:
+                    response, media_type, title, text = fallback
+                    strategy = self._fallback_strategy
+                    fallback_reason = decision.reason
             if not text.strip():
                 raise SourceAccessError(
                     "source_content_empty",
@@ -342,6 +323,47 @@ class SourceMaterializer:
             requested_url,
             "The source exceeded the redirect limit.",
         )
+
+    async def _fetch_fallback(
+        self,
+        url: str,
+        addresses: Sequence[str],
+        requested_url: str,
+    ) -> tuple[SourceHttpResponse, str, str, str] | None:
+        if (
+            self._fallback_transport is None
+            or self._limits.fallback_max_attempts < 1
+        ):
+            return None
+        try:
+            response = await self._fallback_transport.fetch(
+                url,
+                addresses=addresses,
+                max_bytes=self._limits.max_response_bytes,
+                timeout_seconds=self._limits.timeout_seconds,
+            )
+            _assert_verified_peer(response.peer_ip, addresses, requested_url)
+            if (
+                response.status < 200
+                or response.status >= 300
+                or len(response.body) > self._limits.max_response_bytes
+            ):
+                return None
+            media_type, charset = _content_type(
+                response.headers.get("content-type", "")
+            )
+            title, text = _extract_source_text(
+                response.body,
+                url,
+                media_type,
+                charset,
+                requested_url,
+            )
+            return (response, media_type, title, text) if text.strip() else None
+        except (SourceAccessError, Exception):
+            # A browser is only an evidence recovery path. A usable static
+            # response remains valid when rendering is unavailable.
+            return None
 
 
 def _canonical_url(value: str) -> str:
@@ -445,31 +467,13 @@ def source_fallback_decision(
     text: str,
     minimum_text_characters: int = 200,
 ) -> SourceFallbackDecision:
-    """Return a conservative rendering fallback decision for static HTML."""
+    """Return a recovery decision for blocked or insufficient static HTML."""
     if media_type != "text/html":
-        return SourceFallbackDecision()
-    decoded = body.decode("utf-8", errors="replace").lower()
-    has_rendering_signal = any(
-        marker in decoded
-        for marker in (
-            "<script",
-            "id=\"root\"",
-            "id='root'",
-            "id=\"app\"",
-            "id='app'",
-            "data-reactroot",
-            "ng-version",
-            "__next",
-            "enable javascript",
-            "javascript is required",
-        )
-    )
-    if not has_rendering_signal:
         return SourceFallbackDecision()
     if not text.strip():
         return SourceFallbackDecision("empty_text")
     if len(text.strip()) < minimum_text_characters:
-        return SourceFallbackDecision("client_rendered")
+        return SourceFallbackDecision("short_text")
     return SourceFallbackDecision()
 
 
@@ -611,11 +615,17 @@ class AioHttpSourceTransport:
                 trust_env=False,
                 auto_decompress=True,
                 headers={
-                    "User-Agent": "Think-Tank-Source-Reader/1.0",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    ),
                     "Accept": (
                         "text/html,text/plain,application/pdf;q=0.9,"
                         "*/*;q=0.1"
                     ),
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Cache-Control": "no-cache",
                 },
             ) as session:
                 async with session.get(
@@ -752,6 +762,8 @@ def default_source_materializer(
         for value in os.getenv("GPTR_SOURCE_FALLBACK_PROVIDERS", "").split(",")
         if value.strip()
     )
+    if not providers:
+        providers = ("browser",)
     if "browser" in providers:
         from .browser_source_fetcher import PlaywrightSourceTransport
 

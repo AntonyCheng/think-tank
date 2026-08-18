@@ -490,6 +490,10 @@ export class ResearchTaskManager {
 
     const runtime = this.#runtimeFor(id);
     const error = new Error("任务已由用户取消。");
+    const canceledTelemetry = cancelActiveResearchRuns(
+      snapshot.researchTelemetry,
+      new Date().toISOString(),
+    );
     if (
       snapshot.status === "queued" ||
       snapshot.status === "needs_input" ||
@@ -502,6 +506,9 @@ export class ResearchTaskManager {
           status: "canceled",
           pendingInput: undefined,
           error: error.message,
+          ...(canceledTelemetry === undefined
+            ? {}
+            : { researchTelemetry: canceledTelemetry }),
         },
         "task.canceled",
         { reason: "user", message: error.message },
@@ -515,7 +522,13 @@ export class ResearchTaskManager {
 
     this.#record(
       id,
-      { status: "canceling", pendingInput: undefined },
+      {
+        status: "canceling",
+        pendingInput: undefined,
+        ...(canceledTelemetry === undefined
+          ? {}
+          : { researchTelemetry: canceledTelemetry }),
+      },
       "task.canceling",
       { reason: "user" },
     );
@@ -548,6 +561,7 @@ export class ResearchTaskManager {
       const result = await this.#runner(
         queued.topic,
         (event) => {
+          if (this.#store.load(id)?.snapshot.status === "canceling") return;
           const changes: Partial<ResearchTaskSnapshot> = {};
           if (event.type === "research.diagnostic") {
             this.#store.recordDiagnostic(id, event.diagnostic);
@@ -712,9 +726,20 @@ export class ResearchTaskManager {
       }
       if (currentStatus === "canceling" || controller.signal.aborted) {
         const message = "任务已由用户取消。";
+        const canceledTelemetry = cancelActiveResearchRuns(
+          this.#store.load(id)?.snapshot.researchTelemetry,
+          new Date().toISOString(),
+        );
         this.#record(
           id,
-          { status: "canceled", error: message, pendingInput: undefined },
+          {
+            status: "canceled",
+            error: message,
+            pendingInput: undefined,
+            ...(canceledTelemetry === undefined
+              ? {}
+              : { researchTelemetry: canceledTelemetry }),
+          },
           "task.canceled",
           { reason: "user", message },
         );
@@ -1029,6 +1054,26 @@ function presentTaskEvent(event: ResearchTaskEvent): ResearchTaskEvent {
         message: localized,
       },
     };
+}
+
+function cancelActiveResearchRuns(
+  telemetry: ResearchTelemetrySnapshot | undefined,
+  timestamp: string,
+): ResearchTelemetrySnapshot | undefined {
+  if (!telemetry) return undefined;
+  let changed = false;
+  const runs = telemetry.runs.map((run) => {
+    if (run.state !== "queued" && run.state !== "running") return run;
+    changed = true;
+    return {
+      ...run,
+      state: "canceled" as const,
+      phase: "canceled" as const,
+      updatedAt: timestamp,
+      completedAt: timestamp,
+    };
+  });
+  return changed ? { ...telemetry, runs } : telemetry;
 }
 
 function isTerminalTaskStatus(status: ResearchTaskStatus): boolean {

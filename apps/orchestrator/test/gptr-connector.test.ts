@@ -348,6 +348,144 @@ test("performs one focused recovery when a Web expert returns too few public sou
   assert.ok(stages.includes("research.evidence_recovery_succeeded"));
 });
 
+test("recovers URL-rich reports when their evidence context is empty", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    const recovered = requests.length === 2;
+    return new Response(`${JSON.stringify({
+      type: "result",
+      result: {
+        report: recovered
+          ? `# Evidence-backed report\n\n${"The verified finding is supported by the recovered official source. ".repeat(6)}`
+          : "# Draft\n\n我先检索资料，当前未获得可用来源。",
+        sourceUrls: [
+          "https://gov.example/one",
+          "https://gov.example/two",
+          "https://gov.example/three",
+        ],
+        sources: [],
+        researchEvidence: {
+          queries: [],
+          sources: recovered ? [{
+            visibility: "public",
+            url: "https://gov.example/one",
+            title: "Official source",
+            summary: "Verified evidence ".repeat(80),
+          }] : [],
+          researchContext: {
+            content: recovered ? "Verified evidence ".repeat(80) : "Title:\nContent:\nSource:",
+            originalCharacters: recovered ? 1_440 : 24,
+            truncated: false,
+          },
+        },
+        cost: 0,
+        events: recovered ? [{
+          timestamp: "2026-08-18T00:00:00.000Z",
+          type: "source.materialized",
+          data: {},
+        }] : [],
+      },
+    })}\n`, { status: 200 });
+  };
+  const connector = new GptrConnector({
+    serviceUrl: "http://127.0.0.1:8010",
+    retriever: "duckduckgo",
+    minimumPublicSources: 2,
+  });
+
+  const result = await connector.chat("expert role", "research task", {
+    provider: "openai",
+  });
+
+  assert.equal(result.content.startsWith("# Evidence-backed report"), true);
+  assert.equal(requests.length, 2);
+  assert.match(String(requests[1]?.systemPrompt), /attempt 2 of 5/u);
+});
+
+test("limits evidence recovery to five total attempts and keeps the best report", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(`${JSON.stringify({
+      type: "result",
+      result: {
+        report: calls === 1
+          ? "# Best available\n\nA longer evidence discussion that remains incomplete."
+          : "# Draft\n\n我先检索资料，当前未获得可用来源。",
+        sourceUrls: [
+          "https://gov.example/one",
+          "https://gov.example/two",
+        ],
+        sources: [],
+        researchEvidence: {
+          queries: [],
+          sources: [],
+          researchContext: {
+            content: "Title:\nContent:\nSource:",
+            originalCharacters: 24,
+            truncated: false,
+          },
+        },
+        cost: 0,
+        events: [],
+      },
+    })}\n`, { status: 200 });
+  };
+  const connector = new GptrConnector({
+    serviceUrl: "http://127.0.0.1:8010",
+    retriever: "duckduckgo",
+    minimumPublicSources: 2,
+  });
+
+  const result = await connector.chat("expert role", "research task", {
+    provider: "openai",
+  });
+
+  assert.equal(calls, 5);
+  assert.equal(result.content.startsWith("# Best available"), true);
+});
+
+test("does not accept source-rich process statements with an empty evidence context", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(`${JSON.stringify({
+      type: "result",
+      result: {
+        report: "当前研究上下文中没有可用的公开资料 URL，无法在不编造来源的前提下完成研究报告。",
+        sourceUrls: ["https://gov.example/one", "https://gov.example/two"],
+        sources: [],
+        researchEvidence: {
+          queries: [],
+          sources: [{
+            visibility: "public",
+            url: "https://gov.example/one",
+            title: "Collected source",
+            summary: "Verified source body ".repeat(60),
+          }],
+          researchContext: {
+            content: "Title:\nContent:\nSource:",
+            originalCharacters: 24,
+            truncated: false,
+          },
+        },
+        cost: 0,
+        events: [],
+      },
+    })}\n`, { status: 200 });
+  };
+  const connector = new GptrConnector({
+    serviceUrl: "http://127.0.0.1:8010",
+    retriever: "duckduckgo",
+    minimumPublicSources: 2,
+  });
+
+  await connector.chat("expert role", "research task", { provider: "openai" });
+
+  assert.equal(calls, 5);
+});
+
 test("maps a URL-only profile without requiring a Web policy", async () => {
   let receivedBody: Record<string, unknown> | undefined;
   globalThis.fetch = async (_input, init) => {

@@ -1,4 +1,5 @@
 import json
+import asyncio
 from typing import Any
 from types import SimpleNamespace
 
@@ -141,6 +142,40 @@ class SourceRoutingResearcher(FakeResearcher):
         return self.context
 
 
+class RecoveringWebResearcher(FakeResearcher):
+    calls: list[tuple[str, Any]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        type(self).calls = []
+        self.sources: list[dict[str, str]] = []
+
+    async def conduct_research(self) -> None:
+        type(self).calls.append(("conduct_research", None))
+        self.sources.append({
+            "url": "https://web.example/evidence",
+            "title": "Search result without body",
+            "raw_content": "",
+        })
+
+    def add_research_sources(self, sources: list[dict[str, str]]) -> None:
+        type(self).calls.append(("add_research_sources", sources))
+        self.sources.extend(sources)
+
+    async def write_report(self, *args: Any, **kwargs: Any) -> str:
+        type(self).calls.append(("write_report", {"args": args, "kwargs": kwargs}))
+        return "# Recovered report\n\nA factual conclusion supported by the recovered source."
+
+    def get_source_urls(self) -> list[str]:
+        return [source["url"] for source in self.sources]
+
+    def get_research_sources(self) -> list[dict[str, str]]:
+        return self.sources
+
+    def get_research_context(self) -> str:
+        return "Title:\nContent:\nSource:\n\nTitle:\nContent:\nSource:"
+
+
 class StubSourceMaterializer:
     async def materialize(self, urls: list[str]) -> MaterializedSourceSet:
         assert urls == ["https://input.example/report"]
@@ -168,6 +203,23 @@ class UnavailableSourceMaterializer:
                 ),
             ),
         )
+
+
+class RecoveredWebSourceMaterializer:
+    async def materialize(self, urls: list[str]) -> MaterializedSourceSet:
+        assert urls == ["https://web.example/evidence"]
+        source = MaterializedSource(
+            requested_url=urls[0],
+            canonical_url=urls[0],
+            title="Recovered official source",
+            media_type="text/html",
+            text=(
+                "Verified public evidence with enough detail to support the "
+                "expert report. " * 20
+            ),
+            byte_size=256,
+        )
+        return MaterializedSourceSet(sources=(source,), total_bytes=256)
 
 
 class FakeExecutor:
@@ -408,22 +460,19 @@ def test_research_contract_and_active_configuration(monkeypatch) -> None:
     assert body["sourceUrls"] == ["https://example.com/evidence"]
     assert body["cost"] == 0.25
     assert body["events"][0]["type"] == "logs"
-    assert body["researchEvidence"] == {
-        "queries": [],
-        "sources": [{
-            "visibility": "public",
-            "url": "https://example.com/evidence",
-            "title": "Evidence",
-            "sourceType": "web",
-            "summary": "Verified evidence context.",
-        }],
-        "researchContext": {
-            "content": "Compressed research context.",
-            "originalCharacters": 28,
-            "truncated": False,
-        },
-        "scraper": "beautiful_soup",
-    }
+    assert body["researchEvidence"]["queries"] == []
+    assert body["researchEvidence"]["sources"] == [{
+        "visibility": "public",
+        "url": "https://example.com/evidence",
+        "title": "Evidence",
+        "sourceType": "web",
+        "summary": "Verified evidence context.",
+    }]
+    assert body["researchEvidence"]["scraper"] == "beautiful_soup"
+    context = body["researchEvidence"]["researchContext"]
+    assert context["content"].startswith("<web_evidence>")
+    assert context["originalCharacters"] == len(context["content"])
+    assert context["truncated"] is False
 
     query = FakeResearcher.init_kwargs["query"]
     assert query == "Investigate the evidence."
@@ -828,6 +877,118 @@ def test_url_plus_web_combines_context_and_writes_one_report(
         "source.materialized",
         "source.web_supplement_started",
     ]
+
+
+def test_web_research_rewrites_from_recovered_source_bodies(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        main.research_worker,
+        "load_gpt_researcher",
+        lambda: RecoveringWebResearcher,
+    )
+    monkeypatch.setattr(
+        main.research_worker,
+        "default_source_materializer",
+        lambda: RecoveredWebSourceMaterializer(),
+    )
+    monkeypatch.setattr(main, "research_executor", InProcessExecutor())
+
+    response = TestClient(main.app).post(
+        "/research",
+        json={
+            "systemPrompt": "Expert identity.",
+            "task": "Research the assigned topic.",
+            "researchProfile": {
+                "schemaVersion": 1,
+                "mode": "standard",
+                "source": {
+                    "mode": "web",
+                    "retrievers": ["duckduckgo"],
+                },
+                "quality": {"curateSources": False},
+                "limits": {
+                    "maxSearchResultsPerQuery": 5,
+                    "maxIterations": 3,
+                    "maxSubtopics": 3,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert [name for name, _ in RecoveringWebResearcher.calls] == [
+        "conduct_research",
+        "add_research_sources",
+        "write_report",
+    ]
+    report_context = RecoveringWebResearcher.calls[-1][1]["kwargs"][
+        "ext_context"
+    ]
+    assert "Verified public evidence" in report_context
+    events = response.json()["events"]
+    assert any(event["type"] == "source.materialized" for event in events)
+    assert any(
+        event["type"] == "source.recovery_rewrite" for event in events
+    )
+    assert response.json()["researchEvidence"]["researchContext"][
+        "originalCharacters"
+    ] > 800
+
+
+def test_web_evidence_context_compresses_only_after_total_budget(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("GPTR_WEB_EVIDENCE_CONTEXT_BUDGET_CHARS", "50")
+    monkeypatch.setenv(
+        "GPTR_WEB_EVIDENCE_SOURCE_COMPRESS_THRESHOLD_CHARS",
+        "25",
+    )
+    monkeypatch.setenv(
+        "GPTR_WEB_EVIDENCE_SOURCE_COMPRESS_TARGET_CHARS",
+        "20",
+    )
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://models.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("FAST_LLM", "test-fast-model")
+
+    class Request:
+        base_url = None
+        api_key = None
+        fast_llm = None
+        fallback_base_url = None
+        fallback_api_key = None
+        fallback_fast_llm = None
+
+    compressor = main.research_worker.SourceEvidenceCompressor
+
+    async def fake_compress(self, **kwargs):
+        return "压缩后的证据正文"
+
+    monkeypatch.setattr(compressor, "compress", fake_compress)
+    collector = main.LogCollector()
+    context = asyncio.run(
+        main.research_worker._prepare_web_evidence_context(
+            [
+                {
+                    "title": "Official source",
+                    "url": "https://example.com/source",
+                    "text": "长正文" * 20,
+                },
+            ],
+            collector,
+            Request(),
+        )
+    )
+
+    assert "压缩后的证据正文" in context
+    event = next(
+        event for event in collector.events
+        if event.type == "source.context_prepared"
+    )
+    assert event.data["compressedSources"] == 1
+    assert event.data["compressionThresholdCharacters"] == 25
+    assert event.data["compressionTargetCharacters"] == 20
 
 
 """def test_pure_managed_mcp_uses_private_evidence_and_skips_web(
@@ -1354,7 +1515,8 @@ def test_stream_drops_raw_report_fragments_from_observability(
         for message in messages
         if message["type"] == "event"
     ]
-    assert [event["type"] for event in streamed_events] == ["logs"]
+    assert streamed_events[0]["type"] == "logs"
+    assert all(event["type"] != "report" for event in streamed_events)
     assert all(
         event["type"] != "report"
         for event in messages[-1]["result"]["events"]

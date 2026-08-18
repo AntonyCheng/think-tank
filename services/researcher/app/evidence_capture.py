@@ -24,8 +24,13 @@ def capture_research_evidence(
     extra_sources: list[
         PublicEvidenceSourceCapture | PrivateEvidenceSourceCapture
     ] | None = None,
+    research_context_override: str | None = None,
 ) -> ResearchEvidenceCapture:
-    context = _research_context(researcher)
+    context = (
+        research_context_override.strip()
+        if research_context_override and research_context_override.strip()
+        else _research_context(researcher)
+    )
     original_context_characters = len(context)
     return ResearchEvidenceCapture(
         queries=_queries(events, mode),

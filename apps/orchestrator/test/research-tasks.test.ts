@@ -793,6 +793,44 @@ test("cancels a running task through the runner abort signal", async () => {
   assert.deepEqual(events.slice(-2), ["task.canceling", "task.canceled"]);
 });
 
+test("marks active research telemetry as canceled when a task is canceled", async () => {
+  const run = {
+    schemaVersion: 1 as const,
+    aoStepId: "expert-1",
+    researchRunId: "run-1",
+    mode: "standard" as const,
+    state: "running" as const,
+    phase: "analyzing" as const,
+    startedAt: "2026-08-18T08:00:00.000Z",
+    updatedAt: "2026-08-18T08:01:00.000Z",
+    queueWaitMs: 0,
+    elapsedMs: 60_000,
+    sourceCount: 3,
+    cost: { status: "unavailable" as const, currency: "USD" as const, provenance: "gptr" as const, estimated: true as const },
+  };
+  const telemetry = {
+    schemaVersion: 1 as const,
+    runs: [run],
+    summary: { runCount: 1, completedRunCount: 0, uniqueSourceCount: 3, reportedCostUsd: 0, reportedCostRuns: 0, totalElapsedMs: 60_000 },
+  };
+  const manager = new ResearchTaskManager(
+    async (_topic, onEvent, controls) => {
+      onEvent({ type: "research.progress", timestamp: run.updatedAt, progress: run, telemetry });
+      await new Promise<void>((_resolve, reject) => {
+        controls.signal.addEventListener("abort", () => reject(controls.signal.reason), { once: true });
+      });
+      throw new Error("unreachable");
+    },
+  );
+
+  const submitted = manager.submit("cancel active telemetry");
+  await waitFor(() => manager.get(submitted.id)?.researchTelemetry?.runs[0]?.state === "running");
+  assert.equal(manager.cancel(submitted.id), true);
+  assert.equal(manager.get(submitted.id)?.researchTelemetry?.runs[0]?.state, "canceled");
+  await waitFor(() => manager.get(submitted.id)?.status === "canceled");
+  assert.equal(manager.get(submitted.id)?.researchTelemetry?.runs[0]?.state, "canceled");
+});
+
 test("cancels a task while AO is waiting for user input", async () => {
   const manager = new ResearchTaskManager(
     async (_topic, _onEvent, controls) => {

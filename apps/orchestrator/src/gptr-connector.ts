@@ -96,7 +96,19 @@ export interface ResearchInvocation {
 interface ResearchAttemptResult extends LLMResult {
   invocation: ResearchInvocation;
   publicSourceCount: number;
+  evidenceQuality: ResearchEvidenceQuality;
 }
+
+interface ResearchEvidenceQuality {
+  score: number;
+  reportCharacters: number;
+  contextCharacters: number;
+  materializedSourceCount: number;
+  citedSourceCount: number;
+  hasProcessStatement: boolean;
+}
+
+const MAX_EVIDENCE_ATTEMPTS = 5;
 
 export class GptrConnector implements LLMConnector {
   readonly #options: GptrConnectorOptions;
@@ -119,51 +131,58 @@ export class GptrConnector implements LLMConnector {
       this.#options.minimumPublicSources,
     );
     const initial = await this.#chatOnce(systemPrompt, userMessage, config);
-    if (!requiresEvidenceRecovery(initial, config, minimumPublicSources)) {
+    if (!requiresEvidenceRecovery(initial, minimumPublicSources)) {
       return llmResult(initial);
     }
 
-    this.#emitEvent("research.evidence_recovery_started", {
-      requiredPublicSources: minimumPublicSources,
-      observedPublicSources: initial.publicSourceCount,
-    }, initial.invocation);
-    try {
-      const recovered = await this.#chatOnce(
-        evidenceRecoveryPrompt(systemPrompt),
-        userMessage,
-        {
-          ...config,
-          params: {
-            ...(config.params ?? {}),
-            think_tank_evidence_recovery: "attempted",
-          },
-        },
-      );
-      const best = recovered.publicSourceCount >= initial.publicSourceCount
-        ? recovered
-        : initial;
-      if (
-        recovered.publicSourceCount >= minimumPublicSources
-      ) {
-        this.#emitEvent("research.evidence_recovery_succeeded", {
-          requiredPublicSources: minimumPublicSources,
-          observedPublicSources: recovered.publicSourceCount,
-        }, recovered.invocation);
-      } else {
-        this.#emitEvent("research.evidence_insufficient", {
-          requiredPublicSources: minimumPublicSources,
-          observedPublicSources: best.publicSourceCount,
-        }, best.invocation);
-      }
-      return llmResult(best);
-    } catch (error) {
-      this.#emitEvent("research.evidence_insufficient", {
+    let best = initial;
+    let lastError: string | undefined;
+    for (let attempt = 2; attempt <= MAX_EVIDENCE_ATTEMPTS; attempt += 1) {
+      this.#emitEvent("research.evidence_recovery_started", {
+        attempt,
+        maxAttempts: MAX_EVIDENCE_ATTEMPTS,
         requiredPublicSources: minimumPublicSources,
-        observedPublicSources: initial.publicSourceCount,
-        recoveryError: error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
-      }, initial.invocation);
-      return llmResult(initial);
+        observedPublicSources: best.publicSourceCount,
+        quality: best.evidenceQuality,
+      }, best.invocation);
+      try {
+        const recovered = await this.#chatOnce(
+          evidenceRecoveryPrompt(systemPrompt, attempt),
+          userMessage,
+          {
+            ...config,
+            params: {
+              ...(config.params ?? {}),
+              think_tank_evidence_recovery_attempt: attempt,
+            },
+          },
+        );
+        if (isBetterEvidence(recovered, best)) best = recovered;
+        if (!requiresEvidenceRecovery(best, minimumPublicSources)) {
+          this.#emitEvent("research.evidence_recovery_succeeded", {
+            attempts: attempt,
+            maxAttempts: MAX_EVIDENCE_ATTEMPTS,
+            requiredPublicSources: minimumPublicSources,
+            observedPublicSources: best.publicSourceCount,
+            quality: best.evidenceQuality,
+          }, best.invocation);
+          return llmResult(best);
+        }
+      } catch (error) {
+        lastError = error instanceof Error
+          ? error.message.slice(0, 240)
+          : String(error).slice(0, 240);
+      }
     }
+    this.#emitEvent("research.evidence_insufficient", {
+      attempts: MAX_EVIDENCE_ATTEMPTS,
+      maxAttempts: MAX_EVIDENCE_ATTEMPTS,
+      requiredPublicSources: minimumPublicSources,
+      observedPublicSources: best.publicSourceCount,
+      quality: best.evidenceQuality,
+      ...(lastError ? { recoveryError: lastError } : {}),
+    }, best.invocation);
+    return llmResult(best);
   }
 
   async #chatOnce(
@@ -373,6 +392,7 @@ export class GptrConnector implements LLMConnector {
         },
         invocation,
         publicSourceCount: publicSourceCount(result),
+        evidenceQuality: researchEvidenceQuality(result),
       };
     } catch (error) {
       let normalized = error instanceof Error
@@ -435,18 +455,16 @@ export class GptrConnector implements LLMConnector {
 
 function requiresEvidenceRecovery(
   result: ResearchAttemptResult,
-  config: LLMConfig,
   minimumPublicSources: number,
 ): boolean {
   if (
     minimumPublicSources < 1 ||
-    config.params?.think_tank_evidence_recovery === "attempted" ||
-    result.publicSourceCount >= minimumPublicSources
+    result.invocation.researchProfile.mode === "synthesis" ||
+    result.invocation.researchProfile.source.mode !== "web"
   ) {
     return false;
   }
-  return result.invocation.researchProfile.mode !== "synthesis" &&
-    result.invocation.researchProfile.source.mode === "web";
+  return !evidenceIsAdequate(result, minimumPublicSources);
 }
 
 function normalizedMinimumPublicSources(value: number | undefined): number {
@@ -454,15 +472,74 @@ function normalizedMinimumPublicSources(value: number | undefined): number {
   return Math.max(0, Math.trunc(value ?? 0));
 }
 
-function evidenceRecoveryPrompt(systemPrompt: string): string {
+function evidenceRecoveryPrompt(systemPrompt: string, attempt: number): string {
   return [
     systemPrompt,
     "",
     "Evidence recovery requirement:",
-    "The prior research pass returned too few verifiable public sources.",
-    "Run a focused replacement search before writing the report. Prioritize direct government, academic, industry-association, or primary-source pages that directly support the assigned question.",
+    `This is bounded recovery attempt ${attempt} of ${MAX_EVIDENCE_ATTEMPTS}.`,
+    "The prior research pass did not produce sufficient usable evidence. First use the directly accessible sources already found; only then run a focused replacement search for missing evidence.",
+    "Prioritize direct government, academic, industry-association, or primary-source pages that directly support the assigned question.",
+    "Do not describe a search plan, ask for more material, or report that research will happen later. Deliver the best evidence-backed report available now and state only concrete evidence gaps.",
     "Keep only claims supported by the collected URLs and retain those Markdown links beside the relevant facts.",
   ].join("\n");
+}
+
+function researchEvidenceQuality(response: ResearchResponse): ResearchEvidenceQuality {
+  const report = response.report.trim();
+  const evidence = response.researchEvidence;
+  const contextCharacters = evidence?.researchContext.originalCharacters ?? 0;
+  const materializedSourceCount = response.events.filter(
+    (event) => event.type === "source.materialized",
+  ).length;
+  const citedSourceCount = (evidence?.sources ?? []).filter(
+    (source) => source.visibility === "public" &&
+      typeof source.summary === "string" && source.summary.trim().length >= 200,
+  ).length;
+  const hasProcessStatement = /(?:请(?:补充|提供).{0,30}(?:资料|来源|URL|网址)|(?:当前|研究)?上下文.{0,30}(?:没有|缺少).{0,30}(?:资料|来源|URL|网址)|(?:没有|缺少).{0,30}(?:可用|公开)?.{0,30}(?:资料|来源|URL|网址)|(?:无法|未能).{0,40}(?:检索|获取).{0,40}(?:资料|来源|URL|网址)|(?:无法|未能).{0,80}(?:完成|形成).{0,50}(?:报告|研究)|我(?:先|将).{0,30}(?:检索|搜索)|sources? (?:are|is) (?:missing|empty)|unable to (?:find|retrieve)|please provide)/iu.test(report);
+  return {
+    score: Math.min(report.length, 12_000) +
+      Math.min(contextCharacters, 20_000) +
+      materializedSourceCount * 2_000 +
+      citedSourceCount * 1_000 -
+      (hasProcessStatement ? 30_000 : 0),
+    reportCharacters: report.length,
+    contextCharacters,
+    materializedSourceCount,
+    citedSourceCount,
+    hasProcessStatement,
+  };
+}
+
+function evidenceIsAdequate(
+  result: ResearchAttemptResult,
+  minimumPublicSources: number,
+): boolean {
+  if (result.publicSourceCount < minimumPublicSources) return false;
+  // Legacy researcher responses did not include a capture. Preserve their
+  // existing URL-based behavior while current responses use evidence quality.
+  const quality = result.evidenceQuality;
+  if (
+    quality.contextCharacters === 0 &&
+    quality.materializedSourceCount === 0 &&
+    quality.citedSourceCount === 0
+  ) {
+    return true;
+  }
+  return !quality.hasProcessStatement &&
+    quality.reportCharacters >= 240 &&
+    (quality.contextCharacters >= 800 ||
+      quality.materializedSourceCount >= 1 ||
+      quality.citedSourceCount >= minimumPublicSources);
+}
+
+function isBetterEvidence(
+  candidate: ResearchAttemptResult,
+  current: ResearchAttemptResult,
+): boolean {
+  return candidate.evidenceQuality.score > current.evidenceQuality.score ||
+    (candidate.evidenceQuality.score === current.evidenceQuality.score &&
+      candidate.publicSourceCount > current.publicSourceCount);
 }
 
 function publicSourceCount(result: ResearchResponse): number {

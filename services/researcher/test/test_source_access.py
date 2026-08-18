@@ -61,14 +61,14 @@ class SequenceTransport:
         return response
 
 
-def test_static_html_without_a_rendering_signal_never_requests_fallback() -> None:
+def test_short_static_html_is_eligible_for_browser_recovery() -> None:
     decision = source_fallback_decision(
         b"<html><body><p>Short public notice.</p></body></html>",
         "text/html",
         "Short public notice.",
     )
 
-    assert not decision.eligible
+    assert decision.reason == "short_text"
 
 
 def test_empty_client_rendered_html_is_eligible_for_one_fallback() -> None:
@@ -108,6 +108,35 @@ def test_rendered_fallback_replaces_an_empty_static_html_response() -> None:
     assert result.sources[0].fetch_strategy == "browser"
     assert result.sources[0].fallback_reason == "empty_text"
     assert result.sources[0].text == "Rendered Verified rendered evidence."
+
+
+def test_rendered_fallback_recovers_a_static_forbidden_response() -> None:
+    static = SourceHttpResponse(
+        status=403,
+        headers={"content-type": "text/html"},
+        body=b"Access denied",
+        peer_ip="93.184.216.34",
+    )
+    rendered = SourceHttpResponse(
+        status=200,
+        headers={"content-type": "text/html"},
+        body=b"<html><head><title>Recovered</title></head><body><main>Verified evidence from a browser render.</main></body></html>",
+        peer_ip="93.184.216.34",
+    )
+    materializer = SourceMaterializer(
+        resolver=StubResolver("93.184.216.34"),
+        transport=StubTransport(static),
+        fallback_transport=StubTransport(rendered),
+        fallback_strategy="browser",
+    )
+
+    result = asyncio.run(
+        materializer.materialize(["https://public.example/report"])
+    )
+
+    assert result.sources[0].fetch_strategy == "browser"
+    assert result.sources[0].fallback_reason == "unsuccessful_response"
+    assert "Verified evidence" in result.sources[0].text
 
 
 def test_rendered_fallback_rejects_an_unverified_peer() -> None:

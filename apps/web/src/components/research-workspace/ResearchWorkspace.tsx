@@ -36,7 +36,7 @@ interface ResearchWorkspaceProps {
 }
 
 interface ExpertRuntime {
-  status: "waiting" | "queued" | "working" | "completed" | "failed" | "skipped";
+  status: "waiting" | "queued" | "working" | "completed" | "failed" | "skipped" | "canceled";
   event?: TaskEvent;
 }
 
@@ -82,6 +82,7 @@ const expertRuntimeCopy: Record<ExpertRuntime["status"], string> = {
   completed: "已完成",
   failed: "未完成",
   skipped: "因上游失败未执行",
+  canceled: "已停止",
 };
 
 function researchModeLabel(mode: string): string {
@@ -95,6 +96,7 @@ function researchPhaseLabel(phase: string): string {
 function expertRuntime(
   events: TaskEvent[],
   researchRuns: ResearchRunProgress[] = [],
+  taskStatus?: TaskStatus,
 ): Map<string, ExpertRuntime> {
   const state = new Map<string, ExpertRuntime>();
   for (const event of events) {
@@ -122,6 +124,18 @@ function expertRuntime(
       status: run.state === "queued" ? "queued" : "working",
     });
   }
+  const terminalOverride = taskStatus === "canceled"
+    ? "canceled"
+    : taskStatus === "failed"
+      ? "failed"
+      : undefined;
+  if (terminalOverride) {
+    for (const [stepId, runtime] of state) {
+      if (runtime.status === "queued" || runtime.status === "working") {
+        state.set(stepId, { ...runtime, status: terminalOverride });
+      }
+    }
+  }
   return state;
 }
 
@@ -129,6 +143,7 @@ function StatusIcon({ status }: { status: ExpertRuntime["status"] }) {
   if (status === "working") return <LoadingOutlined spin />;
   if (status === "completed") return <CheckCircleFilled />;
   if (status === "failed") return <CloseCircleFilled />;
+  if (status === "canceled") return <PauseCircleOutlined />;
   return <ClockCircleOutlined />;
 }
 
@@ -408,12 +423,8 @@ function ResearchFailure({
 }
 
 function CompletedExpertReport({
-  expert,
-  agent,
   bundle,
 }: {
-  expert: WorkflowStep;
-  agent?: AgentCatalogEntry;
   bundle: ExpertEvidenceBundle;
 }) {
   const reportHtml = useMemo(
@@ -422,19 +433,10 @@ function CompletedExpertReport({
   );
   const publicSources = bundle.sources.filter((source) => source.visibility === "public");
 
-  return <section className="expert-stage completed-expert-report">
-    <div className="current-expert-header">
-      <span className="expert-avatar expert-avatar-large">{agent?.emoji ?? expert.name.slice(0, 1)}</span>
-      <div>
-        <p>已完成研究</p>
-        <h1>{expert.name}</h1>
-        <span>{expert.mode ? researchModeLabel(expert.mode) : "研究专家"}</span>
-      </div>
-      <Tag className="runtime-tag status-completed" icon={<CheckCircleFilled />}>已完成</Tag>
-    </div>
+  return <section className="completed-expert-report" aria-label="阶段性研究报告">
     <article className="completed-expert-report-card">
       <div className="completed-expert-report-heading">
-        <span>研究成果</span>
+        <span>阶段性研究报告</span>
         <small>第 {bundle.report.revision} 版</small>
       </div>
       <div className="completed-expert-report-content" dangerouslySetInnerHTML={{ __html: reportHtml }} />
@@ -583,6 +585,8 @@ function CurrentExpert({
   agentsByRole,
   selectedId,
   events,
+  completedBundle,
+  completedReportHint,
 }: {
   snapshot: ResearchTaskSnapshot;
   steps: WorkflowStep[];
@@ -590,6 +594,8 @@ function CurrentExpert({
   agentsByRole: ReadonlyMap<string, AgentCatalogEntry>;
   selectedId?: string;
   events: TaskEvent[];
+  completedBundle?: ExpertEvidenceBundle;
+  completedReportHint?: string;
 }) {
   const activeId = selectedId ?? steps.find((step) => runtimes.get(step.id)?.status === "working")?.id;
   const expert = steps.find((step) => step.id === activeId) ?? steps[0];
@@ -652,7 +658,7 @@ function CurrentExpert({
               <span>{expert.mode ? researchModeLabel(expert.mode) : "研究专家"}</span>
             </div>
             <Tag className={`runtime-tag status-${runtime?.status ?? "waiting"}`} icon={<StatusIcon status={runtime?.status ?? "waiting"} />}>
-              {runtime?.status === "working" ? "正在执行" : runtime?.status === "completed" ? "已完成" : runtime?.status === "failed" ? "未完成" : "等待执行"}
+              {runtime?.status === "working" ? "正在执行" : runtime?.status === "completed" ? "已完成" : runtime?.status === "failed" ? "未完成" : runtime?.status === "canceled" ? "已停止" : "等待执行"}
             </Tag>
             <ResearchWarningMarker warnings={snapshot.warnings} />
           </div>
@@ -682,6 +688,10 @@ function CurrentExpert({
               ? <div className="activity-chain-scroll" onScroll={handleActivityScroll} ref={activityScrollRef}><ThoughtChain size="small" items={chainItems} collapsible /></div>
               : <p className="empty-copy">正在等待公开研究活动。</p>}
           </section>
+          {completedBundle && <CompletedExpertReport bundle={completedBundle} />}
+          {completedReportHint && <section className="completed-expert-report completed-expert-report-empty">
+            <Empty description={completedReportHint} />
+          </section>}
         </>
       ) : (
         <CandidateExpertMatcher taskId={snapshot.id} />
@@ -731,7 +741,7 @@ function eventTitle(event: TaskEvent): string {
   if (typeof event.data.message === "string") return event.data.message;
   if (event.type === "task.needs_input") return "等待补充研究信息";
   if (event.type === "task.input_received") return "已收到补充信息";
-  if (event.type === "task.recoverable") return "研究任务可恢复";
+  if (event.type === "task.recoverable") return "服务重启后，研究进度可继续";
   if (event.type === "task.resumed") return "研究任务已恢复";
   if (event.type === "task.rerun_requested") return "正在重新执行研究";
   if (event.type === "task.checkpoint_saved") return "已保存研究进度";
@@ -819,8 +829,8 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
     return () => window.clearInterval(timer);
   }, [hasLiveDuration]);
   const runtimes = useMemo(
-    () => expertRuntime(events, snapshot?.researchTelemetry?.runs),
-    [events, snapshot?.researchTelemetry?.runs],
+    () => expertRuntime(events, snapshot?.researchTelemetry?.runs, snapshot?.status),
+    [events, snapshot?.researchTelemetry?.runs, snapshot?.status],
   );
   const agentsByRole = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const steps = snapshot?.workflowPlan?.steps ?? [];
@@ -829,8 +839,8 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
     ? selectedExpertId
     : expertSteps.find((step) => runtimes.get(step.id)?.status === "working")?.id ?? expertSteps[0]?.id;
   const canCancel = snapshot && ["queued", "running", "needs_input", "recoverable"].includes(snapshot.status);
-  const selectedExpert = selectedExpertId
-    ? expertSteps.find((step) => step.id === selectedExpertId)
+  const selectedExpert = activeExpertId
+    ? expertSteps.find((step) => step.id === activeExpertId)
     : undefined;
   const selectedRuntime = selectedExpert
     ? runtimes.get(selectedExpert.id)
@@ -934,17 +944,7 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
         </aside>
         <section className="workspace-main">
           <PendingInput snapshot={snapshot} onUpdate={store.updateSnapshot} />
-          {selectedExpert && selectedCompletedBundle
-            ? <CompletedExpertReport
-              agent={agentsByRole.get(selectedExpert.role)}
-              bundle={selectedCompletedBundle}
-              expert={selectedExpert}
-            />
-            : selectedCompletedExpert
-              ? <section className="expert-stage completed-expert-report">
-                <Empty description={expertResultError || (expertResultLoading ? "正在读取已完成的研究成果" : "未找到已完成的研究成果")} />
-              </section>
-            : snapshot.status === "failed"
+          {snapshot.status === "failed" && !selectedCompletedExpert
             ? <ResearchFailure
               snapshot={snapshot}
               events={events}
@@ -954,7 +954,18 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
               }}
               onRetry={(task) => onOpenTask(task.id, task.topic)}
             />
-            : <CurrentExpert agentsByRole={agentsByRole} snapshot={snapshot} steps={steps} runtimes={runtimes} selectedId={activeExpertId} events={events} />}
+            : <CurrentExpert
+              agentsByRole={agentsByRole}
+              completedBundle={selectedCompletedBundle}
+              completedReportHint={selectedCompletedExpert && !selectedCompletedBundle
+                ? expertResultError || (expertResultLoading ? "正在读取已完成的研究成果" : "未找到已完成的研究成果")
+                : undefined}
+              events={events}
+              runtimes={runtimes}
+              selectedId={activeExpertId}
+              snapshot={snapshot}
+              steps={steps}
+            />}
           <footer className="workspace-summary">
             <span>研究耗时 {formatElapsed(liveElapsed(snapshot, now))}</span>
             <span>已收集 {snapshot.researchTelemetry?.summary.uniqueSourceCount ?? 0} 个来源</span>

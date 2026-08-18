@@ -19,6 +19,10 @@ MCP 默认关闭 Uvicorn HTTP 访问日志，因为 MCP 鉴权密钥位于连接
 
 ## 1. 准备配置
 
+以下步骤适用于新机器首次部署。代码仓库只提供配置模板；真实的密钥、管理员密码、数据库密码、研究历史和导出文件均不提交到 Git。
+
+从其他机器迁移时，请先从代码仓库拉取最新代码，再按需迁移备份的 `docker/data`。如果不需要迁移历史任务，只需保留仓库中的 `.gitkeep` 文件并重新创建下面的配置文件即可。
+
 在项目根目录执行：
 
 ```powershell
@@ -53,6 +57,8 @@ mcp.env:THINK_TANK_SERVICE_API_KEY
 `http://thinktank-searxng:8080`。SearXNG 的 `settings.yml` 已启用 JSON
 格式，供 GPT Researcher 调用；默认同时映射宿主机端口 `7170`，应仅在可信网络中暴露。
 `searxng.env` 中的 `SEARXNG_SECRET` 是 SearXNG 的服务密钥，应替换为随机长字符串。
+
+首次启动后，请使用 `api.env` 中的管理员账号登录系统设置页，检查主模型、备用模型、向量模型、检索器和并发参数。四类大模型角色（AO 编排、AO 验证、GPTR 快速、GPTR 深度）分别在主模型和可选备用模型中配置；向量模型始终独立运行，不参与主备切换。
 
 模型服务仅接受 OpenAI 兼容协议。主模型与可选备用模型各自配置 AO 编排、AO 验证、
 GPTR 快速和 GPTR 深度四个模型；向量模型独立配置且不参与主备切换。管理员在系统设置页
@@ -102,6 +108,8 @@ docker compose -f docker\docker-compose.yaml up -d --build
 
 首次构建会下载 Node、Python、Nginx、Playwright Chromium 以及项目依赖，Researcher 镜像会明显大于其他镜像。
 
+在 Linux 上将命令中的反斜杠路径改为正斜杠，例如 `docker/docker-compose.yaml`。部署更新时不需要提交或复制本机的 `node_modules`、`.venv`、`dist`、测试缓存等目录，Compose 构建会在镜像内安装依赖。
+
 默认使用阿里云 PyPI 镜像和 npmmirror；BuildKit 会缓存 pip、npm 下载内容。后续依赖清单不变时 Docker 会直接复用镜像层；依赖发生变化时也会优先复用已下载的软件包。不要在日常更新时使用 `docker builder prune`，否则这些构建缓存会被清除。只有在阿里云镜像缺少依赖时，才在构建前显式设置 `PIP_EXTRA_INDEX_URL=https://pypi.org/simple` 作为兜底。
 
 如需临时切换为官方源，可在当前终端覆盖构建参数后再构建：
@@ -145,6 +153,13 @@ Invoke-RestMethod http://127.0.0.1:7168/health
 Invoke-RestMethod http://127.0.0.1:7168/ready
 ```
 
+`/health` 表示 API 进程已启动，`/ready` 还会检查 Researcher、数据库和必要的运行配置；新部署时应以 `/ready` 返回成功作为可以登录使用的判断依据。若首次启动较慢，可使用以下命令观察服务状态：
+
+```powershell
+docker compose -f docker\docker-compose.yaml ps
+docker compose -f docker\docker-compose.yaml logs --tail=100 thinktank-api thinktank-researcher thinktank-web
+```
+
 浏览器访问：
 
 ```text
@@ -173,6 +188,17 @@ docker compose -f docker\docker-compose.yaml up -d
 ```
 
 清理镜像不会删除 `docker/data`。备份前建议先执行 `down`，再整体备份 `docker/data`。
+
+更新部署建议按以下顺序执行：
+
+```powershell
+git pull
+docker compose -f docker\docker-compose.yaml config
+docker compose -f docker\docker-compose.yaml up -d --build
+docker compose -f docker\docker-compose.yaml ps
+```
+
+不要执行 `docker compose down -v`，否则可能删除数据库卷或造成不必要的数据清理；当前项目的研究历史和配置主要位于 `docker/data`，更新代码时应保留该目录。
 
 ## SQLite 到 PostgreSQL 升级
 

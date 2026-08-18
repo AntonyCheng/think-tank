@@ -1610,14 +1610,15 @@ textarea:focus-visible {
   overscroll-behavior: contain;
   scrollbar-color: transparent transparent;
   scrollbar-gutter: stable;
-  scrollbar-width: none;
+  scrollbar-width: thin;
 }
 
-.research-timeline ol:hover { scrollbar-color: #b7c4cf #f2f5f8; scrollbar-width: thin; }
-.research-timeline ol::-webkit-scrollbar { width: 0; }
-.research-timeline ol:hover::-webkit-scrollbar { width: 9px; }
-.research-timeline ol::-webkit-scrollbar-track { margin: 4px 0; border-radius: 999px; background: #f2f5f8; }
-.research-timeline ol::-webkit-scrollbar-thumb { min-height: 44px; border: 2px solid #f2f5f8; border-radius: 999px; background: #b7c4cf; }
+.research-timeline ol:hover { scrollbar-color: #b7c4cf #f2f5f8; }
+.research-timeline ol::-webkit-scrollbar { width: 8px; }
+.research-timeline ol::-webkit-scrollbar-track { margin: 4px 0; border-radius: 999px; background: transparent; }
+.research-timeline ol::-webkit-scrollbar-thumb { min-height: 44px; border: 2px solid transparent; border-radius: 999px; background: transparent; background-clip: padding-box; }
+.research-timeline ol:hover::-webkit-scrollbar-track { background: #f2f5f8; }
+.research-timeline ol:hover::-webkit-scrollbar-thumb { border-color: #f2f5f8; background: #b7c4cf; }
 .research-timeline ol::-webkit-scrollbar-thumb:hover { background: #91a2b1; }
 
 .research-timeline li {
@@ -1799,6 +1800,7 @@ textarea:focus-visible {
 .status-completed { color: #39a16f; }
 .status-failed { color: #ce625b; }
 .status-skipped { color: #a18b5d; }
+.status-canceled { color: #8995a1; }
 
 .workspace-main {
   display: flex;
@@ -1823,6 +1825,7 @@ textarea:focus-visible {
 .runtime-tag.status-working { background: #eef5ff; }
 .runtime-tag.status-completed { background: #edf9f2; }
 .runtime-tag.status-failed { background: #fff0ef; }
+.runtime-tag.status-canceled { background: #f2f4f6; }
 
 .research-warning-marker {
   display: inline-grid;
