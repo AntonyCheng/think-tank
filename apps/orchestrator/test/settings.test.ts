@@ -31,6 +31,7 @@ test("loads the deployment-global v1 settings and normalizes GPTR models", () =>
   assert.deepEqual(settings.retrievers, ["duckduckgo"]);
   assert.equal(settings.concurrency, 3);
   assert.equal(settings.timeZone, "Asia/Shanghai");
+  assert.equal(settings.modelPreflightTimeoutMs, 30_000);
   assert.equal(settings.gptrHealthTimeoutMs, 5_000);
   assert.equal(settings.gptrResearchTimeoutMs, 30 * 60 * 1_000);
   assert.equal(settings.gptrCleanupGraceMs, 20_000);
@@ -178,6 +179,33 @@ test("validates configured execution timeouts", () => {
       GPTR_CLEANUP_GRACE_MS: "20000",
     }),
     /GPTR_CLEANUP_GRACE_MS must be smaller/u,
+  );
+});
+
+test("accepts a configurable model preflight timeout", () => {
+  const settings = settingsFromEnv({
+    OPENAI_API_KEY: "key",
+    AO_PLANNER_MODEL: "planner",
+    GPTR_FAST_LLM: "fast",
+    GPTR_SMART_LLM: "smart",
+    GPTR_EMBEDDING: "m3e",
+    MODEL_PREFLIGHT_TIMEOUT_MS: "45000",
+  });
+
+  assert.equal(settings.modelPreflightTimeoutMs, 45_000);
+});
+
+test("rejects an invalid model preflight timeout", () => {
+  assert.throws(
+    () => settingsFromEnv({
+      OPENAI_API_KEY: "key",
+      AO_PLANNER_MODEL: "planner",
+      GPTR_FAST_LLM: "fast",
+      GPTR_SMART_LLM: "smart",
+      GPTR_EMBEDDING: "m3e",
+      MODEL_PREFLIGHT_TIMEOUT_MS: "0",
+    }),
+    /MODEL_PREFLIGHT_TIMEOUT_MS must be a positive integer/u,
   );
 });
 

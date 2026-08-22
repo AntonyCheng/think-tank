@@ -10,6 +10,8 @@ interface ResearchLaunchProps {
   error?: string;
   onExit: () => void;
   onRetry?: () => void;
+  errorTitle?: string;
+  retryLabel?: string;
 }
 
 const stageCopy: Record<ResearchLaunchStage, { title: string; description: string; activeStep: number }> = {
@@ -32,7 +34,7 @@ const stageCopy: Record<ResearchLaunchStage, { title: string; description: strin
 
 const steps = ["研究主题已提交", "准备研究会话", "进入研究工作区"];
 
-export function ResearchLaunch({ topic, stage = "opening", error, onExit, onRetry }: ResearchLaunchProps) {
+export function ResearchLaunch({ topic, stage = "opening", error, onExit, onRetry, errorTitle = "暂时无法创建研究会话", retryLabel = "重试创建" }: ResearchLaunchProps) {
   const copy = stageCopy[stage];
   const hasError = Boolean(error);
 
@@ -47,7 +49,7 @@ export function ResearchLaunch({ topic, stage = "opening", error, onExit, onRetr
         <div className="research-launch-copy">
           {hasError ? <span className="launch-icon launch-icon-error">!</span> : <LoadingOutlined className="launch-icon" spin />}
           <p className="research-launch-eyebrow">{hasError ? "研究尚未开始" : "研究启动中"}</p>
-          <h1>{hasError ? "暂时无法创建研究会话" : copy.title}</h1>
+          <h1>{hasError ? errorTitle : copy.title}</h1>
           <p className="research-launch-description">{hasError ? error : copy.description}</p>
           {!hasError && <ol className="research-launch-steps">
             {steps.map((label, index) => {
@@ -61,7 +63,7 @@ export function ResearchLaunch({ topic, stage = "opening", error, onExit, onRetr
           </ol>}
           {topic.trim() && <p className="research-launch-topic">{topic}</p>}
           {hasError && <div className="research-launch-actions">
-            {onRetry && <Button type="primary" onClick={onRetry}>重试创建</Button>}
+            {onRetry && <Button type="primary" onClick={onRetry}>{retryLabel}</Button>}
             <Button icon={<ArrowLeftOutlined />} onClick={onExit}>返回首页</Button>
           </div>}
         </div>

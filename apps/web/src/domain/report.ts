@@ -16,6 +16,8 @@ export interface ReportDocument {
   createdAt: string;
   updatedAt: string;
   blocks: ReportBlock[];
+  isDirty: boolean;
+  draftRevision: number;
   audit?: {
     status?: string;
     coverage?: number;
@@ -30,11 +32,19 @@ export interface ReportDocumentVersion {
   createdAt: string;
 }
 
+export function findReportVersionSnapshot(
+  versions: ReportDocumentVersion[],
+  version: number,
+): ReportDocumentVersion | undefined {
+  return versions.find((entry) => entry.version === version);
+}
+
 export interface ReportMessage {
   id: string;
   conversationId: string;
   taskId: string;
   blockId: string;
+  operationId?: string;
   role: "user" | "assistant" | "event";
   content: string;
   documentVersion: number;
@@ -54,12 +64,19 @@ export interface ReportOperation {
   id: string;
   conversationId: string;
   scope: "blocks" | "document" | "text";
+  placement?: "replace" | "insert_before" | "insert_after";
   blockIds: string[];
-  state: "proposed" | "applied" | "rejected" | "stale";
+  rangeStart?: number;
+  rangeEnd?: number;
+  state: "proposed" | "applied" | "rejected" | "stale" | "discarded";
   documentVersion: number;
   originalMarkdown: string;
   replacementMarkdown: string;
   createdAt: string;
+  appliedBlockIds?: string[];
+  appliedRangeStart?: number;
+  appliedRangeEnd?: number;
+  structuralChange?: "unchanged" | "merge" | "split" | "insert" | "delete" | "retype" | "document";
 }
 
 export interface ReportEditorReply {
@@ -78,6 +95,7 @@ export interface ReportEditorProposal {
   operation: ReportOperation;
   document: ReportDocument;
   summary: string;
+  targetBlockIds?: string[];
   sources?: Array<{ id: string; title: string; url: string }>;
 }
 

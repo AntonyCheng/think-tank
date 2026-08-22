@@ -808,7 +808,7 @@ export function createApiServer(
             version,
             expectedVersion: documentVersion,
           });
-          return sendJson(response, 201, {
+        return sendJson(response, 201, {
             ...result,
             audit: reportEditor.audit(task.id, reportEditorSources(task)),
           });
@@ -834,11 +834,74 @@ export function createApiServer(
         if (!isCompletedReportTask(task)) {
           return sendJson(response, 409, { error: "report editor is only available after completion" });
         }
-        const blockId = url.searchParams.get("blockId")?.trim() || undefined;
         return sendJson(response, 200, {
-          conversations: reportEditor.conversations(task.id, blockId),
-          operations: reportEditor.operations(task.id, blockId),
+          conversations: reportEditor.conversations(task.id),
+          operations: reportEditor.operations(task.id),
         });
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" && segments[1] === "tasks" && segments[2] &&
+        segments[3] === "report-editor" && segments[4] === "save-draft" && segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) return sendJson(response, 409, { error: "report editor is only available after completion" });
+        const body = await readJsonBody(request, REPORT_EDITOR_BODY_BYTES);
+        const documentVersion = positiveEditorVersion(body.documentVersion);
+        const replacementMarkdown = typeof body.replacementMarkdown === "string" ? body.replacementMarkdown : undefined;
+        if (!documentVersion || replacementMarkdown === undefined) return sendJson(response, 422, { error: "documentVersion and replacementMarkdown are required" });
+        reportDocuments.getOrCreate(task.id, task.output!);
+        try {
+          const document = reportEditor.saveDraft({ taskId: task.id, expectedVersion: documentVersion, replacementMarkdown });
+          return sendJson(response, 200, { document, audit: reportEditor.audit(task.id, reportEditorSources(task)) });
+        } catch (error) {
+          if (error instanceof ReportDocumentConflictError) return sendJson(response, 409, { error: error.message, document: reportDocuments.get(task.id) });
+          return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" && segments[1] === "tasks" && segments[2] &&
+        segments[3] === "report-editor" && segments[4] === "save-version" && segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) return sendJson(response, 409, { error: "report editor is only available after completion" });
+        const body = await readJsonBody(request);
+        const documentVersion = positiveEditorVersion(body.documentVersion);
+        if (!documentVersion) return sendJson(response, 422, { error: "documentVersion is required" });
+        reportDocuments.getOrCreate(task.id, task.output!);
+        try {
+          const document = reportEditor.saveVersion({ taskId: task.id, expectedVersion: documentVersion });
+          return sendJson(response, 200, { document, audit: reportEditor.audit(task.id, reportEditorSources(task)) });
+        } catch (error) {
+          if (error instanceof ReportDocumentConflictError) return sendJson(response, 409, { error: error.message, document: reportDocuments.get(task.id) });
+          return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      if (
+        request.method === "POST" &&
+        segments[0] === "api" && segments[1] === "tasks" && segments[2] &&
+        segments[3] === "report-editor" && segments[4] === "discard-draft" && segments.length === 5
+      ) {
+        const task = manager.get(segments[2]);
+        if (!task) return sendJson(response, 404, { error: "task not found" });
+        if (!isCompletedReportTask(task)) return sendJson(response, 409, { error: "report editor is only available after completion" });
+        const body = await readJsonBody(request);
+        const documentVersion = positiveEditorVersion(body.documentVersion);
+        if (!documentVersion) return sendJson(response, 422, { error: "documentVersion is required" });
+        reportDocuments.getOrCreate(task.id, task.output!);
+        try {
+          const document = reportEditor.discardDraft({ taskId: task.id, expectedVersion: documentVersion });
+          return sendJson(response, 200, { document });
+        } catch (error) {
+          if (error instanceof ReportDocumentConflictError) return sendJson(response, 409, { error: error.message, document: reportDocuments.get(task.id) });
+          return sendJson(response, 422, { error: error instanceof Error ? error.message : String(error) });
+        }
       }
 
       if (
@@ -978,6 +1041,7 @@ export function createApiServer(
                 scope: "blocks" as const,
                 blockIds: targetedBlockIds,
                 originalFingerprint: undefined,
+                conversationId: undefined,
               }
             : commonInput;
           if (plan.intent === "chat" || plan.intent === "clarify") {
@@ -1056,6 +1120,7 @@ export function createApiServer(
           const result = await reportEditor.propose({
             ...editInput,
             instruction: plan.editInstruction ?? instruction,
+            userInstruction: instruction,
             ...(automaticSources
               ? { sourceIds: automaticSources.results.filter((item) => item.fetchStatus === "fetched").map((item) => item.id) }
               : sourceIds.length ? { sourceIds: [...new Set(sourceIds)] } : {}),
@@ -1064,6 +1129,7 @@ export function createApiServer(
             kind: "proposal",
             intent: plan.intent,
             ...result,
+            ...(targetedBlockIds.length ? { targetBlockIds: targetedBlockIds } : {}),
             sources: automaticSources?.results ?? [],
             audit: reportEditor.audit(task.id, reportEditorSources(task)),
           });
@@ -1454,6 +1520,21 @@ export function createApiServer(
             200,
             serviceAuthorized ? serviceTaskStatus(task) : enrichLegacyWorkflowPlan(task),
           );
+        }
+        if (segments.length === 4 && segments[3] === "workspace") {
+          const expertResults = manager.evidenceBundles(taskId).map((bundle) => ({
+            aoStepId: bundle.aoStepId,
+            completedAt: bundle.completedAt,
+            report: bundle.report,
+            sources: bundle.sources.flatMap((source) => source.visibility === "public"
+              ? [{ title: source.title, visibility: source.visibility, url: source.url }]
+              : []),
+          }));
+          return sendJson(response, 200, {
+            snapshot: enrichLegacyWorkflowPlan(task),
+            events: manager.events(taskId),
+            expertResults,
+          });
         }
         if (segments.length === 5 && segments[3] === "experts" && segments[4]) {
           const bundle = manager.evidenceBundles(taskId)

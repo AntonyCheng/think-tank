@@ -425,6 +425,11 @@ export class ResearchTaskManager {
     return () => runtime.listeners.delete(listener);
   }
 
+  events(id: string): ResearchTaskEvent[] {
+    const stored = this.#store.load(id);
+    return stored ? stored.events.map(presentTaskEvent) : [];
+  }
+
   answerInput(id: string, answer: string, requestId?: string): boolean {
     const normalized = answer.trim();
     const task = this.#store.load(id)?.snapshot;

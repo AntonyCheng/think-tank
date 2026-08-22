@@ -5,6 +5,7 @@ import {
   InMemoryReportEditorStore,
   type ReportConversation,
   type ReportEditOperation,
+  type ReportEditPlacement,
   type ReportEditorStore,
   type ReportMessage,
   type ReportSearchResult,
@@ -21,8 +22,8 @@ export class PostgresReportEditorStore implements ReportEditorStore {
     const database = this.#writes.connection;
     const [conversations, messages, operations, sessions, results] = await Promise.all([
       database.query<ConversationRow>("SELECT id,task_id,block_id,created_at::text,updated_at::text FROM report_conversations"),
-      database.query<MessageRow>("SELECT id,conversation_id,task_id,block_id,role,content,document_version,block_fingerprint,created_at::text FROM report_messages ORDER BY created_at,id"),
-      database.query<OperationRow>("SELECT id,task_id,conversation_id,block_id,scope,block_ids,range_start,range_end,document_version,original_fingerprint,original_markdown,replacement_markdown,origin,state,created_at::text,updated_at::text,applied_version,undone_operation_id,source_ids FROM report_edit_operations"),
+      database.query<MessageRow>("SELECT id,conversation_id,task_id,block_id,operation_id,role,content,document_version,block_fingerprint,created_at::text FROM report_messages ORDER BY created_sequence"),
+      database.query<OperationRow>("SELECT id,task_id,conversation_id,block_id,scope,block_ids,range_start,range_end,document_version,original_fingerprint,original_markdown,replacement_markdown,origin,state,created_at::text,updated_at::text,applied_version,undone_operation_id,source_ids,applied_range_start,applied_range_end,applied_scope_markdown,applied_block_ids,structural_change,placement FROM report_edit_operations"),
       database.query<SessionRow>("SELECT id,task_id,scope_key,query,retrievers,created_at::text FROM report_search_sessions"),
       database.query<ResultRow>("SELECT id,session_id,task_id,provider,title,url,snippet,content,fetch_status,fetch_error,selected,adopted_operation_id,created_at::text FROM report_search_results ORDER BY created_at,id"),
     ]);
@@ -53,7 +54,7 @@ export class PostgresReportEditorStore implements ReportEditorStore {
   addMessage(input: Omit<ReportMessage, "id" | "createdAt">): ReportMessage {
     const value = this.#memory.addMessage(input);
     this.#writes.enqueue(async () => {
-      await this.#writes.connection.query(`INSERT INTO report_messages(id,conversation_id,task_id,block_id,role,content,document_version,block_fingerprint,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [value.id,value.conversationId,value.taskId,value.blockId,value.role,value.content,value.documentVersion,value.blockFingerprint,value.createdAt]);
+      await this.#writes.connection.query(`INSERT INTO report_messages(id,conversation_id,task_id,block_id,operation_id,role,content,document_version,block_fingerprint,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [value.id,value.conversationId,value.taskId,value.blockId,value.operationId ?? null,value.role,value.content,value.documentVersion,value.blockFingerprint,value.createdAt]);
       const conversation = this.#memory.getConversation(value.conversationId);
       if (conversation) await this.#saveConversation(conversation);
     });
@@ -66,7 +67,7 @@ export class PostgresReportEditorStore implements ReportEditorStore {
     return value;
   }
 
-  updateOperation(id: string, update: Pick<ReportEditOperation, "state" | "appliedVersion"> & Partial<Pick<ReportEditOperation, "undoneOperationId">>): ReportEditOperation {
+  updateOperation(id: string, update: Pick<ReportEditOperation, "state" | "appliedVersion"> & Partial<Pick<ReportEditOperation, "undoneOperationId" | "appliedRangeStart" | "appliedRangeEnd" | "appliedScopeMarkdown" | "appliedBlockIds" | "structuralChange">>): ReportEditOperation {
     const value = this.#memory.updateOperation(id, update);
     this.#writes.enqueue(() => this.#saveOperation(value));
     return value;
@@ -118,7 +119,7 @@ export class PostgresReportEditorStore implements ReportEditorStore {
   }
 
   async #saveOperation(value: ReportEditOperation): Promise<void> {
-    await this.#writes.connection.query(`INSERT INTO report_edit_operations(id,task_id,conversation_id,block_id,scope,block_ids,range_start,range_end,document_version,original_fingerprint,original_markdown,replacement_markdown,origin,state,created_at,updated_at,applied_version,undone_operation_id,source_ids) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb) ON CONFLICT(id) DO UPDATE SET state=EXCLUDED.state,updated_at=EXCLUDED.updated_at,applied_version=EXCLUDED.applied_version,undone_operation_id=EXCLUDED.undone_operation_id`, [value.id,value.taskId,value.conversationId,value.blockId,value.scope,postgresJson(value.blockIds),value.rangeStart ?? null,value.rangeEnd ?? null,value.documentVersion,value.originalFingerprint,value.originalMarkdown,value.replacementMarkdown,value.origin,value.state,value.createdAt,value.updatedAt,value.appliedVersion ?? null,value.undoneOperationId ?? null,postgresJson(value.sourceIds ?? [])]);
+    await this.#writes.connection.query(`INSERT INTO report_edit_operations(id,task_id,conversation_id,block_id,scope,block_ids,range_start,range_end,document_version,original_fingerprint,original_markdown,replacement_markdown,origin,state,created_at,updated_at,applied_version,undone_operation_id,source_ids,applied_range_start,applied_range_end,applied_scope_markdown,applied_block_ids,structural_change,placement) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,$22,$23::jsonb,$24,$25) ON CONFLICT(id) DO UPDATE SET state=EXCLUDED.state,updated_at=EXCLUDED.updated_at,applied_version=EXCLUDED.applied_version,undone_operation_id=EXCLUDED.undone_operation_id,applied_range_start=EXCLUDED.applied_range_start,applied_range_end=EXCLUDED.applied_range_end,applied_scope_markdown=EXCLUDED.applied_scope_markdown,applied_block_ids=EXCLUDED.applied_block_ids,structural_change=EXCLUDED.structural_change,placement=EXCLUDED.placement`, [value.id,value.taskId,value.conversationId,value.blockId,value.scope,postgresJson(value.blockIds),value.rangeStart ?? null,value.rangeEnd ?? null,value.documentVersion,value.originalFingerprint,value.originalMarkdown,value.replacementMarkdown,value.origin,value.state,value.createdAt,value.updatedAt,value.appliedVersion ?? null,value.undoneOperationId ?? null,postgresJson(value.sourceIds ?? []),value.appliedRangeStart ?? null,value.appliedRangeEnd ?? null,value.appliedScopeMarkdown ?? null,postgresJson(value.appliedBlockIds ?? []),value.structuralChange ?? null,value.placement ?? "replace"]);
   }
 
   async #saveResults(values: ReportSearchResult[]): Promise<void> {
@@ -127,13 +128,13 @@ export class PostgresReportEditorStore implements ReportEditorStore {
 }
 
 interface ConversationRow { id:string; task_id:string; block_id:string; created_at:string; updated_at:string; }
-interface MessageRow { id:string; conversation_id:string; task_id:string; block_id:string; role:ReportMessage["role"]; content:string; document_version:number; block_fingerprint:string; created_at:string; }
-interface OperationRow { id:string; task_id:string; conversation_id:string; block_id:string; scope:ReportEditOperation["scope"]; block_ids:string[]; range_start:number|null; range_end:number|null; document_version:number; original_fingerprint:string; original_markdown:string; replacement_markdown:string; origin:ReportEditOperation["origin"]; state:ReportEditOperation["state"]; created_at:string; updated_at:string; applied_version:number|null; undone_operation_id:string|null; source_ids:string[]; }
+interface MessageRow { id:string; conversation_id:string; task_id:string; block_id:string; operation_id:string|null; role:ReportMessage["role"]; content:string; document_version:number; block_fingerprint:string; created_at:string; }
+interface OperationRow { id:string; task_id:string; conversation_id:string; block_id:string; scope:ReportEditOperation["scope"]; block_ids:string[]; range_start:number|null; range_end:number|null; document_version:number; original_fingerprint:string; original_markdown:string; replacement_markdown:string; origin:ReportEditOperation["origin"]; state:ReportEditOperation["state"]; created_at:string; updated_at:string; applied_version:number|null; undone_operation_id:string|null; source_ids:string[]; applied_range_start:number|null; applied_range_end:number|null; applied_scope_markdown:string|null; applied_block_ids:string[]|null; structural_change:ReportEditOperation["structuralChange"]|null; placement:ReportEditPlacement|null; }
 interface SessionRow { id:string; task_id:string; scope_key:string; query:string; retrievers:string[]; created_at:string; }
 interface ResultRow { id:string; session_id:string; task_id:string; provider:string; title:string; url:string; snippet:string|null; content:string|null; fetch_status:"fetched"|"failed"|null; fetch_error:string|null; selected:boolean; adopted_operation_id:string|null; created_at:string; }
 const asIso = (value:string) => new Date(value).toISOString();
 const conversation = (r:ConversationRow):ReportConversation => ({id:r.id,taskId:r.task_id,blockId:r.block_id,createdAt:asIso(r.created_at),updatedAt:asIso(r.updated_at)});
-const message = (r:MessageRow):ReportMessage => ({id:r.id,conversationId:r.conversation_id,taskId:r.task_id,blockId:r.block_id,role:r.role,content:r.content,documentVersion:Number(r.document_version),blockFingerprint:r.block_fingerprint,createdAt:asIso(r.created_at)});
-const operation = (r:OperationRow):ReportEditOperation => ({id:r.id,taskId:r.task_id,conversationId:r.conversation_id,blockId:r.block_id,scope:r.scope,blockIds:r.block_ids ?? [],...(r.range_start === null ? {} : {rangeStart:Number(r.range_start)}),...(r.range_end === null ? {} : {rangeEnd:Number(r.range_end)}),documentVersion:Number(r.document_version),originalFingerprint:r.original_fingerprint,originalMarkdown:r.original_markdown,replacementMarkdown:r.replacement_markdown,origin:r.origin,state:r.state,createdAt:asIso(r.created_at),updatedAt:asIso(r.updated_at),...(r.applied_version === null ? {} : {appliedVersion:Number(r.applied_version)}),...(r.undone_operation_id ? {undoneOperationId:r.undone_operation_id} : {}),...(r.source_ids?.length ? {sourceIds:r.source_ids} : {})});
+const message = (r:MessageRow):ReportMessage => ({id:r.id,conversationId:r.conversation_id,taskId:r.task_id,blockId:r.block_id,...(r.operation_id ? {operationId:r.operation_id}:{}),role:r.role,content:r.content,documentVersion:Number(r.document_version),blockFingerprint:r.block_fingerprint,createdAt:asIso(r.created_at)});
+const operation = (r:OperationRow):ReportEditOperation => ({id:r.id,taskId:r.task_id,conversationId:r.conversation_id,blockId:r.block_id,scope:r.scope,blockIds:r.block_ids ?? [],...(r.range_start === null ? {} : {rangeStart:Number(r.range_start)}),...(r.range_end === null ? {} : {rangeEnd:Number(r.range_end)}),documentVersion:Number(r.document_version),originalFingerprint:r.original_fingerprint,originalMarkdown:r.original_markdown,replacementMarkdown:r.replacement_markdown,origin:r.origin,state:r.state,createdAt:asIso(r.created_at),updatedAt:asIso(r.updated_at),...(r.applied_version === null ? {} : {appliedVersion:Number(r.applied_version)}),...(r.undone_operation_id ? {undoneOperationId:r.undone_operation_id} : {}),...(r.source_ids?.length ? {sourceIds:r.source_ids} : {}),...(r.applied_range_start === null ? {} : {appliedRangeStart:Number(r.applied_range_start)}),...(r.applied_range_end === null ? {} : {appliedRangeEnd:Number(r.applied_range_end)}),...(r.applied_scope_markdown === null ? {} : {appliedScopeMarkdown:r.applied_scope_markdown}),...(r.applied_block_ids?.length ? {appliedBlockIds:r.applied_block_ids} : {}),...(r.structural_change ? {structuralChange:r.structural_change} : {}),...(r.placement && r.placement !== "replace" ? {placement:r.placement} : {})});
 const session = (r:SessionRow):ReportSearchSession => ({id:r.id,taskId:r.task_id,scopeKey:r.scope_key,query:r.query,retrievers:r.retrievers ?? [],createdAt:asIso(r.created_at)});
 const result = (r:ResultRow):ReportSearchResult => ({id:r.id,sessionId:r.session_id,taskId:r.task_id,provider:r.provider,title:r.title,url:r.url,...(r.snippet ? {snippet:r.snippet}:{}),...(r.content ? {content:r.content}:{}),...(r.fetch_status ? {fetchStatus:r.fetch_status}:{}),...(r.fetch_error ? {fetchError:r.fetch_error}:{}),selected:r.selected,...(r.adopted_operation_id ? {adoptedOperationId:r.adopted_operation_id}:{}),createdAt:asIso(r.created_at)});

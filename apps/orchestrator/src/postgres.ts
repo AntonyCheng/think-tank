@@ -135,6 +135,13 @@ export class PostgresDatabase {
           created_at TIMESTAMPTZ NOT NULL,
           PRIMARY KEY(task_id, version)
         );
+        CREATE TABLE IF NOT EXISTS report_document_drafts (
+          task_id TEXT PRIMARY KEY REFERENCES report_documents(task_id) ON DELETE CASCADE,
+          markdown TEXT NOT NULL,
+          base_version INTEGER NOT NULL,
+          revision INTEGER NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS report_conversations (
           id TEXT PRIMARY KEY,
           task_id TEXT NOT NULL,
@@ -149,14 +156,40 @@ export class PostgresDatabase {
           conversation_id TEXT NOT NULL,
           task_id TEXT NOT NULL,
           block_id TEXT NOT NULL,
+          operation_id TEXT,
           role TEXT NOT NULL,
           content TEXT NOT NULL,
           document_version INTEGER NOT NULL,
           block_fingerprint TEXT NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL
+          created_at TIMESTAMPTZ NOT NULL,
+          created_sequence BIGSERIAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS report_messages_conversation
           ON report_messages(conversation_id, created_at, id);
+        ALTER TABLE report_messages ADD COLUMN IF NOT EXISTS operation_id TEXT;
+        ALTER TABLE report_messages ADD COLUMN IF NOT EXISTS created_sequence BIGINT;
+        CREATE SEQUENCE IF NOT EXISTS report_messages_created_sequence_seq;
+        ALTER SEQUENCE report_messages_created_sequence_seq
+          OWNED BY report_messages.created_sequence;
+        ALTER TABLE report_messages ALTER COLUMN created_sequence
+          SET DEFAULT nextval('report_messages_created_sequence_seq');
+        WITH ordered_messages AS (
+          SELECT ctid, row_number() OVER (ORDER BY created_at, ctid) AS sequence
+          FROM report_messages
+          WHERE created_sequence IS NULL
+        )
+        UPDATE report_messages
+        SET created_sequence = ordered_messages.sequence
+        FROM ordered_messages
+        WHERE report_messages.ctid = ordered_messages.ctid;
+        SELECT setval(
+          'report_messages_created_sequence_seq',
+          GREATEST(COALESCE((SELECT MAX(created_sequence) FROM report_messages), 1), 1),
+          true
+        );
+        ALTER TABLE report_messages ALTER COLUMN created_sequence SET NOT NULL;
+        CREATE INDEX IF NOT EXISTS report_messages_conversation_sequence
+          ON report_messages(conversation_id, created_sequence);
         CREATE TABLE IF NOT EXISTS report_edit_operations (
           id TEXT PRIMARY KEY,
           task_id TEXT NOT NULL,
@@ -176,8 +209,20 @@ export class PostgresDatabase {
           undone_operation_id TEXT,
           scope TEXT NOT NULL DEFAULT 'blocks',
           block_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-          source_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+          source_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+          applied_range_start INTEGER,
+          applied_range_end INTEGER,
+          applied_scope_markdown TEXT,
+          applied_block_ids JSONB,
+          structural_change TEXT,
+          placement TEXT NOT NULL DEFAULT 'replace'
         );
+        ALTER TABLE report_edit_operations ADD COLUMN IF NOT EXISTS applied_range_start INTEGER;
+        ALTER TABLE report_edit_operations ADD COLUMN IF NOT EXISTS applied_range_end INTEGER;
+        ALTER TABLE report_edit_operations ADD COLUMN IF NOT EXISTS applied_scope_markdown TEXT;
+        ALTER TABLE report_edit_operations ADD COLUMN IF NOT EXISTS applied_block_ids JSONB;
+        ALTER TABLE report_edit_operations ADD COLUMN IF NOT EXISTS structural_change TEXT;
+        ALTER TABLE report_edit_operations ADD COLUMN IF NOT EXISTS placement TEXT NOT NULL DEFAULT 'replace';
         CREATE INDEX IF NOT EXISTS report_edit_operations_task
           ON report_edit_operations(task_id, created_at DESC);
         CREATE TABLE IF NOT EXISTS report_search_sessions (

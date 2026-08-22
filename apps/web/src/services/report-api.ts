@@ -49,21 +49,21 @@ export function restoreReportVersion(input: {
   });
 }
 
-export function getReportConversations(taskId: string, scopeKey = "document"): Promise<{
+export function getReportConversations(taskId: string): Promise<{
   conversations: ReportConversation[];
   operations: ReportOperation[];
 }> {
-  return requestJson(`/api/tasks/${encodeURIComponent(taskId)}/report-editor/conversations?blockId=${encodeURIComponent(scopeKey)}`);
+  return requestJson(`/api/tasks/${encodeURIComponent(taskId)}/report-editor/conversations`);
 }
 
-export function getCachedReportSession(taskId: string, scopeKey = "document"): ReportSessionData | undefined {
-  return reportSessionCache.get(reportSessionKey(taskId, scopeKey));
+export function getCachedReportSession(taskId: string): ReportSessionData | undefined {
+  return reportSessionCache.get(reportSessionKey(taskId, "document"));
 }
 
-export async function loadReportSession(taskId: string, scopeKey = "document"): Promise<ReportSessionData> {
-  const [document, history] = await Promise.all([getReportDocument(taskId), getReportConversations(taskId, scopeKey)]);
+export async function loadReportSession(taskId: string): Promise<ReportSessionData> {
+  const [document, history] = await Promise.all([getReportDocument(taskId), getReportConversations(taskId)]);
   const data = { document, conversations: history.conversations, operations: history.operations };
-  reportSessionCache.set(reportSessionKey(taskId, scopeKey), data);
+  reportSessionCache.set(reportSessionKey(taskId, "document"), data);
   return data;
 }
 
@@ -185,6 +185,42 @@ export function saveManualReport(input: {
       replacementMarkdown: input.replacementMarkdown,
     }),
   });
+}
+
+export function saveReportDraft(input: {
+  taskId: string;
+  documentVersion: number;
+  replacementMarkdown: string;
+}): Promise<{ document: ReportDocument }> {
+  return requestJson(`/api/tasks/${encodeURIComponent(input.taskId)}/report-editor/save-draft`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ documentVersion: input.documentVersion, replacementMarkdown: input.replacementMarkdown }),
+  });
+}
+
+export function saveReportVersion(input: { taskId: string; documentVersion: number }): Promise<{ document: ReportDocument }> {
+  return requestJson(`/api/tasks/${encodeURIComponent(input.taskId)}/report-editor/save-version`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ documentVersion: input.documentVersion }),
+  });
+}
+
+export function discardReportDraft(input: { taskId: string; documentVersion: number }): Promise<{ document: ReportDocument }> {
+  return requestJson(`/api/tasks/${encodeURIComponent(input.taskId)}/report-editor/discard-draft`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ documentVersion: input.documentVersion }),
+  });
+}
+
+export function beaconReportDraft(input: { taskId: string; documentVersion: number; replacementMarkdown: string }): boolean {
+  if (!navigator.sendBeacon) return false;
+  return navigator.sendBeacon(
+    `/api/tasks/${encodeURIComponent(input.taskId)}/report-editor/save-draft`,
+    new Blob([JSON.stringify({ documentVersion: input.documentVersion, replacementMarkdown: input.replacementMarkdown })], { type: "application/json" }),
+  );
 }
 
 export function applyReportOperation(taskId: string, operationId: string): Promise<{

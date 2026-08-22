@@ -10,6 +10,7 @@ import test from "node:test";
 import {
   InMemoryReportDocumentStore,
   ReportDocumentConflictError,
+  reportMarkdownFingerprint,
   SqliteReportDocumentStore,
 } from "../src/report-document-store.js";
 import {
@@ -50,11 +51,69 @@ test("applies only the proposed block and keeps an auditable conversation", asyn
     "# Title\n\nUpdated first paragraph.\n\nSecond paragraph.",
   );
   assert.equal(applied.document.baselineMarkdown, markdown);
-  assert.equal(applied.document.version, 2);
+  assert.equal(applied.document.version, 1);
+  assert.equal(applied.document.isDirty, true);
+  const saved = service.saveVersion({ taskId: document.taskId, expectedVersion: applied.document.version });
+  assert.equal(saved.version, 2);
+  assert.equal(saved.isDirty, false);
+  const messages = service.conversations(document.taskId, block.id)[0]?.messages ?? [];
   assert.deepEqual(
-    service.conversations(document.taskId, block.id)[0]?.messages.map((message) => message.role),
+    messages.map((message) => message.role),
     ["user", "assistant", "event"],
   );
+  assert.equal(messages[1]?.operationId, proposal.operation.id);
+  assert.equal(messages[2]?.operationId, proposal.operation.id);
+});
+
+test("invalidates every applied operation in a discarded draft batch", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  let replacement = "Saved paragraph.";
+  const service = new ReportEditorService(documents, store, {
+    async rewrite() {
+      const current = replacement;
+      replacement = replacement === "Saved paragraph."
+        ? "Draft paragraph one."
+        : "Draft paragraph two.";
+      return current;
+    },
+  });
+  const document = documents.getOrCreate("report-editor-discard-batch", markdown);
+  const firstBlock = document.blocks.find((item) => item.id === "paragraph-1")!;
+  const firstProposal = await service.propose({
+    taskId: document.taskId,
+    blockId: firstBlock.id,
+    documentVersion: document.version,
+    originalFingerprint: firstBlock.fingerprint,
+    instruction: "Revise the paragraph.",
+  });
+  const firstApplied = service.apply(document.taskId, firstProposal.operation.id);
+  const saved = service.saveVersion({ taskId: document.taskId, expectedVersion: firstApplied.document.version });
+  const savedBlock = saved.blocks.find((item) => item.id === "paragraph-1")!;
+
+  const secondProposal = await service.propose({
+    taskId: document.taskId,
+    blockId: savedBlock.id,
+    documentVersion: saved.version,
+    originalFingerprint: savedBlock.fingerprint,
+    instruction: "Revise the paragraph again.",
+  });
+  const secondApplied = service.apply(document.taskId, secondProposal.operation.id);
+  const secondBlock = secondApplied.document.blocks.find((item) => item.id === "paragraph-1")!;
+  const thirdProposal = await service.propose({
+    taskId: document.taskId,
+    blockId: secondBlock.id,
+    documentVersion: secondApplied.document.version,
+    originalFingerprint: secondBlock.fingerprint,
+    instruction: "Revise the paragraph a third time.",
+  });
+  service.apply(document.taskId, thirdProposal.operation.id);
+
+  const discarded = service.discardDraft({ taskId: document.taskId, expectedVersion: saved.version });
+  assert.equal(discarded.currentMarkdown, saved.currentMarkdown);
+  assert.equal(store.getOperation(firstProposal.operation.id)?.state, "applied");
+  assert.equal(store.getOperation(secondProposal.operation.id)?.state, "discarded");
+  assert.equal(store.getOperation(thirdProposal.operation.id)?.state, "discarded");
 });
 
 test("keeps the replacement out of the conversation and carries prior turns forward", async () => {
@@ -82,10 +141,12 @@ test("keeps the replacement out of the conversation and carries prior turns forw
     instruction: "Make this clearer.",
   });
   assert.equal(first.operation.replacementMarkdown, "Updated first paragraph.");
+  const assistantMessage = service.conversations(document.taskId, block.id)[0]?.messages.find((message) => message.role === "assistant");
   assert.equal(
-    service.conversations(document.taskId, block.id)[0]?.messages.find((message) => message.role === "assistant")?.content,
+    assistantMessage?.content,
     "我已完成修改，右侧已经生成预览。",
   );
+  assert.equal(assistantMessage?.operationId, first.operation.id);
 
   service.apply(document.taskId, first.operation.id);
   const updated = documents.get(document.taskId)!;
@@ -100,6 +161,63 @@ test("keeps the replacement out of the conversation and carries prior turns forw
   });
   assert.deepEqual(lastInput?.conversationHistory?.map((message) => message.role), ["user", "assistant"]);
   assert.equal(lastInput?.conversationHistory?.[1]?.content, "我已完成修改，右侧已经生成预览。");
+});
+
+test("keeps one continuous report conversation across different selected blocks", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  const service = new ReportEditorService(documents, store, model);
+  const document = documents.getOrCreate("report-editor-single-conversation", markdown);
+  const first = document.blocks.find((item) => item.id === "paragraph-1")!;
+  const second = document.blocks.find((item) => item.id === "paragraph-2")!;
+
+  const firstProposal = await service.propose({
+    taskId: document.taskId,
+    blockId: first.id,
+    documentVersion: document.version,
+    originalFingerprint: first.fingerprint,
+    instruction: "Revise the first paragraph.",
+  });
+  service.reject(document.taskId, firstProposal.operation.id);
+  const secondProposal = await service.propose({
+    taskId: document.taskId,
+    blockId: second.id,
+    documentVersion: document.version,
+    originalFingerprint: second.fingerprint,
+    instruction: "Revise the second paragraph.",
+    conversationId: firstProposal.conversation.id,
+  });
+
+  assert.equal(secondProposal.conversation.id, firstProposal.conversation.id);
+  assert.equal(secondProposal.conversation.blockId, "document");
+  assert.equal(service.conversations(document.taskId).length, 1);
+  assert.deepEqual(
+    service.conversations(document.taskId)[0]?.messages.filter((message) => message.role === "user").map((message) => message.blockId),
+    ["paragraph-1", "paragraph-2"],
+  );
+});
+
+test("stores the original user instruction separately from the execution instruction", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  const service = new ReportEditorService(documents, store, model);
+  const document = documents.getOrCreate("report-editor-original-instruction", markdown);
+  const block = document.blocks.find((item) => item.id === "paragraph-1")!;
+
+  const proposal = await service.propose({
+    taskId: document.taskId,
+    blockId: block.id,
+    documentVersion: document.version,
+    originalFingerprint: block.fingerprint,
+    instruction: "Rewrite the selected paragraph with concise wording.",
+    userInstruction: "缩写总体判断第一段的内容，使其更加凝练、清晰。",
+  });
+
+  assert.equal(
+    service.conversations(document.taskId, block.id)[0]?.messages.find((message) => message.role === "user")?.content,
+    "缩写总体判断第一段的内容，使其更加凝练、清晰。",
+  );
+  assert.equal(proposal.operation.state, "proposed");
 });
 
 test("answers a conversational message without creating an edit operation", async () => {
@@ -138,6 +256,46 @@ test("answers a conversational message without creating an edit operation", asyn
     service.conversations(document.taskId, "document")[0]?.messages.map((message) => message.role),
     ["user", "assistant"],
   );
+});
+
+test("routes an explicit selected-block deletion to a preview without trusting model classification", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  let plannerCalled = false;
+  const service = new ReportEditorService(documents, store, {
+    async plan() {
+      plannerCalled = true;
+      return { intent: "chat", urls: [], targetBlockIds: [] };
+    },
+    async rewrite() {
+      return { replacementMarkdown: "", reply: "已准备删除预览。" };
+    },
+  });
+  const document = documents.getOrCreate("report-editor-explicit-delete", markdown);
+  const block = document.blocks.find((item) => item.id === "paragraph-1")!;
+
+  const plan = await service.planMessage({
+    taskId: document.taskId,
+    scope: "blocks",
+    blockIds: [block.id],
+    documentVersion: document.version,
+    originalFingerprint: block.fingerprint,
+    instruction: "删除这一段",
+  });
+
+  assert.equal(plannerCalled, false);
+  assert.equal(plan.intent, "edit");
+  const proposal = await service.propose({
+    taskId: document.taskId,
+    scope: "blocks",
+    blockIds: [block.id],
+    documentVersion: document.version,
+    originalFingerprint: block.fingerprint,
+    instruction: plan.editInstruction!,
+  });
+  assert.equal(proposal.operation.state, "proposed");
+  assert.equal(proposal.operation.replacementMarkdown, "");
+  assert.equal(service.operations(document.taskId).length, 1);
 });
 
 test("streams a complete conversational answer before persisting it", async () => {
@@ -349,6 +507,96 @@ test("allows an AI proposal to delete the selected report block", async () => {
   assert.match(applied.document.currentMarkdown, /Second paragraph\./u);
 });
 
+test("applies structural block edits without resolving removed block ids", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  const structuralModel: ReportEditorModel = {
+    async rewrite(input) {
+      if (input.instruction === "merge") return { replacementMarkdown: "Merged paragraph." };
+      if (input.instruction === "split") return { replacementMarkdown: "First half.\n\nSecond half." };
+      return { replacementMarkdown: "# Retyped paragraph" };
+    },
+  };
+  const service = new ReportEditorService(documents, store, structuralModel);
+  const document = documents.getOrCreate("report-editor-structural", markdown);
+  const paragraphs = document.blocks.filter((item) => item.kind === "paragraph");
+
+  const merged = await service.propose({
+    taskId: document.taskId,
+    scope: "blocks",
+    blockIds: paragraphs.map((item) => item.id),
+    documentVersion: document.version,
+    originalFingerprint: reportMarkdownFingerprint(paragraphs.map((item) => item.markdown).join("\n\n")),
+    instruction: "merge",
+  });
+  const mergedApplied = service.apply(document.taskId, merged.operation.id);
+  assert.equal(mergedApplied.operation.structuralChange, "merge");
+  assert.equal(mergedApplied.operation.appliedScopeMarkdown, "Merged paragraph.");
+  assert.match(
+    service.conversations(document.taskId, paragraphs.map((item) => item.id).join(","))[0]?.messages.find((message) => message.role === "event")?.content ?? "",
+    /修改已暂存/u,
+  );
+  const mergedUndone = service.undo(document.taskId, merged.operation.id);
+  assert.equal(mergedUndone.document.currentMarkdown, markdown);
+
+  const restored = documents.get(document.taskId)!;
+  const first = restored.blocks.find((item) => item.kind === "paragraph")!;
+  const split = await service.propose({
+    taskId: restored.taskId,
+    blockId: first.id,
+    documentVersion: restored.version,
+    originalFingerprint: first.fingerprint,
+    instruction: "split",
+  });
+  const splitApplied = service.apply(restored.taskId, split.operation.id);
+  assert.equal(splitApplied.operation.structuralChange, "split");
+
+  const splitDocument = documents.get(restored.taskId)!;
+  const splitBlocks = splitDocument.blocks.filter((item) => item.text.includes("half"));
+  assert.equal(splitBlocks.length, 2);
+  assert.equal(service.undo(restored.taskId, split.operation.id).document.currentMarkdown, markdown);
+});
+
+test("inserts a generated transition paragraph before the selected block", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  let receivedMode: ReportEditorModelInput["editMode"];
+  const service = new ReportEditorService(documents, store, {
+    async rewrite(input) {
+      receivedMode = input.editMode;
+      return { replacementMarkdown: "在外部冲击与韧性建设之间，需要先建立清晰的承接逻辑。", reply: "已生成新增段落预览。" };
+    },
+  });
+  const document = documents.getOrCreate("report-editor-insert-before", markdown);
+  const anchor = document.blocks.find((item) => item.id === "paragraph-2")!;
+
+  const proposal = await service.propose({
+    taskId: document.taskId,
+    blockId: anchor.id,
+    documentVersion: document.version,
+    originalFingerprint: anchor.fingerprint,
+    instruction: "请在这段之前加一个过渡的段落",
+  });
+
+  assert.equal(receivedMode, "insert_before");
+  assert.equal(proposal.operation.placement, "insert_before");
+  assert.equal(proposal.operation.state, "proposed");
+  assert.equal(proposal.operation.originalMarkdown, "Second paragraph.");
+  assert.equal(document.currentMarkdown, markdown);
+
+  const applied = service.apply(document.taskId, proposal.operation.id);
+  assert.equal(
+    applied.document.currentMarkdown,
+    "# Title\n\nFirst paragraph.\n\n在外部冲击与韧性建设之间，需要先建立清晰的承接逻辑。\n\nSecond paragraph.",
+  );
+  assert.match(applied.document.currentMarkdown, /Second paragraph\./u);
+  assert.equal(applied.operation.structuralChange, "insert");
+  assert.ok((applied.operation.appliedBlockIds ?? []).length >= 1);
+
+  const undone = service.undo(document.taskId, proposal.operation.id);
+  assert.equal(undone.document.currentMarkdown, markdown);
+});
+
 test("records a manual scoped save as an undoable edit operation", () => {
   const documents = new InMemoryReportDocumentStore();
   const store = new InMemoryReportEditorStore();
@@ -432,7 +680,9 @@ test("restores a report snapshot through an auditable operation", () => {
   });
   assert.equal(restored.operation.origin, "restore");
   assert.equal(restored.document.currentMarkdown, markdown);
-  assert.equal(restored.document.version, 3);
+  assert.equal(restored.document.version, 2);
+  assert.equal(restored.document.isDirty, true);
+  assert.equal(service.saveVersion({ taskId: document.taskId, expectedVersion: restored.document.version }).version, 3);
 });
 
 test("supports contiguous multi-block and explicit whole-document scopes", async () => {
@@ -467,6 +717,66 @@ test("supports contiguous multi-block and explicit whole-document scopes", async
   });
   const wholeApplied = service.apply(document.taskId, whole.operation.id);
   assert.equal(wholeApplied.document.currentMarkdown, "# Revised title\n\nFirst paragraph.\n\nSecond paragraph.");
+});
+
+test("asks for an application selection instead of silently editing the whole report", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  const service = new ReportEditorService(documents, store, {
+    async rewrite() {
+      throw new Error("an unscoped local edit must not reach rewrite");
+    },
+    async plan() {
+      throw new Error("an unscoped local edit must be rejected before planning");
+    },
+  });
+  const document = documents.getOrCreate("report-editor-unscoped-local-edit", markdown);
+
+  const plan = await service.planMessage({
+    taskId: document.taskId,
+    scope: "document",
+    blockIds: [],
+    documentVersion: document.version,
+    instruction: "合并这俩段，再缩写这一段",
+  });
+
+  assert.equal(plan.intent, "clarify");
+  assert.match(plan.reply ?? "", /选择段落/u);
+  assert.match(plan.reply ?? "", /已选 N 段/u);
+});
+
+test("applies a selected three-block merge as one scoped preview", async () => {
+  const documents = new InMemoryReportDocumentStore();
+  const store = new InMemoryReportEditorStore();
+  const service = new ReportEditorService(documents, store, {
+    async rewrite(input) {
+      assert.equal(input.blockMarkdown, "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.");
+      return { replacementMarkdown: "Merged and shortened paragraph.", reply: "已生成三段合并预览。" };
+    },
+  });
+  const document = documents.getOrCreate(
+    "report-editor-three-block-merge",
+    "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n\nOutside paragraph.",
+  );
+  const paragraphs = document.blocks.filter((item) => item.kind === "paragraph");
+  const selected = paragraphs.slice(0, 3);
+
+  const proposal = await service.propose({
+    taskId: document.taskId,
+    scope: "blocks",
+    blockIds: selected.map((item) => item.id),
+    documentVersion: document.version,
+    originalFingerprint: reportMarkdownFingerprint(selected.map((item) => item.markdown).join("\n\n")),
+    instruction: "合并并缩写这三段",
+  });
+  assert.equal(proposal.operation.blockIds.length, 3);
+  assert.equal(proposal.operation.state, "proposed");
+  assert.equal(proposal.operation.replacementMarkdown, "Merged and shortened paragraph.");
+
+  const applied = service.apply(document.taskId, proposal.operation.id);
+  assert.match(applied.document.currentMarkdown, /Merged and shortened paragraph\./u);
+  assert.doesNotMatch(applied.document.currentMarkdown, /First paragraph\.|Second paragraph\.|Third paragraph\./u);
+  assert.match(applied.document.currentMarkdown, /Outside paragraph\./u);
 });
 
 test("performs exact whole-document replacements without calling the model", async () => {
@@ -522,7 +832,7 @@ test("chunks a large whole-document edit while applying one previewed version", 
   assert.ok(calls > 1);
   assert.ok(maximumActive > 1);
   assert.equal(applied.document.currentMarkdown, largeMarkdown);
-  assert.equal(applied.document.version, 2);
+  assert.equal(applied.document.version, 1);
 });
 
 test("uses only selected search sources and adopts them after apply", async () => {
@@ -581,9 +891,12 @@ test("persists conversations and restores content through a recorded undo", asyn
     const undone = service.undo(document.taskId, applied.operation.id);
 
     assert.equal(undone.document.currentMarkdown, markdown);
-    assert.equal(undone.document.version, 3);
+    assert.equal(undone.document.version, 1);
     assert.equal(store.getOperation(applied.operation.id)?.undoneOperationId, undone.operation.id);
-    assert.equal(service.conversations(document.taskId, block.id)[0]?.messages.length, 5);
+    const messages = service.conversations(document.taskId, block.id)[0]?.messages ?? [];
+    assert.equal(messages.length, 4);
+    assert.equal(messages.find((message) => message.role === "assistant")?.operationId, proposal.operation.id);
+    assert.equal(messages.find((message) => message.role === "event")?.operationId, proposal.operation.id);
   } finally {
     store.close();
     documents.close();

@@ -15,7 +15,7 @@ export interface ResearchStoreState {
   reconnect: () => void;
 }
 
-export function useResearchStore(taskId: string): ResearchStoreState {
+export function useResearchStore(taskId: string, initialData?: { snapshot: ResearchTaskSnapshot; events: TaskEvent[] }): ResearchStoreState {
   const [state, setState] = useState<Omit<ResearchStoreState, "updateSnapshot" | "reconnect">>({ events: [], connection: "loading" });
   const [connectionGeneration, setConnectionGeneration] = useState(0);
   const updateSnapshot = useCallback((snapshot: ResearchTaskSnapshot) => {
@@ -26,8 +26,12 @@ export function useResearchStore(taskId: string): ResearchStoreState {
   }, []);
   useEffect(() => {
     let active = true;
-    let hasLoadedSnapshot = false;
-    setState({ events: [], connection: "loading" });
+    let hasLoadedSnapshot = Boolean(initialData);
+    setState({
+      events: initialData?.events ?? [],
+      connection: "loading",
+      ...(initialData ? { snapshot: initialData.snapshot } : {}),
+    });
     const snapshotRefresh = createSnapshotRefreshScheduler(async () => {
       try {
         const snapshot = await getResearchTask(taskId);
@@ -50,7 +54,15 @@ export function useResearchStore(taskId: string): ResearchStoreState {
         }
       }
     });
-    void snapshotRefresh.flush();
+    if (!initialData) void snapshotRefresh.flush();
+    const initialTaskIsTerminal = initialData
+      && ["canceled", "completed", "completed_with_warnings", "failed"].includes(initialData.snapshot.status);
+    if (initialTaskIsTerminal) {
+      return () => {
+        active = false;
+        snapshotRefresh.dispose();
+      };
+    }
     const unsubscribe = subscribeToTaskEvents(taskId, (event) => {
       if (!active) return;
       setState((current) => ({
@@ -68,7 +80,7 @@ export function useResearchStore(taskId: string): ResearchStoreState {
       snapshotRefresh.dispose();
       unsubscribe();
     };
-  }, [taskId, connectionGeneration]);
+  }, [initialData, taskId, connectionGeneration]);
   return { ...state, updateSnapshot, reconnect };
 }
 

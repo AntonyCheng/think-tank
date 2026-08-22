@@ -243,6 +243,19 @@ test("returns a completed expert report with public sources only", async (t) => 
     url: "https://example.com/public",
   }]);
   assert.equal("researchContext" in payload, false);
+
+  const workspace = await fetch(`${baseUrl}/api/tasks/${task.id}/workspace`);
+  assert.equal(workspace.status, 200);
+  const bootstrap = await workspace.json() as {
+    snapshot: { id: string; status: string };
+    events: Array<{ type: string }>;
+    expertResults: Array<Record<string, unknown>>;
+  };
+  assert.equal(bootstrap.snapshot.id, task.id);
+  assert.equal(bootstrap.snapshot.status, "completed");
+  assert.ok(bootstrap.events.some((event) => event.type === "task.completed"));
+  assert.equal((bootstrap.expertResults[0]?.report as { content: string }).content, "# 专家结论");
+  assert.equal("researchContext" in (bootstrap.expertResults[0] ?? {}), false);
 });
 
 test("restarts a failed task as a new research session", async (t) => {
@@ -640,10 +653,24 @@ test("creates and applies a version-protected local report edit through the API"
   );
   assert.equal(appliedResponse.status, 200);
   const applied = await appliedResponse.json() as {
-    document: { currentMarkdown: string; version: number };
+    document: { currentMarkdown: string; version: number; isDirty: boolean };
   };
   assert.equal(applied.document.currentMarkdown, "# Title\n\nRevised first paragraph.\n\nSecond paragraph.");
-  assert.equal(applied.document.version, 2);
+  assert.equal(applied.document.version, 1);
+  assert.equal(applied.document.isDirty, true);
+
+  const savedResponse = await fetch(
+    `${baseUrl}/api/tasks/${snapshot.id}/report-editor/save-version`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ documentVersion: applied.document.version }),
+    },
+  );
+  assert.equal(savedResponse.status, 200);
+  const saved = await savedResponse.json() as { document: { version: number; isDirty: boolean } };
+  assert.equal(saved.document.version, 2);
+  assert.equal(saved.document.isDirty, false);
 
   const conversations = await fetch(
     `${baseUrl}/api/tasks/${snapshot.id}/report-editor/conversations?blockId=paragraph-1`,
@@ -653,6 +680,62 @@ test("creates and applies a version-protected local report edit through the API"
   assert.deepEqual(conversations.conversations[0]?.messages.map((message) => message.role), [
     "user", "assistant", "event",
   ]);
+});
+
+test("uses a scoped conversation when an unselected report request is automatically targeted", async (t) => {
+  const store = new InMemoryResearchTaskStore();
+  const snapshot: ResearchTaskSnapshot = {
+    id: "report-editor-auto-target-api-task",
+    topic: "report editor",
+    status: "completed",
+    createdAt: "2026-08-04T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
+    output: "# Title\n\nFirst paragraph.\n\nSecond paragraph.",
+  };
+  store.create(snapshot, { type: "task.completed", data: {} });
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }), store);
+  const reportDocuments = new InMemoryReportDocumentStore();
+  const reportEditorStore = new InMemoryReportEditorStore();
+  const reportEditor = new ReportEditorService(
+    reportDocuments,
+    reportEditorStore,
+    {
+      async plan() { return { intent: "edit" as const, urls: [], targetBlockIds: ["paragraph-2"] }; },
+      async rewrite() { return "Shortened second paragraph."; },
+    },
+  );
+  const server = createApiServer(manager, undefined, undefined, undefined, undefined, reportDocuments, reportEditor);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const document = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/report-document`)
+    .then((response) => response.json()) as { version: number };
+  const wholeDocumentConversation = reportEditorStore.createConversation(snapshot.id, "document");
+
+  const response = await fetch(`${baseUrl}/api/tasks/${snapshot.id}/report-editor/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scope: "document",
+      documentVersion: document.version,
+      instruction: "缩写第三点第一段。",
+      conversationId: wholeDocumentConversation.id,
+    }),
+  });
+  assert.equal(response.status, 201);
+  const proposal = await response.json() as {
+    targetBlockIds: string[];
+    conversation: { blockId: string };
+    operation: { blockIds: string[] };
+  };
+  assert.deepEqual(proposal.targetBlockIds, ["paragraph-2"]);
+  assert.equal(proposal.conversation.blockId, "document");
+  assert.deepEqual(proposal.operation.blockIds, ["paragraph-2"]);
 });
 
 test("saves an explicit manual report edit through the API", async (t) => {

@@ -7,6 +7,7 @@ import {
   getResearchTask,
   getResearchTopicRecommendations,
   uploadResearchDocument,
+  getResearchWorkspaceBootstrap,
   type ResearchTopicRecommendation,
 } from "./services/api-client";
 import { HistoryDrawer, HistorySidebar } from "./components/history-drawer/HistoryDrawer";
@@ -19,6 +20,7 @@ import { preloadReportSession } from "./services/report-api";
 import { AUTH_REQUIRED_EVENT, AuthRequiredError, getAuthStatus, login, logout, type AuthStatus } from "./services/auth-client";
 import { LoginModal, type LoginValues } from "./components/auth/LoginModal";
 import { ProfilePage } from "./components/profile/ProfilePage";
+import type { ResearchWorkspaceBootstrap } from "./domain/task";
 
 const ResearchWorkspace = lazy(() => import("./components/research-workspace/ResearchWorkspace").then((module) => ({ default: module.ResearchWorkspace })));
 const loadReportSessionModule = () => import("./components/report-session/ReportSession");
@@ -30,7 +32,8 @@ type SessionState =
   | { phase: "idle" }
   | { phase: "starting"; topic: string; stage: Exclude<ResearchLaunchStage, "opening"> }
   | { phase: "start_failed"; topic: string; error: string }
-  | { phase: "researching"; topic: string; taskId: string; view: "workspace" | "report" };
+  | { phase: "opening"; topic: string; taskId: string; attempt: number; error?: string }
+  | { phase: "researching"; topic: string; taskId: string; view: "workspace" | "report"; bootstrap?: ResearchWorkspaceBootstrap };
 
 const defaultSource: ResearchSourceConfig = {
   kind: "web",
@@ -302,7 +305,10 @@ export function App() {
         setSession({ phase: "idle" });
         return;
       }
-      setSession({ phase: "researching", topic: "", taskId: decodeURIComponent(match[1]), view: match[2] ? "report" : "workspace" });
+      const taskId = decodeURIComponent(match[1]);
+      setSession(match[2] === "report"
+        ? { phase: "researching", topic: "", taskId, view: "report" }
+        : { phase: "opening", topic: "", taskId, attempt: 0 });
     };
     restoreFromHash();
     window.addEventListener("hashchange", restoreFromHash);
@@ -415,9 +421,34 @@ export function App() {
 
   const openTask = (taskId: string, topic: string) => {
     setHistoryOpen(false);
-    setSession({ phase: "researching", topic, taskId, view: "workspace" });
+    setSession({ phase: "opening", topic, taskId, attempt: 0 });
     window.history.pushState(null, "", `#/tasks/${encodeURIComponent(taskId)}`);
   };
+
+  const openingTask = session.phase === "opening" ? session : undefined;
+  useEffect(() => {
+    if (!openingTask) return undefined;
+    const { taskId, topic } = openingTask;
+    let active = true;
+    void getResearchWorkspaceBootstrap(taskId)
+      .then((bootstrap) => {
+        if (!active) return;
+        setSession({
+          phase: "researching",
+          topic: bootstrap.snapshot.topic || topic,
+          taskId,
+          view: "workspace",
+          bootstrap,
+        });
+      })
+      .catch((reason) => {
+        if (!active) return;
+        setSession((current) => current.phase === "opening" && current.taskId === taskId
+          ? { ...current, error: reason instanceof Error ? reason.message : "研究记录加载失败" }
+          : current);
+      });
+    return () => { active = false; };
+  }, [openingTask?.attempt, openingTask?.taskId, openingTask?.topic]);
 
   if (authLoading) return <div className="auth-loading" aria-busy="true">正在检查登录状态</div>;
 
@@ -446,13 +477,24 @@ export function App() {
       window.history.pushState(null, "", `#/tasks/${encodeURIComponent(taskId)}/report`);
     };
     const backToResearch = () => {
-      setSession({ phase: "researching", topic: session.topic, taskId: session.taskId, view: "workspace" });
+      setSession({ phase: "opening", topic: session.topic, taskId: session.taskId, attempt: 0 });
       window.history.pushState(null, "", `#/tasks/${encodeURIComponent(session.taskId)}`);
     };
+    if (session.phase === "opening") {
+      return <ResearchLaunch
+        error={session.error}
+        errorTitle="暂时无法打开研究记录"
+        onExit={exitToHome}
+        onRetry={() => setSession({ ...session, attempt: session.attempt + 1, error: undefined })}
+        retryLabel="重新加载"
+        stage="opening"
+        topic={session.topic}
+      />;
+    }
     if (session.view === "report") {
       return <ReportRoute taskId={session.taskId} initialTopic={session.topic} onBackToResearch={backToResearch} />;
     }
-    return <Suspense fallback={<ResearchLaunch onExit={exitToHome} stage="opening" topic={session.topic} />}><ResearchWorkspace taskId={session.taskId} initialTopic={session.topic} onExit={exitToHome} onOpenTask={openTask} onOpenReport={openReport} onPreloadReport={preloadReportSession} /></Suspense>;
+    return <Suspense fallback={<ResearchLaunch onExit={exitToHome} stage="opening" topic={session.topic} />}><ResearchWorkspace initialBootstrap={session.bootstrap} taskId={session.taskId} initialTopic={session.topic} onExit={exitToHome} onOpenTask={openTask} onOpenReport={openReport} onPreloadReport={preloadReportSession} /></Suspense>;
   }
 
   return (

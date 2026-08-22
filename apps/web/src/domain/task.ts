@@ -105,6 +105,12 @@ export interface ExpertEvidenceBundle {
   }>;
 }
 
+export interface ResearchWorkspaceBootstrap {
+  snapshot: ResearchTaskSnapshot;
+  events: import("./research-events").TaskEvent[];
+  expertResults: ExpertEvidenceBundle[];
+}
+
 export type ResearchHistoryFilter = "all" | "completed" | "warnings" | "unfinished";
 
 export interface ResearchHistoryItem {

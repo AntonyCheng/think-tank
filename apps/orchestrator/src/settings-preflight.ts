@@ -15,7 +15,6 @@ export type SettingsPreflightScope =
   | "scheduling"
   | "fallbackModels";
 
-const MODEL_TIMEOUT_MS = 10_000;
 const EMBEDDING_TIMEOUT_MS = 10_000;
 const SEARCH_TIMEOUT_MS = 15_000;
 
@@ -52,7 +51,7 @@ function preflightModels(
     verifierModel: settings.verifierModel,
     fastLlm: settings.gptrFastLlm,
     smartLlm: settings.gptrSmartLlm,
-  }, fetchAdapter, "主模型");
+  }, fetchAdapter, "主模型", settings.modelPreflightTimeoutMs);
 }
 
 async function preflightFallbackModels(
@@ -67,7 +66,12 @@ async function preflightFallbackModels(
       detail: "备用模型服务未启用",
     }];
   }
-  return preflightModelProvider(settings.fallback, fetchAdapter, "备用模型");
+  return preflightModelProvider(
+    settings.fallback,
+    fetchAdapter,
+    "备用模型",
+    settings.modelPreflightTimeoutMs,
+  );
 }
 
 async function preflightModelProvider(
@@ -81,6 +85,7 @@ async function preflightModelProvider(
   },
   fetchAdapter: typeof fetch,
   labelPrefix: string,
+  timeoutMs: number,
 ): Promise<SettingsPreflightCheck[]> {
   const candidates = [
     [`${labelPrefix}·AO 编排模型`, provider.plannerModel],
@@ -93,7 +98,13 @@ async function preflightModelProvider(
     const key = `${provider.baseUrl ?? ""}\u0000${provider.apiKey}\u0000${modelName(model)}`;
     let check = checks.get(key);
     if (!check) {
-      check = probeChatModel(provider.baseUrl, provider.apiKey, model, fetchAdapter);
+      check = probeChatModel(
+        provider.baseUrl,
+        provider.apiKey,
+        model,
+        fetchAdapter,
+        timeoutMs,
+      );
       checks.set(key, check);
     }
     try {
@@ -125,6 +136,7 @@ function settingsFromProvider(provider: {
     gptrEmbedding: "custom:preflight",
     timeZone: "UTC",
     concurrency: 1,
+    modelPreflightTimeoutMs: 1,
     gptrHealthTimeoutMs: 1,
     gptrResearchTimeoutMs: 2,
     gptrCleanupGraceMs: 1,
@@ -204,6 +216,7 @@ async function probeChatModel(
   apiKey: string,
   model: string,
   fetchAdapter: typeof fetch,
+  timeoutMs: number,
 ): Promise<void> {
   const response = await fetchAdapter(endpoint(baseUrl, "chat/completions"), {
     method: "POST",
@@ -216,7 +229,7 @@ async function probeChatModel(
       max_tokens: 1,
       messages: [{ role: "user", content: "ping" }],
     }),
-    signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) throw await responseFailure(response, "模型接口");
   const payload = await response.json() as { choices?: unknown };

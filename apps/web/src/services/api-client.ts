@@ -4,6 +4,7 @@ import type {
   ResearchHistoryPage,
   ResearchTaskDiagnostic,
   ResearchTaskSnapshot,
+  ResearchWorkspaceBootstrap,
 } from "../domain/task";
 import type {
   RuntimeSettings,
@@ -81,6 +82,10 @@ export function uploadResearchDocument(taskId: string, name: string, contentBase
 
 export function getResearchTask(taskId: string): Promise<ResearchTaskSnapshot> {
   return requestJson<ResearchTaskSnapshot>(`/api/tasks/${encodeURIComponent(taskId)}`);
+}
+
+export function getResearchWorkspaceBootstrap(taskId: string): Promise<ResearchWorkspaceBootstrap> {
+  return requestJson<ResearchWorkspaceBootstrap>(`/api/tasks/${encodeURIComponent(taskId)}/workspace`);
 }
 
 export function getExpertResearchResult(taskId: string, stepId: string): Promise<ExpertEvidenceBundle> {

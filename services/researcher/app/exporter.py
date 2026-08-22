@@ -38,13 +38,14 @@ HEADING_DARK = RGBColor(0x1F, 0x4D, 0x78)
 MUTED = RGBColor(0x66, 0x70, 0x68)
 BODY_FONT = "Microsoft YaHei"
 FALLBACK_FONT = "Arial"
-PDF_FONT = "ThinkTankNotoSansSC"
+PDF_FONT = "ThinkTankNotoSansSCMedium"
 PDF_FONT_PATH = (
     Path(__file__).resolve().parent.parent
     / "assets"
     / "fonts"
-    / "NotoSansSC-VF.ttf"
+    / "NotoSansSC-Medium.ttf"
 )
+PDF_TEXT_COLOR = "#000000"
 MARKDOWN = mistune.create_markdown(renderer="ast", plugins=["table"])
 
 
@@ -468,7 +469,7 @@ def _pdf_styles() -> dict[str, ParagraphStyle]:
             fontName=PDF_FONT,
             fontSize=24,
             leading=31,
-            textColor=colors.HexColor("#0B2545"),
+            textColor=colors.HexColor(PDF_TEXT_COLOR),
             alignment=TA_LEFT,
             spaceAfter=8,
         ),
@@ -477,15 +478,15 @@ def _pdf_styles() -> dict[str, ParagraphStyle]:
             **base,
             fontSize=9,
             leading=14,
-            textColor=colors.HexColor("#667068"),
+            textColor=colors.HexColor(PDF_TEXT_COLOR),
             spaceAfter=12,
         ),
         "Body": ParagraphStyle(
             "Body",
             **base,
-            fontSize=10.5,
-            leading=15,
-            textColor=colors.HexColor("#111111"),
+            fontSize=11,
+            leading=16,
+            textColor=colors.HexColor(PDF_TEXT_COLOR),
             spaceAfter=8,
         ),
         "H1": ParagraphStyle(
@@ -493,7 +494,7 @@ def _pdf_styles() -> dict[str, ParagraphStyle]:
             **base,
             fontSize=16,
             leading=21,
-            textColor=colors.HexColor("#2E74B5"),
+            textColor=colors.HexColor(PDF_TEXT_COLOR),
             spaceBefore=14,
             spaceAfter=8,
             keepWithNext=True,
@@ -503,7 +504,7 @@ def _pdf_styles() -> dict[str, ParagraphStyle]:
             **base,
             fontSize=13,
             leading=18,
-            textColor=colors.HexColor("#2E74B5"),
+            textColor=colors.HexColor(PDF_TEXT_COLOR),
             spaceBefore=11,
             spaceAfter=6,
             keepWithNext=True,
@@ -513,7 +514,7 @@ def _pdf_styles() -> dict[str, ParagraphStyle]:
             **base,
             fontSize=11.5,
             leading=16,
-            textColor=colors.HexColor("#1F4D78"),
+            textColor=colors.HexColor(PDF_TEXT_COLOR),
             spaceBefore=8,
             spaceAfter=4,
             keepWithNext=True,
@@ -523,9 +524,9 @@ def _pdf_styles() -> dict[str, ParagraphStyle]:
             **base,
             fontSize=10,
             leading=15,
-            textColor=colors.HexColor("#111111"),
+            textColor=colors.HexColor(PDF_TEXT_COLOR),
             leftIndent=18,
-            borderColor=colors.HexColor("#2E74B5"),
+            borderColor=colors.HexColor(PDF_TEXT_COLOR),
             borderWidth=1.5,
             borderPadding=7,
             backColor=colors.HexColor("#F4F6F9"),
@@ -533,9 +534,10 @@ def _pdf_styles() -> dict[str, ParagraphStyle]:
         ),
         "Code": ParagraphStyle(
             "Code",
-            fontName="Courier",
+            fontName="Courier-Bold",
             fontSize=8.5,
             leading=12,
+            textColor=colors.HexColor(PDF_TEXT_COLOR),
             leftIndent=12,
             backColor=colors.HexColor("#F2F4F7"),
             borderPadding=6,
@@ -642,12 +644,12 @@ def _pdf_inline(tokens: list[dict[str, Any]]) -> str:
             url = html.escape(str(token.get("attrs", {}).get("url", "")), quote=True)
             if re.fullmatch(r"\[\d+\]", label):
                 parts.append(
-                    f"<super><a color=\"#2E74B5\" href=\"{url}\">"
+                    f"<super><a color=\"{PDF_TEXT_COLOR}\" href=\"{url}\">"
                     f"{html.escape(label)}</a></super>"
                 )
             else:
                 parts.append(
-                    f"<a color=\"#2E74B5\" href=\"{url}\">{html.escape(label)}</a>"
+                    f"<a color=\"{PDF_TEXT_COLOR}\" href=\"{url}\">{html.escape(label)}</a>"
                 )
         elif kind in {"softbreak", "linebreak"}:
             parts.append("<br/>")
@@ -668,7 +670,7 @@ def _plain_text(tokens: list[dict[str, Any]]) -> str:
 def _draw_pdf_page(canvas: Any, document: Any) -> None:
     canvas.saveState()
     canvas.setFont(PDF_FONT, 8)
-    canvas.setFillColor(colors.HexColor("#667068"))
+    canvas.setFillColor(colors.HexColor(PDF_TEXT_COLOR))
     canvas.drawRightString(
         7.5 * inch,
         0.45 * inch,

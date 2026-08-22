@@ -19,6 +19,7 @@ export interface RuntimeSettings {
   gptrEmbeddingApiKey?: string;
   timeZone: string;
   concurrency: number;
+  modelPreflightTimeoutMs: number;
   gptrHealthTimeoutMs: number;
   gptrResearchTimeoutMs: number;
   gptrCleanupGraceMs: number;
@@ -64,6 +65,11 @@ export function settingsFromEnv(
   if (!Number.isInteger(concurrency) || concurrency < 1) {
     throw new Error("AO_CONCURRENCY must be a positive integer.");
   }
+  const modelPreflightTimeoutMs = positiveInteger(
+    env,
+    "MODEL_PREFLIGHT_TIMEOUT_MS",
+    30_000,
+  );
   const gptrHealthTimeoutMs = positiveInteger(
     env,
     "GPTR_HEALTH_TIMEOUT_MS",
@@ -128,6 +134,7 @@ export function settingsFromEnv(
     gptrEmbeddingApiKey: env.GPTR_EMBEDDING_API_KEY?.trim() || undefined,
     timeZone,
     concurrency,
+    modelPreflightTimeoutMs,
     gptrHealthTimeoutMs,
     gptrResearchTimeoutMs,
     gptrCleanupGraceMs,

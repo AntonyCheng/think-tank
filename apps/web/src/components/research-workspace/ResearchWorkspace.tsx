@@ -16,7 +16,7 @@ import {
   UpOutlined,
 } from "@ant-design/icons";
 import { activityFromEvent, type TaskEvent } from "../../domain/research-events";
-import type { ExpertEvidenceBundle, ResearchRunProgress, ResearchTaskSnapshot, TaskStatus, WorkflowStep } from "../../domain/task";
+import type { ExpertEvidenceBundle, ResearchRunProgress, ResearchTaskSnapshot, ResearchWorkspaceBootstrap, TaskStatus, WorkflowStep } from "../../domain/task";
 import type { AgentCatalogEntry } from "../../domain/agent";
 import { answerResearchInput, cancelResearchTask, continueResearchTask, getAgentCatalog, getExpertResearchResult, getTaskDiagnostics, retryResearchTask } from "../../services/api-client";
 import { activitiesFromEvents, formatElapsed, formatTime } from "../../services/task-events";
@@ -33,6 +33,7 @@ interface ResearchWorkspaceProps {
   onOpenTask: (taskId: string, topic: string) => void;
   onOpenReport: (taskId: string, topic: string) => void;
   onPreloadReport: (taskId: string) => void;
+  initialBootstrap?: ResearchWorkspaceBootstrap;
 }
 
 interface ExpertRuntime {
@@ -804,8 +805,8 @@ function liveElapsed(snapshot: ResearchTaskSnapshot, now: number): number | unde
   return elapsed + (Number.isNaN(updatedAt) ? 0 : Math.max(0, now - updatedAt));
 }
 
-export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, onOpenReport, onPreloadReport }: ResearchWorkspaceProps) {
-  const store = useResearchStore(taskId);
+export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, onOpenReport, onPreloadReport, initialBootstrap }: ResearchWorkspaceProps) {
+  const store = useResearchStore(taskId, initialBootstrap);
   const events = useOrderedEvents(store.events);
   const snapshot = store.snapshot;
   const [selectedExpertId, setSelectedExpertId] = useState<string>();
@@ -845,10 +846,14 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
   const selectedRuntime = selectedExpert
     ? runtimes.get(selectedExpert.id)
     : undefined;
+  const preloadedExpertResult = selectedExpert
+    ? initialBootstrap?.expertResults.find((result) => result.aoStepId === selectedExpert.id)
+    : undefined;
   const snapshotCompletedBundle = selectedExpert && selectedRuntime?.status === "completed"
     ? snapshot?.evidenceBundles?.filter((bundle) => bundle.aoStepId === selectedExpert.id).at(-1)
     : undefined;
   const selectedCompletedBundle = snapshotCompletedBundle ??
+    preloadedExpertResult ??
     (selectedExpertResult && selectedExpertResult.stepId === selectedExpert?.id
       ? selectedExpertResult.bundle
       : undefined);
@@ -871,7 +876,7 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
       setExpertResultError("");
       return undefined;
     }
-    if (snapshotCompletedBundle || selectedExpertResult?.stepId === selectedExpert.id) {
+    if (snapshotCompletedBundle || preloadedExpertResult || selectedExpertResult?.stepId === selectedExpert.id) {
       setExpertResultLoading(false);
       return undefined;
     }
@@ -887,7 +892,7 @@ export function ResearchWorkspace({ taskId, initialTopic, onExit, onOpenTask, on
       })
       .finally(() => { if (active) setExpertResultLoading(false); });
     return () => { active = false; };
-  }, [selectedExpert, selectedExpertResult?.stepId, selectedRuntime?.status, snapshot, snapshotCompletedBundle]);
+  }, [preloadedExpertResult, selectedExpert, selectedExpertResult?.stepId, selectedRuntime?.status, snapshot, snapshotCompletedBundle]);
   useEffect(() => {
     if (!snapshot) return;
     const handoff = reportHandoff.current;

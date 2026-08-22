@@ -3,8 +3,15 @@ from zipfile import ZipFile
 from docx import Document
 from fastapi.testclient import TestClient
 from pypdf import PdfReader
+from reportlab.lib import colors
 
-from app.exporter import export_docx, export_markdown, export_pdf
+from app.exporter import (
+    PDF_TEXT_COLOR,
+    _pdf_styles,
+    export_docx,
+    export_markdown,
+    export_pdf,
+)
 from app.main import app
 
 
@@ -60,6 +67,18 @@ def test_exports_markdown_docx_and_pdf(tmp_path) -> None:
         xml = archive.read("word/document.xml").decode("utf-8")
     assert "w:hyperlink" in xml
     assert "superscript" in xml
+
+
+def test_pdf_styles_prioritize_legibility() -> None:
+    styles = _pdf_styles()
+
+    assert styles["Body"].fontSize == 11
+    assert styles["Body"].leading == 16
+    assert styles["Code"].fontName == "Courier-Bold"
+    for style_name in (
+        "Title", "Metadata", "Body", "H1", "H2", "H3", "Quote", "Code"
+    ):
+        assert styles[style_name].textColor == colors.HexColor(PDF_TEXT_COLOR)
 
 
 def test_export_endpoint_returns_download() -> None:

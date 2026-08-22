@@ -64,6 +64,10 @@ mcp.env:THINK_TANK_SERVICE_API_KEY
 GPTR 快速和 GPTR 深度四个模型；向量模型独立配置且不参与主备切换。管理员在系统设置页
 保存运行参数后，API 会写回 `runtime.env` 并立即应用到后续任务，无需重启容器。
 
+设置页的“检测主模型”默认等待 30 秒。需要调整时，在 `runtime.env` 中配置
+`MODEL_PREFLIGHT_TIMEOUT_MS`（单位：毫秒），然后重新创建 API 容器；该参数只影响设置页
+的连通性检测，不影响研究任务和 GPTR 请求的超时。
+
 实际 `.env` 文件不会被 Git 跟踪。不要把模型密钥、登录密码或 MCP 密钥写进 Compose 和 Dockerfile。
 
 五个配置目录相互隔离。API 容器只读入 `api.env`、`postgres.env`，并挂载可写的
@@ -199,6 +203,39 @@ docker compose -f docker\docker-compose.yaml ps
 ```
 
 不要执行 `docker compose down -v`，否则可能删除数据库卷或造成不必要的数据清理；当前项目的研究历史和配置主要位于 `docker/data`，更新代码时应保留该目录。
+
+## 跨机器交接与编程代理须知
+
+另一台机器接手本项目时，建议把下面的约束直接作为部署前检查清单：
+
+1. **运行环境**：安装 Docker Desktop 或 Docker Engine，并确认支持 Docker Compose v2、BuildKit 和至少 8 GB 可用内存。Researcher 镜像包含 Playwright Chromium，首次构建和启动会明显慢于其他服务。
+2. **工作目录**：所有命令都在仓库根目录执行，也就是包含 `docker/`、`apps/` 和 `services/` 的目录。不要只复制 `docker/` 子目录，镜像构建需要整个仓库作为上下文。
+3. **配置初始化**：首次部署必须从五个 `.env.example` 复制出真实 `.env` 文件，并替换所有 `change-me`。这些真实配置不会随 Git 代码同步，换机器时需要通过安全渠道重新配置或迁移备份。
+4. **数据迁移**：需要保留历史任务、报告版本、用户和运行设置时，迁移完整的 `docker/data`；只部署新环境时可以只保留仓库中的 `.gitkeep`，再重新创建配置文件。迁移前先停止服务并备份目录。
+5. **MCP 地址**：如果另一台机器要接入编程代理，必须把 `docker/data/config/mcp/mcp.env` 中的 `MCP_PUBLIC_BASE_URL` 改成代理实际可访问的服务器 IP 或域名，并确认防火墙放行 `MCP_PUBLIC_PORT`（默认 `7169`）。代理使用 `MCP_API_KEY`，不要把它写入代码、提交记录或聊天内容。
+6. **端口规划**：浏览器访问 `WEB_PORT`（默认 `7168`），MCP 使用 `MCP_PUBLIC_PORT`（默认 `7169`）。`SEARXNG_PUBLIC_PORT`（默认 `7170`）只用于可信网络调试，公网部署不应直接暴露。
+7. **代码更新方式**：源码和前端资源都打包进镜像，不能只执行 `docker compose restart`。编程代理修改代码后必须执行：
+
+   ```bash
+   git diff --check
+   docker compose -f docker/docker-compose.yaml config
+   docker compose -f docker/docker-compose.yaml up -d --build
+   docker compose -f docker/docker-compose.yaml ps
+   ```
+
+   Windows PowerShell 将路径写成 `docker\docker-compose.yaml` 即可。只修改 `docker/data/config` 中的运行配置时，通常不需要重建镜像；修改 Compose、Dockerfile、依赖清单或源码时必须重建。
+8. **启动判定**：不能只看容器显示 `Up`。应等待 `thinktank-api`、`thinktank-researcher`、`thinktank-postgres` 和 `thinktank-web` 均为 `healthy`，并验证：
+
+   ```bash
+   curl http://127.0.0.1:7168/health
+   curl http://127.0.0.1:7168/ready
+   ```
+
+   `/health` 只代表 API 进程已启动；`/ready` 成功后才适合登录和执行研究任务。启动失败时优先查看 `docker compose -f docker/docker-compose.yaml logs --tail=200 thinktank-api thinktank-researcher thinktank-web`。
+9. **数据库安全**：不要执行 `docker compose down -v`，不要删除 `docker/data/postgres`。PostgreSQL 不映射宿主机端口，数据由绑定目录保存；更新代码时保留该目录即可。需要停机时使用 `docker compose -f docker/docker-compose.yaml down`，它不会删除绑定数据。
+10. **提交边界**：不要提交 `.env`、`docker/data` 中的真实配置和运行数据、模型密钥、MCP 密钥、导出文件、日志、`node_modules`、`.venv`、`dist` 或测试缓存。编程代理提交前应检查 `git status --short` 和 `git diff --check`，确认只包含源码、测试、文档和必要的模板/静态资源。
+
+交接给编程代理时，可以直接提供以下信息：仓库根目录、浏览器地址（例如 `http://127.0.0.1:7168`）、MCP 地址（例如 `http://服务器地址:7169/mcp?api_key=...`）以及是否需要迁移 `docker/data`。不要提供任何真实密钥；代理应从模板和本机安全配置中完成部署。
 
 ## SQLite 到 PostgreSQL 升级
 

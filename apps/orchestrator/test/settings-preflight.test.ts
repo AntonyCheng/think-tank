@@ -23,6 +23,7 @@ const settings: RuntimeSettings = {
   gptrEmbeddingApiKey: "embedding-secret",
   timeZone: "Asia/Shanghai",
   concurrency: 2,
+  modelPreflightTimeoutMs: 30_000,
   gptrHealthTimeoutMs: 5_000,
   gptrResearchTimeoutMs: 60_000,
   gptrCleanupGraceMs: 5_000,

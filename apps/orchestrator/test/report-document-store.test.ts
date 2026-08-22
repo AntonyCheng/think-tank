@@ -118,5 +118,57 @@ test("records document snapshots and restores a selected version as a new versio
   assert.deepEqual(store.listVersions(first.taskId).map((item) => item.version), [1, 2, 3]);
 });
 
+test("keeps applied edits as one recoverable draft until an explicit version save", () => {
+  const store = new InMemoryReportDocumentStore();
+  const first = store.getOrCreate("draft-history", markdown);
+  const block = first.blocks[1]!;
+  const draft = store.applyDraftScope({
+    taskId: first.taskId,
+    scope: "blocks",
+    blockIds: [block.id],
+    expectedVersion: first.version,
+    expectedFingerprint: block.fingerprint,
+    replacementMarkdown: "Draft paragraph.",
+  });
+
+  assert.equal(draft.version, 1);
+  assert.equal(draft.isDirty, true);
+  assert.equal(draft.currentMarkdown, markdown.replace("First paragraph.", "Draft paragraph."));
+  assert.deepEqual(store.listVersions(first.taskId).map((item) => item.version), [1]);
+
+  const saved = store.commitDraft({ taskId: first.taskId, expectedVersion: draft.version });
+  assert.equal(saved.version, 2);
+  assert.equal(saved.isDirty, false);
+  assert.deepEqual(store.listVersions(first.taskId).map((item) => item.version), [1, 2]);
+});
+
+test("restores a persisted draft after reopening SQLite storage", () => {
+  const directory = mkdtempSync(join(tmpdir(), "think-tank-report-draft-"));
+  const filePath = join(directory, "tasks.sqlite");
+  try {
+    const firstStore = new SqliteReportDocumentStore(filePath);
+    const first = firstStore.getOrCreate("draft-reopen", markdown);
+    const block = first.blocks[1]!;
+    firstStore.applyDraftScope({
+      taskId: first.taskId,
+      scope: "blocks",
+      blockIds: [block.id],
+      expectedVersion: first.version,
+      expectedFingerprint: block.fingerprint,
+      replacementMarkdown: "Recovered draft.",
+    });
+    firstStore.close();
+
+    const reopened = new SqliteReportDocumentStore(filePath);
+    const recovered = reopened.get("draft-reopen");
+    assert.equal(recovered?.version, 1);
+    assert.equal(recovered?.isDirty, true);
+    assert.match(recovered?.currentMarkdown ?? "", /Recovered draft\./u);
+    reopened.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 // Compile-time assertion for both store implementations.
 const _stores: ReportDocumentStore[] = [new InMemoryReportDocumentStore()];
