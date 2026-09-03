@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.report_evidence_policy import (
+    _REDACTED_MARKER,
     derive_report_evidence_policy,
     enforce_report_evidence_policy,
     render_citation_contract,
@@ -115,33 +116,55 @@ def test_private_policy_renders_a_safe_restricted_attribution() -> None:
     assert removed == 0
 
 
-def test_private_local_document_uses_only_extractable_source_statements() -> None:
+def test_private_local_document_keeps_the_models_tagged_conclusions() -> None:
     policy = derive_report_evidence_policy(profile({
         "mode": "local",
         "documentIds": ["document-1"],
     }))
     report, removed = enforce_report_evidence_policy(
-        "# Draft\n\nAn unrelated framework is essential. "
-        "[[restricted-evidence]]",
+        "# Analysis\n\n"
+        "Segment revenue climbed 18% year over year. [[restricted-evidence]]\n"
+        "This sentence is an untagged aside.",
         policy,
         [],
         [],
         restricted_document_texts=[
-            "The service must complete an internal security review before deployment.\n"
-            "The service must keep an auditable record of material model changes.\n"
+            "Segment revenue was 4.2 billion, up from 3.6 billion."
+        ],
+    )
+
+    assert "Segment revenue climbed" in report
+    assert "18%" not in report
+    assert _REDACTED_MARKER in report
+    assert "based on restricted materials" in report
+    assert "untagged aside" not in report
+    assert removed == 1
+
+
+def test_private_local_document_falls_back_to_document_lines_when_nothing_is_tagged() -> None:
+    policy = derive_report_evidence_policy(profile({
+        "mode": "local",
+        "documentIds": ["document-1"],
+    }))
+    report, _ = enforce_report_evidence_policy(
+        "# Draft\n\nEvery line here is untagged speculation with no marker.",
+        policy,
+        [],
+        [],
+        restricted_document_texts=[
+            "The internal security review must finish before the 2026 launch window.\n"
             "Use https://internal.example only for operations."
         ],
     )
 
     assert "internal security review" in report
-    assert "auditable record" in report
-    assert "unrelated framework" not in report
+    assert "2026" not in report
+    assert _REDACTED_MARKER in report
     assert "internal.example" not in report
-    assert "restricted-evidence" not in report
-    assert removed == 3
+    assert "speculation" not in report
 
 
-def test_private_synthesis_uses_only_prior_local_document_findings() -> None:
+def test_private_synthesis_keeps_tagged_conclusions_from_the_synthesis_draft() -> None:
     synthesis = ResearchProfile.model_validate({
         "schemaVersion": 1,
         "mode": "synthesis",
@@ -159,6 +182,9 @@ def test_private_synthesis_uses_only_prior_local_document_findings() -> None:
             "sourceType": "document",
             "locator": "document:doc_private",
             "title": "本地文档",
+            "summary": (
+                "The service must complete a security review before deployment."
+            ),
         }],
         "report": {
             "content": (
@@ -170,16 +196,18 @@ def test_private_synthesis_uses_only_prior_local_document_findings() -> None:
     }]
     policy = derive_report_evidence_policy(synthesis, upstream)
     report, _ = enforce_report_evidence_policy(
-        "# Draft\n\nAn invented framework is required. "
-        "[[restricted-evidence]]",
+        "# Synthesis\n\n"
+        "The restricted evidence supports a phased rollout. [[restricted-evidence]]\n"
+        "An unfounded aside with no marker.",
         policy,
         [],
         [],
         upstream,
     )
 
-    assert "security review before deployment" in report
-    assert "invented framework" not in report
+    assert policy.strategy == "private_bounded"
+    assert "phased rollout" in report
+    assert "unfounded aside" not in report
     assert "doc_private" not in report
 
 
@@ -228,24 +256,28 @@ def test_mixed_synthesis_uses_public_urls_from_upstream_evidence() -> None:
     assert "https://known.example/public" in report
 
 
-def test_private_policy_removes_external_policy_terms_and_dates() -> None:
+def test_private_policy_redacts_policy_terms_and_dates_in_tagged_conclusions() -> None:
     policy = derive_report_evidence_policy(profile({
         "mode": "local",
         "documentIds": ["document-1"],
     }))
     report, removed = enforce_report_evidence_policy(
-        "# ISO 27001:2022\n\n"
-        "SOC 2 is mandatory from 2026-01-01. [[restricted-evidence]]",
+        "# Heading\n\n"
+        "The rollout tracks SOC 2 and starts 2026-01-01. [[restricted-evidence]]\n"
+        "An ISO 27001 mandate with no marker applies.",
         policy,
         [],
         [],
     )
 
-    assert "ISO" not in report
     assert "SOC" not in report
+    assert "ISO" not in report
     assert "2026" not in report
+    assert "The rollout tracks" in report
+    assert _REDACTED_MARKER in report
     assert "restricted materials" in report
-    assert removed == 2
+    assert "mandate with no marker" not in report
+    assert removed == 1
 
 
 def test_private_policy_drops_repeated_citation_contract() -> None:

@@ -26,6 +26,8 @@ _PRIVATE_EXTERNAL_POLICY_TERM = re.compile(
     re.IGNORECASE,
 )
 _PRIVATE_NUMBER_OR_DATE = re.compile(r"\b\d[\d,./:-]*\b|\d+\s*%")
+_REDACTED_MARKER = "[redacted]"
+_COLLAPSE_REDACTIONS = re.compile(r"(?:\[redacted\]\s*){2,}")
 _POLICY_INSTRUCTION = re.compile(
     r"(?:this report is based on restricted evidence only|"
     r"every non-heading report paragraph|<citation_contract>|</citation_contract>)",
@@ -107,16 +109,22 @@ def enforce_report_evidence_policy(
 ) -> tuple[str, int]:
     policy_sources = _policy_sources(sources, upstream_evidence)
     allowed_urls = _allowed_urls(source_urls, policy_sources)
-    if restricted_document_texts and policy.strategy in {
-        "private_bounded",
-        "mixed_evidence",
-    }:
+    line_count = len(report.splitlines())
+
+    # mixed_evidence rebuilds the private half of the report straight from the
+    # restricted document text. private_bounded keeps the model's own report and
+    # runs it through the line filter below: tagged conclusions survive with
+    # private figures and external policy names redacted, so a data-heavy local
+    # document yields an analytical report instead of a table-header stub. If the
+    # filter empties the report out, we still fall back to the document-derived
+    # brief further down.
+    if restricted_document_texts and policy.strategy == "mixed_evidence":
         return _bounded_document_report(
             policy,
             restricted_document_texts,
             list(allowed_urls),
-        ), len(report.splitlines())
-    if policy.strategy in {"private_bounded", "mixed_evidence"}:
+        ), line_count
+    if policy.strategy == "mixed_evidence":
         upstream_document_texts = _upstream_document_texts(
             upstream_evidence or []
         )
@@ -125,14 +133,14 @@ def enforce_report_evidence_policy(
                 policy,
                 upstream_document_texts,
                 list(allowed_urls),
-            ), len(report.splitlines())
+            ), line_count
 
     if (
         policy.strategy == "private_bounded"
         and policy_sources
         and not _has_actionable_restricted_evidence(policy_sources)
     ):
-        return _restricted_evidence_brief(), len(report.splitlines())
+        return _restricted_evidence_brief(), line_count
 
     kept: list[str] = []
     removed = 0
@@ -155,8 +163,13 @@ def enforce_report_evidence_policy(
                 or _PRIVATE_NUMBER_OR_DATE.search(line)
             )
         ):
-            removed += 1
-            continue
+            # A tagged conclusion keeps its wording with private figures and
+            # external policy names blacked out; anything else is dropped.
+            if _is_body_line(line) and _RESTRICTED_EVIDENCE_TAG in line:
+                line = _redact_private_details(line)
+            else:
+                removed += 1
+                continue
         if (
             policy.strategy == "private_bounded"
             and _is_body_line(line)
@@ -175,6 +188,12 @@ def enforce_report_evidence_policy(
 
     normalized = "\n".join(kept).strip()
     if policy.strategy == "private_bounded" and not _has_body_content(normalized):
+        if restricted_document_texts:
+            return _bounded_document_report(
+                policy,
+                restricted_document_texts,
+                list(allowed_urls),
+            ), removed
         normalized = _restricted_evidence_brief()
     return normalized, removed
 
@@ -275,6 +294,12 @@ def _render_restricted_attribution(line: str) -> str:
     )
 
 
+def _redact_private_details(line: str) -> str:
+    redacted = _PRIVATE_NUMBER_OR_DATE.sub(_REDACTED_MARKER, line)
+    redacted = _PRIVATE_EXTERNAL_POLICY_TERM.sub(_REDACTED_MARKER, redacted)
+    return _COLLAPSE_REDACTIONS.sub(f"{_REDACTED_MARKER} ", redacted)
+
+
 def _has_actionable_restricted_evidence(sources: list[Any]) -> bool:
     summaries = [
         str(source.get("summary", "")).strip()
@@ -366,10 +391,11 @@ def _restricted_document_statements(document_text: str) -> list[str]:
             _HTTP_URL.search(candidate)
             or _INTERNAL_DISCLOSURE.search(candidate)
             or _PRIVATE_EXTERNAL_POLICY_TERM.search(candidate)
-            or _PRIVATE_NUMBER_OR_DATE.search(candidate)
         ):
             continue
-        values.append(candidate)
+        # Keep quantitative document lines, but black out the raw figures so a
+        # bounded brief never re-emits a private number verbatim.
+        values.append(_redact_private_details(candidate))
     return values
 
 
