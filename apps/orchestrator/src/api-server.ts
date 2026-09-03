@@ -349,7 +349,15 @@ export function createApiServer(
         : undefined;
       if (identity && requestedTaskId && !serviceAuthorized) {
         const task = manager.get(requestedTaskId);
-        if (!task || task.ownerUserId !== principal?.id) {
+        // Local-document uploads happen before the task exists: the client mints
+        // the task id, attaches its documents, then submits the task. Allow that
+        // one route through when the task is not created yet; every other
+        // task-scoped route still requires an owned, existing task.
+        const isPreCreateDocumentUpload = !task
+          && request.method === "POST"
+          && segments[3] === "documents"
+          && segments.length === 4;
+        if (!isPreCreateDocumentUpload && (!task || task.ownerUserId !== principal?.id)) {
           return sendJson(response, 404, { error: "task not found" });
         }
       }

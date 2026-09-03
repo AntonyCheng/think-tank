@@ -211,6 +211,82 @@ test("isolates every task route by the authenticated task owner", async (t) => {
   assert.equal((await fetch(`${baseUrl}/api/tasks/${task.id}`, { headers: { Cookie: "session=alice" } })).status, 200);
 });
 
+test("accepts a local document uploaded before its task is created", async (t) => {
+  const manager = new ResearchTaskManager(async () => ({
+    workflowPath: "workflow.yaml",
+    output: "# report",
+    workflow: { name: "test", success: true, steps: [], totalDuration: 1, totalTokens: { input: 0, output: 0 } },
+  }));
+  const identity: IdentityService = {
+    serviceOwnerId: "user-admin",
+    async initialize() {},
+    async authenticate() { return undefined; },
+    async principalFor(request) {
+      return request.headers.cookie === "session=alice"
+        ? { id: "user-alice", username: "alice", role: "member" }
+        : undefined;
+    },
+    async logout() {},
+    async getUser() { return undefined; },
+    async changePassword() { return false; },
+    async listUsers() { return []; },
+    async createUser() { throw new Error("not used"); },
+    async updateUser() { return undefined; },
+    async deleteUser() { return false; },
+    cookie(token) { return `session=${token}`; },
+    expiredCookie() { return "session=; Max-Age=0"; },
+  };
+  const server = createApiServer(
+    manager,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    identity,
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const clientTaskId = "client-minted-task-id-0001";
+
+  // The client attaches documents to a task id it has not submitted yet.
+  const upload = await fetch(`${baseUrl}/api/tasks/${clientTaskId}/documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: "session=alice" },
+    body: JSON.stringify({
+      name: "notes.txt",
+      contentBase64: Buffer.from("quarterly figures for the analysis").toString("base64"),
+    }),
+  });
+  assert.equal(upload.status, 201);
+  const uploaded = await upload.json() as { documentId: string };
+  assert.ok(uploaded.documentId);
+
+  // Anonymous callers still cannot reach the route.
+  assert.equal(
+    (await fetch(`${baseUrl}/api/tasks/${clientTaskId}/documents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "x.txt", contentBase64: "eA==" }),
+    })).status,
+    401,
+  );
+
+  // Listing that not-yet-created task is still guarded.
+  assert.equal(
+    (await fetch(`${baseUrl}/api/tasks/${clientTaskId}/documents`, { headers: { Cookie: "session=alice" } })).status,
+    404,
+  );
+});
+
 test("allows an administrator to delete another user but never itself", async (t) => {
   const manager = new ResearchTaskManager(async () => ({
     workflowPath: "workflow.yaml",
