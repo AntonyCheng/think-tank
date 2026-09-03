@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Avatar, Dropdown, Popover, Tooltip } from "antd";
+import { Popover, Tooltip } from "antd";
 import { Sender } from "@ant-design/x";
-import { DownOutlined, HistoryOutlined, LinkOutlined, LoginOutlined, LogoutOutlined, PlusOutlined, ReloadOutlined, SettingOutlined, UserOutlined } from "@ant-design/icons";
+import { ArrowRightOutlined, DownOutlined, LinkOutlined, PaperClipOutlined, ReloadOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 import {
   createResearchTask,
   getResearchTask,
@@ -10,11 +10,11 @@ import {
   getResearchWorkspaceBootstrap,
   type ResearchTopicRecommendation,
 } from "./services/api-client";
-import { HistoryDrawer, HistorySidebar } from "./components/history-drawer/HistoryDrawer";
+import { HomeSidebar } from "./components/home-sidebar/HomeSidebar";
+import { SparklesIcon } from "./components/brand/SparklesIcon";
 import { ResearchSourcePopover, sourceLabels, type ResearchSourceConfig } from "./components/research-source/ResearchSourcePopover";
 import { ResearchLaunch, type ResearchLaunchStage } from "./components/research-launch/ResearchLaunch";
 import { SystemSettingsPage } from "./components/system-settings/SystemSettingsPage";
-import { BrandLockup } from "./components/brand/BrandLockup";
 import { ReportSessionLoading } from "./components/report-session/ReportSessionLoading";
 import { preloadReportSession } from "./services/report-api";
 import { AUTH_REQUIRED_EVENT, AuthRequiredError, getAuthStatus, login, logout, type AuthStatus } from "./services/auth-client";
@@ -26,7 +26,6 @@ const ResearchWorkspace = lazy(() => import("./components/research-workspace/Res
 const loadReportSessionModule = () => import("./components/report-session/ReportSession");
 const ReportSession = lazy(() => loadReportSessionModule().then((module) => ({ default: module.ReportSession })));
 const RECOMMENDATIONS_PER_BATCH = 4;
-const HISTORY_SIDEBAR_COLLAPSED_KEY = "think-tank.history-sidebar-collapsed";
 
 type SessionState =
   | { phase: "idle" }
@@ -45,26 +44,6 @@ const defaultSource: ResearchSourceConfig = {
 
 function listValues(value: string): string[] {
   return [...new Set(value.split(/[\n,]/u).map((item) => item.trim()).filter(Boolean))];
-}
-
-function useDesktopHistorySidebar(): boolean {
-  const [desktop, setDesktop] = useState(() => window.matchMedia("(min-width: 960px)").matches);
-  useEffect(() => {
-    const media = window.matchMedia("(min-width: 960px)");
-    const update = () => setDesktop(media.matches);
-    update();
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
-  }, []);
-  return desktop;
-}
-
-function readHistorySidebarCollapsed(): boolean {
-  try {
-    return window.localStorage.getItem(HISTORY_SIDEBAR_COLLAPSED_KEY) === "true";
-  } catch {
-    return false;
-  }
 }
 
 function validateUrls(urls: string[]): void {
@@ -139,8 +118,6 @@ export function App() {
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
   const [session, setSession] = useState<SessionState>({ phase: "idle" });
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [historySidebarCollapsed, setHistorySidebarCollapsed] = useState(readHistorySidebarCollapsed);
   const [settingsRoute, setSettingsRoute] = useState(() => window.location.hash === "#/settings");
   const [profileRoute, setProfileRoute] = useState(() => window.location.hash === "#/profile");
   const [sourceOpen, setSourceOpen] = useState(false);
@@ -154,10 +131,6 @@ export function App() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
   const pendingAction = useRef<(() => void) | undefined>(undefined);
-  const welcomeTitleRef = useRef<HTMLSpanElement>(null);
-  const welcomeTitleAiRef = useRef<HTMLSpanElement>(null);
-  const desktopHistorySidebar = useDesktopHistorySidebar();
-  const showHistorySidebar = auth.authenticated && desktopHistorySidebar;
 
   const requireLogin = (action?: () => void) => {
     if (!auth.enabled || auth.authenticated) {
@@ -192,7 +165,6 @@ export function App() {
   useEffect(() => {
     const handleUnauthorized = () => {
       setAuth((current) => ({ ...current, enabled: true, authenticated: false, username: undefined, role: undefined }));
-      setHistoryOpen(false);
       setSettingsRoute(false);
       setProfileRoute(false);
       setSession({ phase: "idle" });
@@ -223,30 +195,9 @@ export function App() {
 
   const handleLogout = async () => {
     await logout().then(setAuth).catch(() => undefined);
-    setHistoryOpen(false);
     setSettingsRoute(false);
     setProfileRoute(false);
   };
-
-  const syncWelcomeTitleLine = () => {
-    const title = welcomeTitleRef.current;
-    const ai = welcomeTitleAiRef.current;
-    if (!title || !ai) return;
-    const titleBounds = title.getBoundingClientRect();
-    const aiBounds = ai.getBoundingClientRect();
-    title.style.setProperty("--ai-line-left", `${(aiBounds.left - titleBounds.left).toFixed(1)}px`);
-    title.style.setProperty("--ai-line-width", `${aiBounds.width.toFixed(1)}px`);
-  };
-
-  useEffect(() => {
-    if (session.phase !== "idle") return;
-    const frame = window.requestAnimationFrame(syncWelcomeTitleLine);
-    window.addEventListener("resize", syncWelcomeTitleLine);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("resize", syncWelcomeTitleLine);
-    };
-  }, [session.phase]);
 
   useEffect(() => {
     if (session.phase !== "idle") return;
@@ -338,22 +289,6 @@ export function App() {
     }
   }, [auth.authenticated, auth.profileAvailable, authLoading, profileRoute]);
 
-  useEffect(() => {
-    if (desktopHistorySidebar) setHistoryOpen(false);
-  }, [desktopHistorySidebar]);
-
-  const toggleHistorySidebar = () => {
-    setHistorySidebarCollapsed((current) => {
-      const next = !current;
-      try {
-        window.localStorage.setItem(HISTORY_SIDEBAR_COLLAPSED_KEY, String(next));
-      } catch {
-        // The sidebar remains usable when browser storage is unavailable.
-      }
-      return next;
-    });
-  };
-
   const openProfile = () => {
     window.history.pushState(null, "", "#/profile");
     setProfileRoute(true);
@@ -420,7 +355,6 @@ export function App() {
   ).filter((topic): topic is ResearchTopicRecommendation => Boolean(topic));
 
   const openTask = (taskId: string, topic: string) => {
-    setHistoryOpen(false);
     setSession({ phase: "opening", topic, taskId, attempt: 0 });
     window.history.pushState(null, "", `#/tasks/${encodeURIComponent(taskId)}`);
   };
@@ -497,131 +431,135 @@ export function App() {
     return <Suspense fallback={<ResearchLaunch onExit={exitToHome} stage="opening" topic={session.topic} />}><ResearchWorkspace initialBootstrap={session.bootstrap} taskId={session.taskId} initialTopic={session.topic} onExit={exitToHome} onOpenTask={openTask} onOpenReport={openReport} onPreloadReport={preloadReportSession} /></Suspense>;
   }
 
-  return (
-    <main className={`app-shell ${showHistorySidebar ? "has-history-sidebar" : ""} ${showHistorySidebar && historySidebarCollapsed ? "is-history-sidebar-collapsed" : ""}`}>
-      {showHistorySidebar && <HistorySidebar collapsed={historySidebarCollapsed} onOpenTask={openTask} onToggle={toggleHistorySidebar} />}
-      <header className={`app-header ${showHistorySidebar ? "is-sidebar-layout" : ""}`}>
-        {!showHistorySidebar && <BrandLockup />}
-        <nav className="header-actions" aria-label="应用导航">
-          {auth.authenticated ? <>
-            {!showHistorySidebar && <button type="button" title="历史研究" onClick={() => setHistoryOpen(true)}><HistoryOutlined />历史研究</button>}
-            {auth.role !== "member" && <button type="button" title="系统设置" onClick={() => {
-              window.history.pushState(null, "", "#/settings");
-              setSettingsRoute(true);
-            }}><SettingOutlined />系统设置</button>}
-            {auth.profileAvailable ? <Dropdown menu={{ items: [
-              { key: "profile", icon: <UserOutlined />, label: "个人中心" },
-              { type: "divider" },
-              { key: "logout", danger: true, icon: <LogoutOutlined />, label: "退出登录" },
-            ], onClick: ({ key }) => { if (key === "profile") openProfile(); else if (key === "logout") void handleLogout(); } }} trigger={["click"]}>
-              <button aria-label={`账号 ${auth.username ?? "当前账号"}`} className="account-menu" title="账号菜单" type="button">
-                <Avatar size={28}>{(auth.username ?? "U").slice(0, 1).toUpperCase()}</Avatar>
-                <span>{auth.username}</span>
-                <DownOutlined />
-              </button>
-            </Dropdown> : <button type="button" title="退出登录" onClick={() => void handleLogout()}><LogoutOutlined />退出</button>}
-          </> : <button type="button" title="登录" onClick={() => requireLogin()}><LoginOutlined />登录</button>}
-        </nav>
-      </header>
+  const requiresLogin = auth.enabled && !auth.authenticated;
 
-      <section className="welcome-stage">
-        <div
-          className="welcome-copy welcome-copy-interactive"
-          onPointerLeave={(event) => {
-            const style = event.currentTarget.style;
-            style.setProperty("--title-x", "0px");
-            style.setProperty("--title-y", "0px");
-            style.setProperty("--copy-x", "0px");
-            style.setProperty("--copy-y", "0px");
-          }}
-          onPointerMove={(event) => {
-            syncWelcomeTitleLine();
-            const bounds = event.currentTarget.getBoundingClientRect();
-            const pointerX = ((event.clientX - bounds.left) / bounds.width - 0.5) * 2;
-            const pointerY = ((event.clientY - bounds.top) / bounds.height - 0.5) * 2;
-            const style = event.currentTarget.style;
-            style.setProperty("--title-x", `${(pointerX * 3).toFixed(1)}px`);
-            style.setProperty("--title-y", `${(pointerY * 3).toFixed(1)}px`);
-            style.setProperty("--copy-x", `${(pointerX * 1.5).toFixed(1)}px`);
-            style.setProperty("--copy-y", `${(pointerY * 1.5).toFixed(1)}px`);
-          }}
-        >
-          <h1 className="welcome-title"><span className="welcome-title-content" ref={welcomeTitleRef}>把问题交给智研<span className="welcome-title-ai" ref={welcomeTitleAiRef}>AI</span>助手</span></h1>
-          <p>从一个问题开始，自动组建专家团队、检索证据并交付研究报告。</p>
-        </div>
-        <section className={`composer-frame ${auth.enabled && !auth.authenticated ? "requires-login" : ""}`} aria-label="开始研究" onClick={() => requireLogin()}>
-          <Sender
-            value={input}
-            onChange={setInput}
-            onSubmit={handleSubmit}
-            placeholder="告诉我你想研究什么..."
-            prefix={<Popover content={<ResearchSourcePopover onChange={setSource} value={source} />} onOpenChange={(open) => { if (open && auth.enabled && !auth.authenticated) { setSourceOpen(false); requireLogin(); return; } setSourceOpen(open); }} open={sourceOpen} placement="bottomLeft" trigger="click"><button aria-label="研究来源" className={`composer-tool ${source.kind !== "web" ? "has-source-selection" : ""}`} title="研究来源" type="button"><PlusOutlined /></button></Popover>}
-          />
-          {error && <p className="composer-error" role="alert">{error}</p>}
-          <div className="composer-note">第一条消息将作为本次研究主题 · 当前研究模式：{sourceLabels[source.kind]}</div>
-        </section>
-        {recommendedTopics.length > 0 && (
-          <section className="recommended-topics" aria-label="推荐研究主题">
-            <header>
-              <div><strong>近期值得研究</strong><span>选一个方向开始，也可以继续修改</span></div>
-              <Tooltip title={recommendationBatchCount > 1 ? "换一批研究方向" : recommendationsRefreshing ? "正在准备更多研究方向" : "暂无更多研究方向"}>
-                <button
-                  aria-label="换一批研究方向"
-                  className="recommendation-refresh"
-                  disabled={recommendationBatchCount <= 1}
-                  onClick={() => setRecommendationBatch((current) => (current + 1) % recommendationBatchCount)}
-                  type="button"
-                >
-                  <ReloadOutlined spin={recommendationsRefreshing} />
-                </button>
-              </Tooltip>
-            </header>
-            <div className="recommended-topic-list">
-              {visibleRecommendedTopics.map((topic) => (
-                <article className="recommended-topic-item" key={topic.id}>
-                  <button
-                    className="recommended-topic-select"
-                    onClick={() => setInput(`${topic.title} - ${topic.summary}`)}
-                    type="button"
-                  >
-                    <span className="recommended-topic-category">{topic.category}</span>
-                    <strong>{topic.title}</strong>
-                    <small>{topic.summary}</small>
-                  </button>
-                  {topic.sources.length > 0 && (
+  return (
+    <main className="app-shell">
+      <HomeSidebar
+        auth={auth}
+        onLogin={() => requireLogin()}
+        onLogout={() => void handleLogout()}
+        onNewResearch={() => { setInput(""); setError(""); }}
+        onOpenProfile={openProfile}
+        onOpenSettings={() => {
+          window.history.pushState(null, "", "#/settings");
+          setSettingsRoute(true);
+        }}
+        onOpenTask={openTask}
+      />
+      <section className="workspace home-workspace">
+        <header className="topbar" />
+        <div className="home-stage">
+          <div className="hero-copy">
+            <span className="eyebrow"><SparklesIcon size={13} /> 多专家协同研究</span>
+            <h1>今天想研究什么？</h1>
+            <p>提出一个复杂问题，AI 将组建专业团队，从多视角展开研究并生成可追溯、可精调的专业报告。</p>
+          </div>
+          <div
+            aria-label="开始研究"
+            className={`research-composer ${requiresLogin ? "requires-login" : ""}`}
+            onClick={requiresLogin ? () => requireLogin() : undefined}
+          >
+            <Sender
+              actions={false}
+              autoSize={{ maxRows: 8, minRows: 4 }}
+              footer={
+                <div className="composer-tools">
+                  <div className="tool-group">
                     <Popover
-                      content={(
-                        <div className="recommended-topic-source-list">
-                          {topic.sources.map((source) => (
-                            <a href={source.url} key={source.url} rel="noreferrer" target="_blank">
-                              <span>{source.title}</span>
-                              <small>{source.domain}</small>
-                            </a>
-                          ))}
-                        </div>
-                      )}
-                      overlayClassName="recommended-topic-source-popover"
-                      placement="bottomRight"
-                      title="选题参考来源"
+                      content={<ResearchSourcePopover onChange={setSource} value={source} />}
+                      onOpenChange={(open) => {
+                        if (open && requiresLogin) { setSourceOpen(false); requireLogin(); return; }
+                        setSourceOpen(open);
+                      }}
+                      open={sourceOpen}
+                      placement="topLeft"
                       trigger="click"
                     >
-                      <button
-                        aria-label={`查看“${topic.title}”的 ${topic.sources.length} 个参考来源`}
-                        className="recommended-topic-sources-trigger"
-                        type="button"
-                      >
-                        <LinkOutlined aria-hidden="true" />
-                        {topic.sources.length}
+                      <button className={source.kind !== "web" ? "has-source-selection" : ""} title="研究来源" type="button">
+                        <PaperClipOutlined />
+                        <span>{sourceLabels[source.kind]}</span>
+                        <DownOutlined />
                       </button>
                     </Popover>
-                  )}
-                </article>
-              ))}
-            </div>
-          </section>
-        )}
+                  </div>
+                  <button className="plan-button" disabled={!input.trim()} onClick={() => handleSubmit(input)} type="button">
+                    开始研究 <span><ArrowRightOutlined /></span>
+                  </button>
+                </div>
+              }
+              onChange={setInput}
+              onSubmit={handleSubmit}
+              placeholder="描述你的研究主题、关注问题或期望输出…"
+              value={input}
+            />
+          </div>
+          {error && <p className="composer-error" role="alert">{error}</p>}
+          {recommendedTopics.length > 0 && (
+            <section aria-label="推荐研究主题" className="recommended-topics">
+              <header>
+                <div><strong>近期值得研究</strong><span>选一个方向开始，也可以继续修改</span></div>
+                <Tooltip title={recommendationBatchCount > 1 ? "换一批研究方向" : recommendationsRefreshing ? "正在准备更多研究方向" : "暂无更多研究方向"}>
+                  <button
+                    aria-label="换一批研究方向"
+                    className="recommendation-refresh"
+                    disabled={recommendationBatchCount <= 1}
+                    onClick={() => setRecommendationBatch((current) => (current + 1) % recommendationBatchCount)}
+                    type="button"
+                  >
+                    <ReloadOutlined spin={recommendationsRefreshing} />
+                  </button>
+                </Tooltip>
+              </header>
+              <div className="recommended-topic-list">
+                {visibleRecommendedTopics.map((topic) => (
+                  <article className="recommended-topic-item" key={topic.id}>
+                    <button
+                      className="recommended-topic-select"
+                      onClick={() => setInput(`${topic.title} - ${topic.summary}`)}
+                      type="button"
+                    >
+                      <span className="recommended-topic-category">{topic.category}</span>
+                      <strong>{topic.title}</strong>
+                      <small>{topic.summary}</small>
+                    </button>
+                    {topic.sources.length > 0 && (
+                      <Popover
+                        content={
+                          <div className="recommended-topic-source-list">
+                            {topic.sources.map((item) => (
+                              <a href={item.url} key={item.url} rel="noreferrer" target="_blank">
+                                <span>{item.title}</span>
+                                <small>{item.domain}</small>
+                              </a>
+                            ))}
+                          </div>
+                        }
+                        overlayClassName="recommended-topic-source-popover"
+                        placement="bottomRight"
+                        title="选题参考来源"
+                        trigger="click"
+                      >
+                        <button
+                          aria-label={`查看“${topic.title}”的 ${topic.sources.length} 个参考来源`}
+                          className="recommended-topic-sources-trigger"
+                          type="button"
+                        >
+                          <LinkOutlined aria-hidden="true" />
+                          {topic.sources.length}
+                        </button>
+                      </Popover>
+                    )}
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+        <footer className="home-footer">
+          <SafetyCertificateOutlined /> AI 研究结果仅供参考，重要决策请结合专业判断
+        </footer>
       </section>
-      {!showHistorySidebar && <HistoryDrawer onClose={() => setHistoryOpen(false)} onOpenTask={openTask} open={historyOpen} />}
       <LoginModal error={loginError} loading={loginLoading} onCancel={() => {
         if (loginLoading) return;
         pendingAction.current = undefined;

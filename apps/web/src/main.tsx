@@ -17,12 +17,14 @@ ReactDOM.createRoot(root).render(
     <ConfigProvider
       theme={{
         token: {
-          colorPrimary: "#2167d5",
-          colorText: "#20252b",
-          colorTextSecondary: "#66717e",
+          colorPrimary: "#e60012",
+          colorInfo: "#e60012",
+          colorText: "#19191c",
+          colorTextSecondary: "#717178",
           colorBgBase: "#ffffff",
+          colorBorder: "#e7e7e9",
           borderRadius: 10,
-          fontFamily: "Inter, system-ui, -apple-system, Microsoft YaHei, sans-serif",
+          fontFamily: "Geist, Inter, system-ui, -apple-system, PingFang SC, Microsoft YaHei, sans-serif",
         },
       }}
     >

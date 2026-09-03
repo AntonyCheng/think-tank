@@ -4,7 +4,7 @@ interface BrandLockupProps {
 
 export function BrandLockup({ onClick }: BrandLockupProps) {
   const content = <>
-    <img alt="" className="brand-mark" src="/brand-logo.png" />
+    <span aria-hidden="true" className="brand-mark">智</span>
     <span className="brand-copy">
       <strong>智研<span className="brand-ai">AI</span>助手</strong>
       <span>对话式深度研究</span>
