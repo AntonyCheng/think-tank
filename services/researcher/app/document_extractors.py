@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import anydoc
 
 from .document_store import DocumentRecord, DocumentStore, DocumentStoreError
+from .ocr_client import OcrFailedError, OcrResult, OcrUnavailableError, ocr_document
 
 
 # Media types that carry no reliable binary signature. anydoc needs an explicit
@@ -17,6 +19,17 @@ _ANYDOC_FORMAT_HINT: dict[str, str] = {
 # a document engine.
 _PLAIN_TEXT_MEDIA_TYPES = {"text/plain", "text/markdown"}
 
+# Image uploads always go straight to OCR - anydoc has no image path.
+_IMAGE_MEDIA_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/tiff",
+    "image/bmp",
+}
+
+EmitEvent = Callable[[str, dict[str, object]], Awaitable[None]]
+
 
 @dataclass(frozen=True)
 class PrivateDocumentEvidence:
@@ -28,27 +41,22 @@ class PrivateDocumentEvidence:
     original_characters: int
     truncated: bool
     needs_ocr: bool = False
+    warnings: tuple[str, ...] = ()
 
 
-def extract_document(
-    store: DocumentStore,
-    task_id: str,
-    document_id: str,
+def _normalize(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _evidence(
+    record: DocumentRecord,
+    text: str,
+    *,
+    needs_ocr: bool,
+    warnings: tuple[str, ...] = (),
 ) -> PrivateDocumentEvidence:
-    record, stream = store.open(task_id, document_id)
-    try:
-        body = stream.read()
-    finally:
-        stream.close()
-    text, needs_ocr = _extract(record, body)
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    normalized = _normalize(text)
     if not normalized:
-        if needs_ocr:
-            raise DocumentStoreError(
-                "document_needs_ocr",
-                "The document appears to be scanned and needs OCR, which is "
-                "not available yet.",
-            )
         raise DocumentStoreError(
             "document_content_empty",
             "The document contains no extractable text.",
@@ -62,7 +70,90 @@ def extract_document(
         original_characters=len(normalized),
         truncated=False,
         needs_ocr=needs_ocr,
+        warnings=warnings,
     )
+
+
+def extract_document(
+    store: DocumentStore,
+    task_id: str,
+    document_id: str,
+) -> PrivateDocumentEvidence:
+    """Synchronous extraction without OCR. Scanned documents raise a signal."""
+    record, stream = store.open(task_id, document_id)
+    try:
+        body = stream.read()
+    finally:
+        stream.close()
+    if record.media_type in _IMAGE_MEDIA_TYPES:
+        raise DocumentStoreError(
+            "document_needs_ocr",
+            "The image needs OCR, which is not available in this path.",
+        )
+    text, needs_ocr = _extract(record, body)
+    if needs_ocr:
+        raise DocumentStoreError(
+            "document_needs_ocr",
+            "The document appears to be scanned and needs OCR.",
+        )
+    return _evidence(record, text, needs_ocr=False)
+
+
+async def materialize_private_document(
+    store: DocumentStore,
+    task_id: str,
+    document_id: str,
+    *,
+    emit: EmitEvent | None = None,
+) -> PrivateDocumentEvidence:
+    """Extraction with the OCR sidecar as a fallback for scanned pages/images."""
+    record, stream = store.open(task_id, document_id)
+    try:
+        body = stream.read()
+    finally:
+        stream.close()
+
+    is_image = record.media_type in _IMAGE_MEDIA_TYPES
+    if not is_image:
+        text, needs_ocr = _extract(record, body)
+        if not needs_ocr:
+            return _evidence(record, text, needs_ocr=False)
+
+    if emit is not None:
+        await emit(
+            "document.ocr_started",
+            {"documentId": document_id, "mediaType": record.media_type},
+        )
+    try:
+        ocr = await ocr_document(body, media_type=record.media_type)
+    except OcrUnavailableError as exc:
+        raise DocumentStoreError(
+            "document_ocr_unavailable",
+            "The document is scanned and the OCR service is unavailable.",
+        ) from exc
+    except OcrFailedError as exc:
+        raise DocumentStoreError(
+            "document_ocr_failed",
+            f"OCR could not read the document: {exc}",
+        ) from exc
+    if emit is not None:
+        await emit("document.ocr_completed", _ocr_event(document_id, ocr))
+    return _evidence(
+        record,
+        ocr.markdown,
+        needs_ocr=True,
+        warnings=tuple(ocr.warnings),
+    )
+
+
+def _ocr_event(document_id: str, ocr: OcrResult) -> dict[str, object]:
+    return {
+        "documentId": document_id,
+        "profile": ocr.profile,
+        "pageCount": ocr.page_count,
+        "characterCount": ocr.character_count,
+        "averageConfidence": ocr.average_confidence,
+    }
 
 
 def _extract(record: DocumentRecord, body: bytes) -> tuple[str, bool]:

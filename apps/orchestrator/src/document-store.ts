@@ -26,6 +26,11 @@ export interface StoredDocument {
     | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    | "image/png"
+    | "image/jpeg"
+    | "image/bmp"
+    | "image/tiff"
+    | "image/webp"
     | "text/csv"
     | "text/plain"
     | "text/markdown";
@@ -234,10 +239,27 @@ const STORAGE_EXTENSIONS: Record<StoredDocument["mediaType"], string> = {
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/bmp": "bmp",
+  "image/tiff": "tiff",
+  "image/webp": "webp",
   "text/csv": "csv",
   "text/plain": "txt",
   "text/markdown": "md",
 };
+
+const IMAGE_SIGNATURES: Array<{
+  signature: number[];
+  suffixes: string[];
+  mediaType: StoredDocument["mediaType"];
+}> = [
+  { signature: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], suffixes: [".png"], mediaType: "image/png" },
+  { signature: [0xff, 0xd8, 0xff], suffixes: [".jpg", ".jpeg"], mediaType: "image/jpeg" },
+  { signature: [0x42, 0x4d], suffixes: [".bmp"], mediaType: "image/bmp" },
+  { signature: [0x49, 0x49, 0x2a, 0x00], suffixes: [".tif", ".tiff"], mediaType: "image/tiff" },
+  { signature: [0x4d, 0x4d, 0x00, 0x2a], suffixes: [".tif", ".tiff"], mediaType: "image/tiff" },
+];
 
 function documentType(
   name: string,
@@ -265,6 +287,21 @@ function documentType(
       .equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
   ) {
     return OOXML_MEDIA_TYPES[suffix]!;
+  }
+  if (
+    (suffix === ".webp") &&
+    content.subarray(0, 4).toString("ascii") === "RIFF" &&
+    content.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  for (const { signature, suffixes, mediaType } of IMAGE_SIGNATURES) {
+    if (
+      suffixes.includes(suffix) &&
+      content.subarray(0, signature.length).equals(Buffer.from(signature))
+    ) {
+      return mediaType;
+    }
   }
   if ([".txt", ".md", ".markdown", ".csv"].includes(suffix) && !content.includes(0)) {
     if (suffix === ".csv") return "text/csv";

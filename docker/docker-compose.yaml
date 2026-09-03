@@ -93,16 +93,39 @@ services:
     depends_on:
       thinktank-searxng:
         condition: service_healthy
+      thinktank-ocr:
+        condition: service_started
     env_file:
       - ./data/config/runtime/runtime.env
     environment:
       LOCAL_DOCUMENTS_ROOT: /app/.think-tank/documents
       PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      OCR_SERVICE_URL: http://thinktank-ocr:8020
     expose:
       - "8010"
     volumes:
       - ./data/app/documents:/app/.think-tank/documents:ro
       - ./data/researcher/exports:/app/.think-tank/exports
+    networks:
+      - thinktank_network
+
+  thinktank-ocr:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ocr
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
+    image: thinktank-ocr:local
+    container_name: thinktank-ocr
+    init: true
+    restart: unless-stopped
+    environment:
+      OCR_WARMUP: ${OCR_WARMUP:-true}
+    expose:
+      - "8020"
+    volumes:
+      - ./data/ocr-models:/app/.ocr-models
     networks:
       - thinktank_network
 

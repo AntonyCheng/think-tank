@@ -1,15 +1,18 @@
 # Docker Compose 部署
 
-该部署由六个容器组成：
+该部署由七个容器组成：
 
 - `thinktank-web`：Nginx 托管前端，并把 API 和流式请求反向代理到 API 容器。
 - `thinktank-api`：任务编排、登录、设置和报告接口，仅在 Docker 内网开放。
 - `thinktank-postgres`：平台唯一运行时数据库，仅在 Docker 内网开放，数据绑定挂载到 `docker/data/postgres`。
 - `thinktank-researcher`：GPT Researcher 与文档导出，仅在 Docker 内网开放。
+- `thinktank-ocr`：PaddleOCR PP-OCRv5 中文识别 sidecar，仅在 Docker 内网开放；Researcher 遇到扫描件 PDF 或图片时调用。模型首次使用时下载到绑定卷 `docker/data/ocr-models`，之后离线加载。
 - `thinktank-searxng`：SearXNG 聚合搜索服务，向 Researcher 提供 JSON 搜索接口，并可选择映射宿主机端口供外部调试或检索使用。
 - `thinktank-mcp`：远程 Streamable HTTP MCP，对外开放下载接口。
 
 所有容器都加入 `thinktank_network`。宿主机映射前端（默认 `7168`）、MCP（默认 `7169`）和 SearXNG（默认 `7170`），不使用 Docker named volume，运行数据全部保存在 `docker/data`。
+
+`thinktank-ocr` 首次启动会在后台预热并下载 PP-OCRv5 中文 mobile 模型（约几十 MB）到 `docker/data/ocr-models`。识别置信度过低时会自动升级到 server 精度模型（会额外下载一次）。设置 `OCR_WARMUP=false` 可跳过预热。跨机迁移时一并迁移 `docker/data/ocr-models` 即可免去重新下载。
 
 前端宿主机端口可通过 `WEB_PORT` 覆盖；例如 Windows 保留 `5173` 时，可使用 `WEB_PORT=5800`。
 MCP 宿主机端口可通过 `MCP_PUBLIC_PORT` 覆盖；容器内部服务端口始终为 `7010`。

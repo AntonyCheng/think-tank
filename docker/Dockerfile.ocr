@@ -1,0 +1,39 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LANG=C.UTF-8 \
+    PADDLE_PDX_CACHE_HOME=/app/.ocr-models \
+    PADDLEOCR_HOME=/app/.ocr-models \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+    FLAGS_minloglevel=2
+
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ARG PIP_EXTRA_INDEX_URL=
+
+WORKDIR /app/services/ocr
+
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
+      /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY services/ocr/requirements.txt ./requirements.txt
+RUN --mount=type=cache,id=thinktank-ocr-pip,target=/root/.cache/pip,sharing=locked \
+    if [ -n "${PIP_EXTRA_INDEX_URL}" ]; then \
+      python -m pip install --index-url "${PIP_INDEX_URL}" --extra-index-url "${PIP_EXTRA_INDEX_URL}" -r requirements.txt; \
+    else \
+      python -m pip install --index-url "${PIP_INDEX_URL}" -r requirements.txt; \
+    fi
+
+COPY services/ocr/app ./app
+RUN mkdir -p /app/.ocr-models
+
+EXPOSE 8020
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=5 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/ready', timeout=3)"
+
+CMD ["python", "-m", "uvicorn", "app.main:app", "--app-dir", "services/ocr", "--host", "0.0.0.0", "--port", "8020"]

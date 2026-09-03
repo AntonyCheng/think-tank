@@ -1,0 +1,6 @@
+# Chinese OCR sidecar. PaddleOCR PP-OCRv5 with the same pins kLegal verified.
+paddlepaddle==3.2.2
+paddleocr==3.5.0
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+python-multipart==0.0.20

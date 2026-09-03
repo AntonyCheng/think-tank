@@ -164,6 +164,14 @@ _OLE2_MEDIA_TYPES = {
     ".ppt": "application/vnd.ms-powerpoint",
 }
 
+_IMAGE_SIGNATURES: tuple[tuple[bytes, frozenset[str], str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", frozenset({".png"}), "image/png"),
+    (b"\xff\xd8\xff", frozenset({".jpg", ".jpeg"}), "image/jpeg"),
+    (b"BM", frozenset({".bmp"}), "image/bmp"),
+    (b"II*\x00", frozenset({".tif", ".tiff"}), "image/tiff"),
+    (b"MM\x00*", frozenset({".tif", ".tiff"}), "image/tiff"),
+)
+
 _STORAGE_NAMES = {
     "application/pdf": "content.pdf",
     "application/msword": "content.doc",
@@ -172,6 +180,11 @@ _STORAGE_NAMES = {
     _OOXML_MEDIA_TYPES[".docx"]: "content.docx",
     _OOXML_MEDIA_TYPES[".xlsx"]: "content.xlsx",
     _OOXML_MEDIA_TYPES[".pptx"]: "content.pptx",
+    "image/png": "content.png",
+    "image/jpeg": "content.jpg",
+    "image/bmp": "content.bmp",
+    "image/tiff": "content.tiff",
+    "image/webp": "content.webp",
     "text/csv": "content.csv",
     "text/plain": "content.txt",
     "text/markdown": "content.md",
@@ -179,7 +192,7 @@ _STORAGE_NAMES = {
 
 
 def _detect_media_type(path: Path, display_name: str) -> str:
-    header = path.read_bytes()[:8]
+    header = path.read_bytes()[:16]
     suffix = Path(display_name).suffix.lower()
     if header.startswith(b"%PDF-") and suffix == ".pdf":
         return "application/pdf"
@@ -187,6 +200,11 @@ def _detect_media_type(path: Path, display_name: str) -> str:
         return _OLE2_MEDIA_TYPES[suffix]
     if header.startswith(b"PK\x03\x04") and suffix in _OOXML_MEDIA_TYPES:
         return _OOXML_MEDIA_TYPES[suffix]
+    if header[:4] == b"RIFF" and header[8:12] == b"WEBP" and suffix == ".webp":
+        return "image/webp"
+    for signature, suffixes, media_type in _IMAGE_SIGNATURES:
+        if header.startswith(signature) and suffix in suffixes:
+            return media_type
     if suffix in {".txt", ".md", ".markdown", ".csv"}:
         try:
             path.read_text(encoding="utf-8")

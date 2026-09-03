@@ -51,7 +51,10 @@ from .synthesis_compression import (
     resolve_extraction_llm,
     resolve_synthesis_context_budget,
 )
-from .document_extractors import PrivateDocumentEvidence, extract_document
+from .document_extractors import (
+    PrivateDocumentEvidence,
+    materialize_private_document,
+)
 from .document_store import DocumentStore, DocumentStoreError
 
 
@@ -233,10 +236,17 @@ async def run_research(
                 raise HTTPException(status_code=422, detail={"code": "document_task_required", "path": "$.taskId", "message": "A task ID is required for local documents."})
             for document_id in research_profile.source.document_ids:
                 try:
-                    private_documents.append(extract_document(DocumentStore(), request.task_id, document_id))
+                    evidence = await materialize_private_document(
+                        DocumentStore(),
+                        request.task_id,
+                        document_id,
+                        emit=collector.record,
+                    )
                 except DocumentStoreError as exc:
-                    raise HTTPException(status_code=422, detail={"code": exc.code, "path": "$.researchProfile.source.documentIds", "message": str(exc)}) from exc
-                await collector.record("document.materialized", {"documentId": document_id, "mediaType": private_documents[-1].media_type, "truncated": private_documents[-1].truncated})
+                    status = 503 if exc.code == "document_ocr_unavailable" else 422
+                    raise HTTPException(status_code=status, detail={"code": exc.code, "path": "$.researchProfile.source.documentIds", "message": str(exc)}) from exc
+                private_documents.append(evidence)
+                await collector.record("document.materialized", {"documentId": document_id, "mediaType": evidence.media_type, "truncated": evidence.truncated, "ocr": evidence.needs_ocr})
         if (
             acquires_sources
             and research_profile.source.mode in {"urls", "hybrid"}
@@ -729,9 +739,16 @@ async def run_research(
                 locator=document.locator,
                 title=document.title,
                 sourceType="document",
-                summary=(
-                    "本地文档已受限解析。"
-                    + (" 内容已截断。" if document.truncated else "")
+                summary=" ".join(
+                    part
+                    for part in (
+                        "本地文档已通过 OCR 识别。"
+                        if document.needs_ocr
+                        else "本地文档已受限解析。",
+                        "内容已截断。" if document.truncated else "",
+                        *document.warnings,
+                    )
+                    if part
                 ),
             )
             for document in private_documents
