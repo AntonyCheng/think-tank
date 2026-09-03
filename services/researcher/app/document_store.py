@@ -152,29 +152,64 @@ class DocumentStore:
         return name
 
 
+_OOXML_MEDIA_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+_OLE2_MEDIA_TYPES = {
+    ".doc": "application/msword",
+    ".xls": "application/vnd.ms-excel",
+    ".ppt": "application/vnd.ms-powerpoint",
+}
+
+_STORAGE_NAMES = {
+    "application/pdf": "content.pdf",
+    "application/msword": "content.doc",
+    "application/vnd.ms-excel": "content.xls",
+    "application/vnd.ms-powerpoint": "content.ppt",
+    _OOXML_MEDIA_TYPES[".docx"]: "content.docx",
+    _OOXML_MEDIA_TYPES[".xlsx"]: "content.xlsx",
+    _OOXML_MEDIA_TYPES[".pptx"]: "content.pptx",
+    "text/csv": "content.csv",
+    "text/plain": "content.txt",
+    "text/markdown": "content.md",
+}
+
+
 def _detect_media_type(path: Path, display_name: str) -> str:
     header = path.read_bytes()[:8]
     suffix = Path(display_name).suffix.lower()
     if header.startswith(b"%PDF-") and suffix == ".pdf":
         return "application/pdf"
-    if header.startswith(b"PK\x03\x04") and suffix == ".docx":
-        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    if suffix in {".txt", ".md", ".markdown"}:
+    if header.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") and suffix in _OLE2_MEDIA_TYPES:
+        return _OLE2_MEDIA_TYPES[suffix]
+    if header.startswith(b"PK\x03\x04") and suffix in _OOXML_MEDIA_TYPES:
+        return _OOXML_MEDIA_TYPES[suffix]
+    if suffix in {".txt", ".md", ".markdown", ".csv"}:
         try:
             path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise DocumentStoreError("document_type_invalid", "The text document is not valid UTF-8.") from exc
+        except UnicodeDecodeError:
+            for encoding in ("gb18030", "utf-16"):
+                try:
+                    path.read_text(encoding=encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                raise DocumentStoreError(
+                    "document_type_invalid",
+                    "The text document uses an unsupported character encoding.",
+                ) from None
+        if suffix == ".csv":
+            return "text/csv"
         return "text/markdown" if suffix in {".md", ".markdown"} else "text/plain"
     raise DocumentStoreError("document_type_invalid", "The document type is not allowed.")
 
 
 def _storage_name(media_type: str) -> str:
-    return {
-        "application/pdf": "content.pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "content.docx",
-        "text/plain": "content.txt",
-        "text/markdown": "content.md",
-    }[media_type]
+    return _STORAGE_NAMES[media_type]
 
 
 def _document_record(data: object) -> DocumentRecord:

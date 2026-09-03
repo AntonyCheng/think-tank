@@ -20,9 +20,15 @@ export interface StoredDocument {
   displayName: string;
   mediaType:
     | "application/pdf"
+    | "application/msword"
+    | "application/vnd.ms-excel"
+    | "application/vnd.ms-powerpoint"
+    | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    | "text/csv"
     | "text/plain"
-    | "text/markdown"
-    | "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    | "text/markdown";
   byteSize: number;
   sha256: string;
   locator: string;
@@ -208,6 +214,31 @@ function assertContained(parent: string, child: string): void {
   }
 }
 
+const OOXML_MEDIA_TYPES: Record<string, StoredDocument["mediaType"]> = {
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
+const OLE2_MEDIA_TYPES: Record<string, StoredDocument["mediaType"]> = {
+  ".doc": "application/msword",
+  ".xls": "application/vnd.ms-excel",
+  ".ppt": "application/vnd.ms-powerpoint",
+};
+
+const STORAGE_EXTENSIONS: Record<StoredDocument["mediaType"], string> = {
+  "application/pdf": "pdf",
+  "application/msword": "doc",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.ms-powerpoint": "ppt",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "text/csv": "csv",
+  "text/plain": "txt",
+  "text/markdown": "md",
+};
+
 function documentType(
   name: string,
   content: Buffer,
@@ -220,24 +251,30 @@ function documentType(
     return "application/pdf";
   }
   if (
-    suffix === ".docx" &&
+    suffix in OLE2_MEDIA_TYPES &&
+    content
+      .subarray(0, 8)
+      .equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]))
+  ) {
+    return OLE2_MEDIA_TYPES[suffix]!;
+  }
+  if (
+    suffix in OOXML_MEDIA_TYPES &&
     content
       .subarray(0, 4)
       .equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))
   ) {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    return OOXML_MEDIA_TYPES[suffix]!;
   }
-  if ([".txt", ".md", ".markdown"].includes(suffix) && !content.includes(0)) {
+  if ([".txt", ".md", ".markdown", ".csv"].includes(suffix) && !content.includes(0)) {
+    if (suffix === ".csv") return "text/csv";
     return suffix === ".txt" ? "text/plain" : "text/markdown";
   }
   throw new Error("document type is not allowed");
 }
 
 function storageExtension(mediaType: StoredDocument["mediaType"]): string {
-  if (mediaType === "application/pdf") return "pdf";
-  if (mediaType === "text/plain") return "txt";
-  if (mediaType === "text/markdown") return "md";
-  return "docx";
+  return STORAGE_EXTENSIONS[mediaType];
 }
 
 function isMissing(error: unknown): boolean {

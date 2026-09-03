@@ -12,7 +12,7 @@ from typing import Mapping, Protocol
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
-import fitz
+import anydoc
 from aiohttp.abc import AbstractResolver
 
 
@@ -423,18 +423,21 @@ def _source_text(
     if media_type == "text/plain":
         return _url_title(url), body.decode(charset, errors="replace").strip()
     if media_type == "application/pdf":
-        document = fitz.open(stream=body, filetype="pdf")
         try:
-            metadata = document.metadata or {}
-            title = str(metadata.get("title") or "").strip() or _url_title(url)
-            text = "\n\n".join(
-                page.get_text("text").strip()
-                for page in document
-                if page.get_text("text").strip()
-            )
-            return title, text
-        finally:
-            document.close()
+            text = anydoc.to_markdown_bytes(body, "pdf").strip()
+        except anydoc.NeedsOcrError as exc:
+            raise SourceAccessError(
+                "source_content_empty",
+                url,
+                "The PDF source is scanned and has no extractable text.",
+            ) from exc
+        except anydoc.ConvertError as exc:
+            raise SourceAccessError(
+                "source_media_type_unsupported",
+                url,
+                "The PDF source could not be parsed.",
+            ) from exc
+        return _url_title(url), text
     raise SourceAccessError(
         "source_media_type_unsupported",
         url,
