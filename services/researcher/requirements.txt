@@ -21,6 +21,11 @@ playwright==1.61.0
 # Local-document and fetched-PDF parsing: one Rust engine, 14 formats to
 # Markdown. Pinned so a Docker rebuild cannot silently change extraction output.
 firecrawl-anydoc==0.2.4
+# Readability-style boilerplate stripping for fetched HTML sources. Both are
+# GPT Researcher transitive deps; pinned here because source_access.py now
+# imports them directly.
+beautifulsoup4==4.15.0
+lxml==6.1.3
 # PyMuPDF and python-docx stay as pinned GPT Researcher transitive deps and for
 # report export (exporter.py); think-tank no longer parses documents with them.
 PyMuPDF==1.28.0

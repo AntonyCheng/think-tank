@@ -61,6 +61,14 @@ class ModeRoutingResearcher(FakeResearcher):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         type(self).calls = []
+        self.sources: list[dict[str, str]] = []
+
+    def add_research_sources(
+        self,
+        sources: list[dict[str, str]],
+    ) -> None:
+        type(self).calls.append(("add_research_sources", sources))
+        self.sources.extend(sources)
 
     async def conduct_research(self, on_progress=None) -> None:
         type(self).calls.append(("conduct_research", None))
@@ -654,6 +662,69 @@ def test_deep_mode_routes_to_native_gptr_deep_research(monkeypatch) -> None:
     ]
 
 
+def test_deep_mode_injects_specified_url_evidence_into_the_report(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        main.research_worker,
+        "load_gpt_researcher",
+        lambda: ModeRoutingResearcher,
+    )
+    monkeypatch.setattr(
+        main.research_worker,
+        "default_source_materializer",
+        lambda: StubSourceMaterializer(),
+    )
+    monkeypatch.setattr(main, "research_executor", InProcessExecutor())
+    for name in (
+        "DEEP_RESEARCH_BREADTH",
+        "DEEP_RESEARCH_DEPTH",
+        "DEEP_RESEARCH_CONCURRENCY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    response = TestClient(main.app).post(
+        "/research",
+        json={
+            "systemPrompt": "Expert identity.",
+            "task": "Investigate the specified report deeply.",
+            "researchProfile": {
+                "schemaVersion": 1,
+                "mode": "deep",
+                "source": {
+                    "mode": "urls",
+                    "urls": ["https://input.example/report"],
+                },
+                "quality": {"curateSources": False},
+                "limits": {
+                    "maxSearchResultsPerQuery": 5,
+                    "maxIterations": 3,
+                    "maxSubtopics": 3,
+                },
+                "deep": {
+                    "breadth": 3,
+                    "depth": 2,
+                    "concurrency": 2,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    write_call = next(
+        payload
+        for name, payload in ModeRoutingResearcher.calls
+        if name == "write_report"
+    )
+    report_context = write_call["kwargs"]["ext_context"]
+    assert "Verified specified evidence." in report_context
+    assert any(
+        event["type"] == "source.context_prepared"
+        and event["data"]["kind"] == "specified_url"
+        for event in response.json()["events"]
+    )
+
+
 def test_synthesis_mode_skips_research_and_writes_from_dependency_context(
     monkeypatch,
 ) -> None:
@@ -812,6 +883,7 @@ def test_url_only_materializes_once_and_skips_web_research(monkeypatch) -> None:
     ] == [
         "source.validation_started",
         "source.materialized",
+        "source.context_prepared",
     ]
 
 
@@ -875,6 +947,7 @@ def test_url_plus_web_combines_context_and_writes_one_report(
     ] == [
         "source.validation_started",
         "source.materialized",
+        "source.context_prepared",
         "source.web_supplement_started",
     ]
 
@@ -986,9 +1059,70 @@ def test_web_evidence_context_compresses_only_after_total_budget(
         event for event in collector.events
         if event.type == "source.context_prepared"
     )
+    assert event.data["kind"] == "web"
     assert event.data["compressedSources"] == 1
     assert event.data["compressionThresholdCharacters"] == 25
     assert event.data["compressionTargetCharacters"] == 20
+
+
+def test_private_document_context_is_bounded_by_the_shared_budget(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("GPTR_WEB_EVIDENCE_CONTEXT_BUDGET_CHARS", "60")
+    monkeypatch.setenv(
+        "GPTR_WEB_EVIDENCE_SOURCE_COMPRESS_THRESHOLD_CHARS",
+        "30",
+    )
+    monkeypatch.setenv(
+        "GPTR_WEB_EVIDENCE_SOURCE_COMPRESS_TARGET_CHARS",
+        "24",
+    )
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://models.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("FAST_LLM", "test-fast-model")
+
+    class Request:
+        base_url = None
+        api_key = None
+        fast_llm = None
+        fallback_base_url = None
+        fallback_api_key = None
+        fallback_fast_llm = None
+
+    async def fake_compress(self, **kwargs):
+        return "本地文档摘要"
+
+    monkeypatch.setattr(
+        main.research_worker.SourceEvidenceCompressor,
+        "compress",
+        fake_compress,
+    )
+    document = main.research_worker.PrivateDocumentEvidence(
+        document_id="doc_1",
+        locator="document:doc_1",
+        title="本地文档",
+        media_type="application/pdf",
+        text="季度经营数据" * 40,
+        original_characters=240,
+        truncated=False,
+    )
+    collector = main.LogCollector()
+    context = asyncio.run(
+        main.research_worker._prepare_private_document_context(
+            [document],
+            collector,
+            Request(),
+        )
+    )
+
+    assert "本地文档摘要" in context
+    assert "<private_document_evidence>" in context
+    event = next(
+        event for event in collector.events
+        if event.type == "source.context_prepared"
+    )
+    assert event.data["kind"] == "private_document"
+    assert event.data["compressedSources"] == 1
 
 
 """def test_pure_managed_mcp_uses_private_evidence_and_skips_web(
@@ -1443,7 +1577,16 @@ def test_url_only_fails_when_no_specified_source_is_usable(
     )
 
     assert response.status_code == 502
-    assert response.json()["detail"]["code"] == "source_no_usable_sources"
+    detail = response.json()["detail"]
+    assert detail["code"] == "source_no_usable_sources"
+    assert detail["failures"] == [
+        {
+            "url": "https://input.example/report",
+            "code": "source_unavailable",
+            "message": "The source could not be downloaded.",
+        }
+    ]
+    assert "source_unavailable" in detail["message"]
 
 
 def test_streams_gptr_events_before_the_final_result(monkeypatch) -> None:

@@ -160,29 +160,28 @@ def test_research_request_accepts_task_id_alias() -> None:
     )
 
 
-def test_current_environment_rejects_url_sources_for_deep_research() -> None:
+def test_current_environment_allows_url_sources_for_deep_research() -> None:
     defaults, capabilities = current_research_environment("duckduckgo")
 
-    with pytest.raises(ResearchProfileError) as captured:
-        resolve_research_profile(
-            {
-                "mode": "deep",
-                "deep": {
-                    "breadth": 2,
-                    "depth": 2,
-                    "concurrency": 2,
-                },
-                "source": {
-                    "mode": "urls",
-                    "urls": ["https://example.com/report"],
-                },
+    result = resolve_research_profile(
+        {
+            "mode": "deep",
+            "deep": {
+                "breadth": 2,
+                "depth": 2,
+                "concurrency": 2,
             },
-            defaults,
-            capabilities,
-        )
+            "source": {
+                "mode": "urls",
+                "urls": ["https://example.com/report"],
+            },
+        },
+        defaults,
+        capabilities,
+    )
 
-    assert captured.value.code == "profile_capability_disabled"
-    assert captured.value.path == "$.source.mode"
+    assert result.mode == "deep"
+    assert result.source.mode == "urls"
 
 
 def test_current_environment_allows_synthesis_to_preserve_url_source_grant() -> None:
@@ -226,27 +225,26 @@ def test_current_environment_allows_synthesis_to_preserve_domain_source_grant() 
     assert result.source.include_domains == ("hrbcu.edu.cn",)
 
 
-def test_current_environment_rejects_domain_filters_for_deep_research() -> None:
+def test_current_environment_allows_domain_filters_for_deep_research() -> None:
     defaults, capabilities = current_research_environment("duckduckgo")
 
-    with pytest.raises(ResearchProfileError) as captured:
-        resolve_research_profile(
-            {
-                "mode": "deep",
-                "deep": {
-                    "breadth": 2,
-                    "depth": 2,
-                    "concurrency": 2,
-                },
-                "source": {
-                    "mode": "web",
-                    "retrievers": ["duckduckgo"],
-                    "includeDomains": ["example.com"],
-                },
+    result = resolve_research_profile(
+        {
+            "mode": "deep",
+            "deep": {
+                "breadth": 2,
+                "depth": 2,
+                "concurrency": 2,
             },
-            defaults,
-            capabilities,
-        )
+            "source": {
+                "mode": "web",
+                "retrievers": ["duckduckgo"],
+                "includeDomains": ["example.com"],
+            },
+        },
+        defaults,
+        capabilities,
+    )
 
-    assert captured.value.code == "profile_capability_disabled"
-    assert captured.value.path == "$.source.includeDomains"
+    assert result.mode == "deep"
+    assert result.source.include_domains == ("example.com",)

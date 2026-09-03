@@ -71,6 +71,11 @@ GPTR 快速和 GPTR 深度四个模型；向量模型独立配置且不参与主
 `MODEL_PREFLIGHT_TIMEOUT_MS`（单位：毫秒），然后重新创建 API 容器；该参数只影响设置页
 的连通性检测，不影响研究任务和 GPTR 请求的超时。
 
+如果部署环境需要通过出口代理访问外网，在 `runtime.env` 中配置
+`GPTR_SOURCE_HTTP_PROXY=http://host:port`（仅作用于“指定 URL”来源的抓取与浏览器兜底，
+不影响平台内部流量）。启用代理后，主机名与解析地址的 SSRF 预检仍然生效，仅放宽对最终
+socket 对端 IP 的校验——因为此时对端是代理。
+
 实际 `.env` 文件不会被 Git 跟踪。不要把模型密钥、登录密码或 MCP 密钥写进 Compose 和 Dockerfile。
 
 五个配置目录相互隔离。API 容器只读入 `api.env`、`postgres.env`，并挂载可写的

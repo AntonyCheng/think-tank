@@ -127,64 +127,55 @@ test("current deployment exposes the ready multi-retriever set", () => {
   assert.equal(environment.capabilities.maxRetrievers, 2);
 });
 
-test("current deployment rejects URL sources for deep research", () => {
+test("current deployment accepts URL sources for deep research", () => {
   const environment = currentResearchProfileEnvironment("duckduckgo");
 
-  assert.throws(
-    () =>
-      resolveResearchProfile(
-        {
-          mode: "deep",
-          deep: {
-            breadth: 2,
-            depth: 2,
-            concurrency: 2,
-          },
-          source: {
-            mode: "urls",
-            urls: ["https://example.com/report"],
-          },
-        },
-        environment.defaults,
-        environment.capabilities,
-      ),
-    (error: unknown) => {
-      assert.ok(error instanceof ResearchProfileError);
-      assert.equal(error.code, "profile_capability_disabled");
-      assert.equal(error.path, "$.source.mode");
-      return true;
+  const profile = resolveResearchProfile(
+    {
+      mode: "deep",
+      deep: {
+        breadth: 2,
+        depth: 2,
+        concurrency: 2,
+      },
+      source: {
+        mode: "urls",
+        urls: ["https://example.com/report"],
+      },
     },
+    environment.defaults,
+    environment.capabilities,
   );
+
+  assert.equal(profile.mode, "deep");
+  assert.equal(profile.source.mode, "urls");
 });
 
-test("current deployment rejects strict domain filters for deep research", () => {
+test("current deployment accepts strict domain filters for deep research", () => {
   const environment = currentResearchProfileEnvironment("duckduckgo");
 
-  assert.throws(
-    () =>
-      resolveResearchProfile(
-        {
-          mode: "deep",
-          deep: {
-            breadth: 2,
-            depth: 2,
-            concurrency: 2,
-          },
-          source: {
-            mode: "web",
-            retrievers: ["duckduckgo"],
-            includeDomains: ["example.com"],
-          },
-        },
-        environment.defaults,
-        environment.capabilities,
-      ),
-    (error: unknown) => {
-      assert.ok(error instanceof ResearchProfileError);
-      assert.equal(error.code, "profile_capability_disabled");
-      assert.equal(error.path, "$.source.includeDomains");
-      return true;
+  const profile = resolveResearchProfile(
+    {
+      mode: "deep",
+      deep: {
+        breadth: 2,
+        depth: 2,
+        concurrency: 2,
+      },
+      source: {
+        mode: "web",
+        retrievers: ["duckduckgo"],
+        includeDomains: ["example.com"],
+      },
     },
+    environment.defaults,
+    environment.capabilities,
+  );
+
+  assert.equal(profile.mode, "deep");
+  assert.deepEqual(
+    profile.source.mode === "web" ? profile.source.includeDomains : [],
+    ["example.com"],
   );
 });
 

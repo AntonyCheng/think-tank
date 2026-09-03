@@ -11,8 +11,14 @@ from .source_access import SourceAccessError, SourceHttpResponse
 class PlaywrightSourceTransport:
     """A one-page, no-storage renderer used only after static extraction fails."""
 
-    def __init__(self, browsers_path: str | None = None) -> None:
+    def __init__(
+        self,
+        browsers_path: str | None = None,
+        *,
+        proxy: str | None = None,
+    ) -> None:
         self._browsers_path = browsers_path
+        self._proxy = proxy or None
 
     async def fetch(
         self,
@@ -35,10 +41,19 @@ class PlaywrightSourceTransport:
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = browser_path
         try:
             async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(
-                    headless=True,
-                    args=[f"--host-resolver-rules=MAP {host} {addresses[0]},EXCLUDE localhost"],
-                )
+                launch_kwargs: dict[str, object] = {"headless": True}
+                if self._proxy:
+                    # The proxy resolves and connects; Chrome's host-resolver
+                    # rules do not apply to proxied requests. The navigation
+                    # allowlist below and the caller's pre-resolution address
+                    # check remain the SSRF guardrails.
+                    launch_kwargs["proxy"] = {"server": self._proxy}
+                else:
+                    launch_kwargs["args"] = [
+                        f"--host-resolver-rules=MAP {host} {addresses[0]},"
+                        "EXCLUDE localhost"
+                    ]
+                browser = await playwright.chromium.launch(**launch_kwargs)
                 try:
                     context = await browser.new_context(
                         accept_downloads=False,
@@ -77,6 +92,7 @@ class PlaywrightSourceTransport:
                             headers={"content-type": response.headers.get("content-type", "text/html; charset=utf-8")},
                             body=content,
                             peer_ip=addresses[0],
+                            via_proxy=bool(self._proxy),
                         )
                     finally:
                         await context.close()

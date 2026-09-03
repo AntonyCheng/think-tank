@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import os
+import re
 import socket
 from collections.abc import Sequence
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Mapping, Protocol
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import aiohttp
 import anydoc
 from aiohttp.abc import AbstractResolver
+from bs4 import BeautifulSoup, Comment
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,11 @@ class SourceHttpResponse:
     headers: Mapping[str, str]
     body: bytes
     peer_ip: str
+    # True when the fetch was routed through an egress proxy. The proxy performs
+    # its own DNS resolution and TCP connection, so the observed peer is the
+    # proxy rather than the origin and cannot be pinned to the verified address
+    # set. Hostname and pre-resolution address checks still apply.
+    via_proxy: bool = False
 
 
 @dataclass(frozen=True)
@@ -208,11 +214,12 @@ class SourceMaterializer:
                     requested_url,
                     "The source could not be downloaded.",
                 ) from exc
-            _assert_verified_peer(
-                response.peer_ip,
-                addresses,
-                requested_url,
-            )
+            if not response.via_proxy:
+                _assert_verified_peer(
+                    response.peer_ip,
+                    addresses,
+                    requested_url,
+                )
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.headers.get("location", "").strip()
                 if not location:
@@ -342,7 +349,8 @@ class SourceMaterializer:
                 max_bytes=self._limits.max_response_bytes,
                 timeout_seconds=self._limits.timeout_seconds,
             )
-            _assert_verified_peer(response.peer_ip, addresses, requested_url)
+            if not response.via_proxy:
+                _assert_verified_peer(response.peer_ip, addresses, requested_url)
             if (
                 response.status < 200
                 or response.status >= 300
@@ -412,37 +420,78 @@ def _content_type(value: str) -> tuple[str, str]:
     return media_type, charset
 
 
+# HTML variants always go through the boilerplate-stripping text extractor.
+_HTML_MEDIA_TYPES = {"text/html", "application/xhtml+xml"}
+
+# Media types that carry no reliable binary signature. anydoc needs an explicit
+# format hint for these; everything else is detected from the bytes themselves.
+_ANYDOC_URL_FORMAT_HINT: dict[str, str] = {
+    "application/pdf": "pdf",
+    "text/csv": "csv",
+    "application/csv": "csv",
+}
+
+
+def _is_plain_text_media_type(media_type: str) -> bool:
+    """True for text payloads that are already readable without a doc engine."""
+    if media_type in {"application/json", "application/xml"}:
+        return True
+    if media_type in _ANYDOC_URL_FORMAT_HINT:
+        # CSV is rendered as a Markdown table by anydoc instead.
+        return False
+    return media_type.startswith("text/")
+
+
 def _source_text(
     body: bytes,
     url: str,
     media_type: str,
     charset: str,
 ) -> tuple[str, str]:
-    if media_type == "text/html":
+    if media_type in _HTML_MEDIA_TYPES:
         return _html_text(body, charset)
-    if media_type == "text/plain":
+    if _is_plain_text_media_type(media_type):
         return _url_title(url), body.decode(charset, errors="replace").strip()
-    if media_type == "application/pdf":
-        try:
-            text = anydoc.to_markdown_bytes(body, "pdf").strip()
-        except anydoc.NeedsOcrError as exc:
-            raise SourceAccessError(
-                "source_content_empty",
-                url,
-                "The PDF source is scanned and has no extractable text.",
-            ) from exc
-        except anydoc.ConvertError as exc:
-            raise SourceAccessError(
-                "source_media_type_unsupported",
-                url,
-                "The PDF source could not be parsed.",
-            ) from exc
-        return _url_title(url), text
-    raise SourceAccessError(
-        "source_media_type_unsupported",
-        url,
-        "The source content type is not supported.",
-    )
+    if not media_type or media_type == "application/octet-stream":
+        # Servers frequently mislabel HTML as a generic byte stream (or send no
+        # type at all). Sniff the body before handing it to the document engine.
+        if _looks_like_html(body):
+            return _html_text(body, charset)
+    return _url_title(url), _anydoc_markdown(body, url, media_type)
+
+
+def _looks_like_html(body: bytes) -> bool:
+    head = body[:2048].lstrip().lower()
+    return head.startswith((b"<!doctype html", b"<html")) or b"<html" in head
+
+
+def _anydoc_markdown(body: bytes, url: str, media_type: str) -> str:
+    """Convert a binary document body (PDF, Office, CSV, ...) to Markdown."""
+    format_hint = _ANYDOC_URL_FORMAT_HINT.get(media_type)
+    try:
+        if format_hint is None:
+            text = anydoc.to_markdown_bytes(body)
+        else:
+            text = anydoc.to_markdown_bytes(body, format_hint)
+    except anydoc.NeedsOcrError as exc:
+        raise SourceAccessError(
+            "source_content_empty",
+            url,
+            "The source document is scanned and has no extractable text.",
+        ) from exc
+    except anydoc.EncryptedError as exc:
+        raise SourceAccessError(
+            "source_media_type_unsupported",
+            url,
+            "The source document is password protected.",
+        ) from exc
+    except anydoc.ConvertError as exc:
+        raise SourceAccessError(
+            "source_media_type_unsupported",
+            url,
+            "The source document could not be parsed.",
+        ) from exc
+    return text.strip()
 
 
 def _extract_source_text(
@@ -464,6 +513,31 @@ def _extract_source_text(
         ) from exc
 
 
+# Client-rendered application shells that ship almost no readable text before
+# JavaScript runs. When the static body is thin and carries one of these
+# markers, a one-shot browser render is worth attempting.
+_CLIENT_RENDER_MARKERS: tuple[bytes, ...] = (
+    b"__next_data__",
+    b"window.__nuxt__",
+    b'id="__nuxt"',
+    b"window.__initial_state__",
+    b"window.__apollo_state__",
+    b"data-reactroot",
+    b"data-server-rendered",
+    b"ng-version",
+    b'id="root"',
+    b"id='root'",
+    b'id="app"',
+    b"id='app'",
+    b'id="__next"',
+)
+
+
+def _looks_like_client_rendered(body: bytes) -> bool:
+    sample = body[:200_000].lower()
+    return any(marker in sample for marker in _CLIENT_RENDER_MARKERS)
+
+
 def source_fallback_decision(
     body: bytes,
     media_type: str,
@@ -471,12 +545,24 @@ def source_fallback_decision(
     minimum_text_characters: int = 200,
 ) -> SourceFallbackDecision:
     """Return a recovery decision for blocked or insufficient static HTML."""
-    if media_type != "text/html":
+    is_html = media_type in _HTML_MEDIA_TYPES or (
+        (not media_type or media_type == "application/octet-stream")
+        and _looks_like_html(body)
+    )
+    if not is_html:
         return SourceFallbackDecision()
-    if not text.strip():
+    stripped = text.strip()
+    if not stripped:
         return SourceFallbackDecision("empty_text")
-    if len(text.strip()) < minimum_text_characters:
+    if len(stripped) < minimum_text_characters:
         return SourceFallbackDecision("short_text")
+    # A large markup payload that renders to very little readable text is the
+    # signature of a script-driven page whose content never made it into the
+    # static HTML.
+    if len(body) >= 60_000 and len(stripped) < len(body) * 0.06:
+        return SourceFallbackDecision("low_text_ratio")
+    if len(stripped) < 1_200 and _looks_like_client_rendered(body):
+        return SourceFallbackDecision("client_rendered_shell")
     return SourceFallbackDecision()
 
 
@@ -485,50 +571,169 @@ def _url_title(url: str) -> str:
     return path.rsplit("/", 1)[-1] or urlsplit(url).hostname or "Untitled source"
 
 
+# Structural chrome that never carries the article body.
+_ALWAYS_DROP_TAGS: tuple[str, ...] = (
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "iframe",
+    "svg",
+    "canvas",
+    "form",
+    "nav",
+    "button",
+    "select",
+    "fieldset",
+    "dialog",
+)
+# Page chrome unless it is nested inside the article/main region, where the same
+# tags are used for the headline block or an end-of-piece note.
+_CONTEXTUAL_DROP_TAGS: tuple[str, ...] = ("header", "footer", "aside")
+_BOILERPLATE_ROLES = frozenset({
+    "navigation",
+    "banner",
+    "contentinfo",
+    "complementary",
+    "search",
+    "menu",
+    "menubar",
+    "dialog",
+    "alertdialog",
+    "tablist",
+    "toolbar",
+})
+_BOILERPLATE_PATTERN = re.compile(
+    r"(?:^|[-_ ])(?:nav|navbar|navigation|menu|sidebar|side-bar|footer|header"
+    r"|masthead|comment|comments|share|sharing|social|related|recirc|recommend"
+    r"|promo|promoted|advert|advertisement|sponsor|banner|popup|modal|overlay"
+    r"|cookie|consent|gdpr|subscribe|subscription|newsletter|signup|paywall"
+    r"|breadcrumb|breadcrumbs|pager|pagination|pagenav|toolbar|widget|utility"
+    r"|skip-link|screen-reader|visually-hidden|sr-only)(?:[-_ ]|$)",
+    re.IGNORECASE,
+)
+
+
+def _live(element) -> bool:
+    """False once a prior pass decomposed the element.
+
+    ``decompose()`` wipes the element's ``__dict__`` (dropping ``attrs``,
+    ``parent`` and friends) and only restores ``_decomposed``/``name``, so any
+    later ``.get()`` or ``.find_parent()`` on it would raise. Every pass filters
+    through here before touching an element a previous pass may have removed.
+    """
+    return not getattr(element, "_decomposed", False)
+
+
+def _drop(element) -> None:
+    """decompose() an element unless a prior pass already removed it."""
+    if _live(element):
+        element.decompose()
+
+
 def _html_text(body: bytes, charset: str = "utf-8") -> tuple[str, str]:
-    parser = _HtmlTextExtractor()
-    parser.feed(body.decode(charset, errors="replace"))
-    return parser.title, " ".join(parser.parts).strip()
+    markup = body.decode(charset, errors="replace")
+    try:
+        soup = BeautifulSoup(markup, "lxml")
+    except Exception:  # pragma: no cover - parser availability fallback
+        soup = BeautifulSoup(markup, "html.parser")
+
+    title = _html_title(soup)
+
+    for comment in soup.find_all(string=lambda value: isinstance(value, Comment)):
+        comment.extract()
+    for element in list(soup.find_all(_ALWAYS_DROP_TAGS)):
+        _drop(element)
+    for element in list(soup.find_all(_CONTEXTUAL_DROP_TAGS)):
+        if _live(element) and not element.find_parent(["article", "main"]):
+            _drop(element)
+    for element in list(soup.find_all(attrs={"role": True})):
+        if not _live(element):
+            continue
+        if str(element.get("role", "")).strip().lower() in _BOILERPLATE_ROLES:
+            _drop(element)
+    for element in list(soup.find_all(attrs={"aria-hidden": "true"})):
+        _drop(element)
+    # Class/id-flagged chrome is only removed when it is genuinely small and
+    # carries no sub-article structure, so a mislabeled content wrapper is never
+    # dropped with the real text inside it.
+    flagged = list(soup.find_all(class_=_BOILERPLATE_PATTERN))
+    flagged += list(soup.find_all(id=_BOILERPLATE_PATTERN))
+    for element in flagged:
+        if not _live(element) or element.name in (None, "html", "body"):
+            continue
+        if len(element.get_text(" ", strip=True)) <= 200 and not element.find(
+            ["article", "p"]
+        ):
+            _drop(element)
+
+    root = _main_content_root(soup)
+    text = _collapse_text(root.get_text(" ")) if root is not None else ""
+
+    fallback_root = soup.body or soup
+    full_text = _collapse_text(fallback_root.get_text(" "))
+    if len(text) < 160 and len(full_text) > len(text):
+        # The heuristic narrowed too aggressively (or the readable body simply
+        # lives outside a recognizable container); keep the fuller extraction.
+        text = full_text
+
+    return title, text
 
 
-class _HtmlTextExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.parts: list[str] = []
-        self._ignored_depth = 0
-        self._in_title = False
-        self._title_parts: list[str] = []
+def _html_title(soup: BeautifulSoup) -> str:
+    meta = soup.find("meta", attrs={"property": "og:title"})
+    if meta is not None:
+        content = str(meta.get("content", "")).strip()
+        if content:
+            return _collapse_text(content)
+    if soup.title is not None and soup.title.string:
+        collapsed = _collapse_text(soup.title.string)
+        if collapsed:
+            return collapsed
+    heading = soup.find(["h1", "h2"])
+    if heading is not None:
+        collapsed = _collapse_text(heading.get_text(" "))
+        if collapsed:
+            return collapsed
+    return "Untitled source"
 
-    @property
-    def title(self) -> str:
-        return " ".join(self._title_parts).strip() or "Untitled source"
 
-    def handle_starttag(
-        self,
-        tag: str,
-        attrs: list[tuple[str, str | None]],
-    ) -> None:
-        del attrs
-        if tag in {"script", "style", "noscript"}:
-            self._ignored_depth += 1
-        if tag == "title":
-            self._in_title = True
+def _main_content_root(soup: BeautifulSoup):
+    for selector in ("main", "[role=main]", "article"):
+        node = soup.select_one(selector)
+        if node is not None and len(node.get_text(" ", strip=True)) >= 200:
+            return node
 
-    def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "noscript"} and self._ignored_depth > 0:
-            self._ignored_depth -= 1
-        if tag == "title":
-            self._in_title = False
+    best = None
+    best_score = 0.0
+    for candidate in soup.find_all(["div", "section", "article"]):
+        score = _candidate_score(candidate)
+        if score > best_score:
+            best_score = score
+            best = candidate
+    return best or soup.body or soup
 
-    def handle_data(self, data: str) -> None:
-        if self._ignored_depth > 0:
-            return
-        text = " ".join(data.split())
-        if not text:
-            return
-        self.parts.append(text)
-        if self._in_title:
-            self._title_parts.append(text)
+
+def _candidate_score(node) -> float:
+    paragraphs = node.find_all("p", recursive=True)
+    if not paragraphs:
+        return 0.0
+    text = node.get_text(" ", strip=True)
+    text_length = len(text)
+    if text_length < 200:
+        return 0.0
+    link_length = sum(
+        len(anchor.get_text(" ", strip=True))
+        for anchor in node.find_all("a")
+    )
+    link_density = link_length / text_length if text_length else 1.0
+    if link_density > 0.5:
+        return 0.0
+    return text_length * (1.0 - link_density) + 25.0 * len(paragraphs)
+
+
+def _collapse_text(value: str) -> str:
+    return " ".join(str(value).split()).strip()
 
 
 def url_allowed_by_domains(
@@ -595,6 +800,9 @@ class SystemHostResolver:
 
 
 class AioHttpSourceTransport:
+    def __init__(self, proxy: str | None = None) -> None:
+        self._proxy = proxy or None
+
     async def fetch(
         self,
         url: str,
@@ -604,12 +812,18 @@ class AioHttpSourceTransport:
         timeout_seconds: int,
     ) -> SourceHttpResponse:
         host = urlsplit(url).hostname or ""
-        resolver = _PinnedResolver(host, addresses)
-        connector = aiohttp.TCPConnector(
-            resolver=resolver,
-            use_dns_cache=False,
-            limit=1,
-        )
+        if self._proxy:
+            # The proxy owns DNS resolution and the outbound connection, so the
+            # address set cannot be pinned at the socket layer. The caller has
+            # already rejected forbidden hostnames and non-global resolved
+            # addresses before this fetch runs.
+            connector = aiohttp.TCPConnector(use_dns_cache=False, limit=1)
+        else:
+            connector = aiohttp.TCPConnector(
+                resolver=_PinnedResolver(host, addresses),
+                use_dns_cache=False,
+                limit=1,
+            )
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         try:
             async with aiohttp.ClientSession(
@@ -624,7 +838,14 @@ class AioHttpSourceTransport:
                         "Chrome/131.0.0.0 Safari/537.36"
                     ),
                     "Accept": (
-                        "text/html,text/plain,application/pdf;q=0.9,"
+                        "text/html,application/xhtml+xml,text/plain,"
+                        "application/pdf,"
+                        "application/vnd.openxmlformats-officedocument"
+                        ".wordprocessingml.document,"
+                        "application/vnd.openxmlformats-officedocument"
+                        ".spreadsheetml.sheet,"
+                        "application/vnd.openxmlformats-officedocument"
+                        ".presentationml.presentation;q=0.9,"
                         "*/*;q=0.1"
                     ),
                     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -634,6 +855,7 @@ class AioHttpSourceTransport:
                 async with session.get(
                     url,
                     allow_redirects=False,
+                    proxy=self._proxy,
                 ) as response:
                     content_length = response.headers.get("Content-Length")
                     if (
@@ -664,6 +886,7 @@ class AioHttpSourceTransport:
                         },
                         body=bytes(body),
                         peer_ip=peer_ip,
+                        via_proxy=bool(self._proxy),
                     )
         except SourceAccessError:
             raise
@@ -758,6 +981,7 @@ def default_source_materializer(
             _positive_environment("GPTR_SOURCE_FALLBACK_TIMEOUT_MS", 45_000) // 1000,
         ),
     )
+    proxy = _source_http_proxy()
     fallback_transport = None
     fallback_strategy = "fallback"
     providers = tuple(
@@ -772,16 +996,35 @@ def default_source_materializer(
 
         fallback_transport = PlaywrightSourceTransport(
             os.getenv("PLAYWRIGHT_BROWSERS_PATH")
-            or str(Path(".think-tank") / "playwright-browsers")
+            or str(Path(".think-tank") / "playwright-browsers"),
+            proxy=proxy,
         )
         fallback_strategy = "browser"
     return SourceMaterializer(
         resolver=SystemHostResolver(),
-        transport=AioHttpSourceTransport(),
+        transport=AioHttpSourceTransport(proxy=proxy),
         limits=resolved_limits,
         fallback_transport=fallback_transport,
         fallback_strategy=fallback_strategy,
     )
+
+
+def _source_http_proxy() -> str | None:
+    """Egress proxy for outbound source fetches (``GPTR_SOURCE_HTTP_PROXY``).
+
+    The proxy is opt-in and applies only to the specified-URL reader, never to
+    platform-internal traffic. SSRF hostname and pre-resolution address checks
+    stay in force; only the socket-level peer pin is relaxed, because the proxy
+    is the peer.
+    """
+    for name in ("GPTR_SOURCE_HTTP_PROXY", "GPTR_SOURCE_HTTPS_PROXY"):
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            continue
+        parsed = urlsplit(raw)
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            return raw
+    return None
 
 
 def _positive_environment(name: str, fallback: int) -> int:

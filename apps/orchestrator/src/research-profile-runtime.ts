@@ -53,8 +53,8 @@ export function currentResearchProfileEnvironment(
     capabilities: Object.freeze({
       modes: Object.freeze(["standard", "deep", "synthesis"] as const),
       sourceModes: Object.freeze(sourceModes),
-      urlSourceModes: Object.freeze(["standard"] as const),
-      domainFilterModes: Object.freeze(["standard"] as const),
+      urlSourceModes: Object.freeze(["standard", "deep"] as const),
+      domainFilterModes: Object.freeze(["standard", "deep"] as const),
       retrievers: Object.freeze(available),
       maxRetrievers: Math.min(
         maxRetrievers ?? available.length,

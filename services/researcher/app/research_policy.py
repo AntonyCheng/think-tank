@@ -42,8 +42,8 @@ def current_research_environment(
                 "local",
                 "hybrid",
             ),
-            url_source_modes=("standard",),
-            domain_filter_modes=("standard",),
+            url_source_modes=("standard", "deep"),
+            domain_filter_modes=("standard", "deep"),
             retrievers=retrievers,
             max_retrievers=min(
                 max_retrievers or len(retrievers),
