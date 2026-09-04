@@ -1052,17 +1052,21 @@ async def _prune_irrelevant_web_sources(
     if not scores:
         return
     kept_records, dropped_records = partition_by_relevance(records, scores)
-    if not dropped_records or not kept_records:
-        return
     kept_urls = {record["url"] for record in kept_records}
-    researcher.research_sources = [
-        value
-        for value in sources
-        if (value.get("url") or value.get("href") or "") in kept_urls
-    ]
-    visited = getattr(researcher, "visited_urls", None)
-    if isinstance(visited, (list, set, tuple)):
-        researcher.visited_urls = [url for url in visited if url in kept_urls]
+    if dropped_records and kept_records:
+        researcher.research_sources = [
+            value
+            for value in sources
+            if (value.get("url") or value.get("href") or "") in kept_urls
+        ]
+        visited = getattr(researcher, "visited_urls", None)
+        if isinstance(visited, (list, set, tuple)):
+            researcher.visited_urls = [url for url in visited if url in kept_urls]
+    print(
+        f"🧹 SOURCE RELEVANCE: kept {len(kept_records)}, dropped "
+        f"{len(dropped_records)} off-topic source(s)",
+        flush=True,
+    )
     await collector.record(
         "source.relevance_filtered",
         {
