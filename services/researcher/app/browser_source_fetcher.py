@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
+import socket
 from collections.abc import Sequence
 from urllib.parse import urlsplit
 
-from .source_access import SourceAccessError, SourceHttpResponse
+from .source_access import (
+    SourceAccessError,
+    SourceHttpResponse,
+    _hostname_forbidden,
+)
+
+# Rendering an SPA means letting its own bundle load. The document host is pinned
+# to a verified address; a cross-origin subresource (a CDN, a font host) is only
+# allowed after it resolves entirely to global addresses, so the browser still
+# cannot be steered at link-local, loopback, or private infrastructure. Set
+# GPTR_SOURCE_BROWSER_ISOLATION=strict to keep the old same-host-only behavior.
+_STRICT_ISOLATION = os.getenv("GPTR_SOURCE_BROWSER_ISOLATION", "").strip().lower() == "strict"
+_RENDER_SETTLE_MS = 3000
 
 
 class PlaywrightSourceTransport:
@@ -35,6 +49,7 @@ class PlaywrightSourceTransport:
         except ImportError as exc:
             raise SourceAccessError("source_fallback_failed", url, "The browser fallback is not installed.") from exc
         host = urlsplit(url).hostname or ""
+        subresource_hosts: dict[str, bool] = {host: True}
         browser_path = self._browsers_path
         old_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
         if browser_path:
@@ -64,19 +79,29 @@ class PlaywrightSourceTransport:
 
                         async def restrict(route) -> None:
                             request = route.request
-                            if not request.is_navigation_request():
-                                await route.abort()
-                                return
                             target = urlsplit(request.url)
-                            if target.scheme not in {"http", "https"} or target.hostname != host:
+                            if target.scheme not in {"http", "https"}:
                                 await route.abort()
                                 return
-                            await route.continue_()
+                            request_host = target.hostname or ""
+                            if request.is_navigation_request():
+                                # Navigation may never leave the verified host.
+                                if request_host == host:
+                                    await route.continue_()
+                                else:
+                                    await route.abort()
+                                return
+                            if await self._subresource_allowed(
+                                request_host, host, subresource_hosts
+                            ):
+                                await route.continue_()
+                            else:
+                                await route.abort()
 
                         await page.route("**/*", restrict)
                         response = await page.goto(
                             url,
-                            wait_until="domcontentloaded",
+                            wait_until="load",
                             timeout=timeout_seconds * 1000,
                         )
                         if response is None or not response.ok:
@@ -84,6 +109,7 @@ class PlaywrightSourceTransport:
                         final_url = urlsplit(page.url)
                         if final_url.hostname != host:
                             raise SourceAccessError("source_fallback_failed", url, "The rendered source redirected outside its verified host.")
+                        await self._settle(page, timeout_seconds)
                         content = (await page.content()).encode("utf-8")
                         if len(content) > max_bytes:
                             raise SourceAccessError("source_response_too_large", url, "The rendered source exceeds the allowed size.")
@@ -108,3 +134,47 @@ class PlaywrightSourceTransport:
                     os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
                 else:
                     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = old_path
+
+    @staticmethod
+    async def _settle(page, timeout_seconds: int) -> None:
+        """Give a client-rendered page a bounded window to paint its content."""
+        budget = min(_RENDER_SETTLE_MS, max(0, timeout_seconds * 1000))
+        if budget <= 0:
+            return
+        try:
+            await page.wait_for_load_state("networkidle", timeout=budget)
+        except Exception:
+            await page.wait_for_timeout(budget)
+
+    @staticmethod
+    async def _subresource_allowed(
+        request_host: str,
+        document_host: str,
+        decided: dict[str, bool],
+    ) -> bool:
+        if not request_host:
+            return False
+        if request_host in decided:
+            return decided[request_host]
+        if _STRICT_ISOLATION or _hostname_forbidden(request_host):
+            decided[request_host] = False
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+            records = await loop.getaddrinfo(
+                request_host,
+                None,
+                family=socket.AF_UNSPEC,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
+        except OSError:
+            decided[request_host] = False
+            return False
+        allowed = bool(records) and all(
+            ipaddress.ip_address(record[4][0]).is_global
+            and not ipaddress.ip_address(record[4][0]).is_multicast
+            for record in records
+        )
+        decided[request_host] = allowed
+        return allowed
