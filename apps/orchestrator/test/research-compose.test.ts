@@ -122,7 +122,9 @@ test("tells AO the task profile and the only supported step override seam", () =
   assert.match(description, /只能使用已启用能力/u);
   assert.match(description, /顶层 llm\.params\.think_tank/u);
   assert.match(description, /standard.*默认/u);
-  assert.match(description, /deep.*breadth.*depth.*concurrency/u);
+  assert.match(description, /mode:\s*deep/u);
+  assert.match(description, /deep:[\s\S]*breadth:[\s\S]*depth:[\s\S]*concurrency:/u);
+  assert.match(description, /deep 只对纯 Web 来源可用/u);
   assert.match(description, /synthesis.*depends_on/u);
   assert.match(description, /task.*上游 output 变量/u);
   assert.match(description, /预计研究调用数.*32/u);

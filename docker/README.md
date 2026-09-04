@@ -82,6 +82,12 @@ socket 对端 IP 的校验——因为此时对端是代理。
 若部署策略要求浏览器兜底只访问目标域名本身，在 `runtime.env` 中设置
 `GPTR_SOURCE_BROWSER_ISOLATION=strict`。
 
+默认情况下 AO 规划器会为开放式、需要逐层追问的专家步骤选择 deep 研究模式，边界清晰的
+任务仍用 standard。要强制验证或压测 deep，可在 `runtime.env` 设
+`GPTR_RESEARCH_FORCE_DEEP=1`（或 `2x1x1` 指定 breadth×depth×concurrency）：此后所有
+纯 Web 专家步骤都走 deep，breadth/depth 仍受 `GPTR_DEEP_MAX_*` 约束；URL、本地文档、
+混合来源的步骤不受影响。
+
 实际 `.env` 文件不会被 Git 跟踪。不要把模型密钥、登录密码或 MCP 密钥写进 Compose 和 Dockerfile。
 
 五个配置目录相互隔离。API 容器只读入 `api.env`、`postgres.env`，并挂载可写的

@@ -41,21 +41,23 @@ export function resolveWorkflowResearchProfiles(
       const inferSynthesis =
         !hasExplicitResearchMode(step) &&
         isTerminalAggregationStep(workflow, step);
-      const profile = hasOverride || inferSynthesis
+      const forcedDeep =
+        !inferSynthesis && !hasExplicitResearchMode(step)
+          ? forcedDeepResearchOverride(taskProfile, capabilities)
+          : undefined;
+      const stepOverride = hasOverride
+        ? profileObject(step.llm?.params?.[PROFILE_PARAMETER])
+        : {};
+      const mergedOverride = inferSynthesis
+        ? { ...stepOverride, mode: "synthesis" }
+        : forcedDeep
+          ? { ...stepOverride, ...forcedDeep }
+          : hasOverride
+            ? stepOverride
+            : undefined;
+      const profile = mergedOverride !== undefined
         ? resolveResearchProfile(
-          mergeProfile(
-            taskProfile,
-            inferSynthesis
-              ? {
-                  ...profileObject(
-                    hasOverride
-                      ? step.llm?.params?.[PROFILE_PARAMETER]
-                      : {},
-                  ),
-                  mode: "synthesis",
-                }
-              : step.llm?.params?.[PROFILE_PARAMETER],
-          ),
+          mergeProfile(taskProfile, mergedOverride),
           defaults,
           capabilities,
         )
@@ -131,6 +133,37 @@ function assertSynthesisPlacement(
 function hasExplicitResearchMode(step: StepDefinition): boolean {
   const value = step.llm?.params?.[PROFILE_PARAMETER];
   return isObject(value) && Object.hasOwn(value, "mode");
+}
+
+/**
+ * Operator switch: when GPTR_RESEARCH_FORCE_DEEP is set, every web-search
+ * research step that has not chosen its own mode runs in deep mode. Deep owns
+ * the recursive web exploration, so it is only forced where a web search is
+ * already permitted (not url-only, local, or hybrid). The value may be
+ * "<breadth>x<depth>x<concurrency>" (default "2x1x1"); breadth and depth are
+ * clamped to the deployment's deep-research limits.
+ */
+function forcedDeepResearchOverride(
+  taskProfile: ResearchProfile,
+  capabilities: ResearchCapabilities,
+):
+  | { mode: "deep"; deep: { breadth: number; depth: number; concurrency: number } }
+  | undefined {
+  const raw = process.env.GPTR_RESEARCH_FORCE_DEEP?.trim();
+  if (!raw || raw === "0" || raw.toLowerCase() === "false") return undefined;
+  if (taskProfile.source.mode !== "web") return undefined;
+  const shape = raw.match(/^(\d+)x(\d+)x(\d+)$/i);
+  const limits = capabilities.deepResearch;
+  const clamp = (value: number, max: number | undefined) =>
+    Math.max(1, max ? Math.min(value, max) : value);
+  return {
+    mode: "deep",
+    deep: {
+      breadth: clamp(shape ? Number(shape[1]) : 2, limits?.maxBreadth),
+      depth: clamp(shape ? Number(shape[2]) : 1, limits?.maxDepth),
+      concurrency: Math.min(Math.max(1, shape ? Number(shape[3]) : 1), 4),
+    },
+  };
 }
 
 export function assertWorkflowResearchProfilePlacement(

@@ -350,6 +350,116 @@ test("workflow research profiles cannot broaden the task source grant", () => {
   );
 });
 
+function withForceDeep<T>(value: string | undefined, run: () => T): T {
+  const previous = process.env.GPTR_RESEARCH_FORCE_DEEP;
+  if (value === undefined) delete process.env.GPTR_RESEARCH_FORCE_DEEP;
+  else process.env.GPTR_RESEARCH_FORCE_DEEP = value;
+  try {
+    return run();
+  } finally {
+    if (previous === undefined) delete process.env.GPTR_RESEARCH_FORCE_DEEP;
+    else process.env.GPTR_RESEARCH_FORCE_DEEP = previous;
+  }
+}
+
+test("GPTR_RESEARCH_FORCE_DEEP promotes a web research step to deep, leaving synthesis alone", () => {
+  const environment = currentResearchProfileEnvironment("duckduckgo");
+  const taskProfile = resolveResearchProfile(
+    null,
+    environment.defaults,
+    environment.capabilities,
+  );
+  const workflow = workflowWithStepOverride(false);
+  workflow.steps[0]!.output = "market_research";
+  workflow.steps[1]!.task = "Synthesize {{market_research}}.";
+
+  const profiles = withForceDeep("1", () =>
+    resolveWorkflowResearchProfiles(
+      workflow,
+      taskProfile,
+      environment.capabilities,
+    ),
+  );
+
+  assert.equal(profiles.get("research_market")?.mode, "deep");
+  assert.deepEqual(profiles.get("research_market")?.deep, {
+    breadth: 2,
+    depth: 1,
+    concurrency: 1,
+  });
+  assert.equal(profiles.get("final")?.mode, "synthesis");
+});
+
+test("GPTR_RESEARCH_FORCE_DEEP parses an explicit shape and clamps to deployment limits", () => {
+  const environment = currentResearchProfileEnvironment("duckduckgo");
+  const taskProfile = resolveResearchProfile(
+    null,
+    environment.defaults,
+    environment.capabilities,
+  );
+  const workflow = workflowWithStepOverride(false);
+  workflow.steps[0]!.output = "market_research";
+  workflow.steps[1]!.task = "Synthesize {{market_research}}.";
+
+  const profiles = withForceDeep("9x9x9", () =>
+    resolveWorkflowResearchProfiles(
+      workflow,
+      taskProfile,
+      environment.capabilities,
+    ),
+  );
+
+  assert.deepEqual(profiles.get("research_market")?.deep, {
+    breadth: environment.capabilities.deepResearch!.maxBreadth,
+    depth: environment.capabilities.deepResearch!.maxDepth,
+    concurrency: 4,
+  });
+});
+
+test("GPTR_RESEARCH_FORCE_DEEP is ignored for a non-web task source", () => {
+  const environment = currentResearchProfileEnvironment("duckduckgo");
+  const taskProfile = resolveResearchProfile(
+    { source: { mode: "urls", urls: ["https://example.com/report"] } },
+    environment.defaults,
+    environment.capabilities,
+  );
+  const workflow = workflowWithStepOverride(false);
+  workflow.steps[0]!.output = "market_research";
+  workflow.steps[1]!.task = "Synthesize {{market_research}}.";
+
+  const profiles = withForceDeep("1", () =>
+    resolveWorkflowResearchProfiles(
+      workflow,
+      taskProfile,
+      environment.capabilities,
+    ),
+  );
+
+  assert.equal(profiles.get("research_market")?.mode, "standard");
+});
+
+test("GPTR_RESEARCH_FORCE_DEEP does not override a step's explicit mode", () => {
+  const environment = currentResearchProfileEnvironment("duckduckgo");
+  const taskProfile = resolveResearchProfile(
+    null,
+    environment.defaults,
+    environment.capabilities,
+  );
+  const workflow = workflowWithStepOverride(true, { mode: "standard" });
+  workflow.steps[0]!.output = "market_research";
+  workflow.steps[1]!.task = "Synthesize {{market_research}}.";
+
+  const profiles = withForceDeep("1", () =>
+    resolveWorkflowResearchProfiles(
+      workflow,
+      taskProfile,
+      environment.capabilities,
+    ),
+  );
+
+  assert.equal(profiles.get("research_market")?.mode, "standard");
+});
+
 function workflowWithStepOverride(
   hasOverride: boolean,
   override?: unknown,

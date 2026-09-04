@@ -275,6 +275,7 @@ Rules:
 - Use snake_case for every id and output. Each referenced {{variable}} must be an output from a listed dependency.
 - Use independent research experts as parallel root steps. Use exactly one terminal, normal expert step to synthesize their outputs.
 - Every normal step needs non-empty id, role, task, and output. The final step also needs 2-5 objectively checkable acceptance conditions.
+- A root research step may set llm.params.think_tank on itself to run deep research (mode: deep plus a deep: {breadth, depth, concurrency} block) or to override search limits. See the research configuration contract in the request for when and how. Never put think_tank at the workflow level or on the synthesis step.
 - Never impose a character, word, or token limit in any task or acceptance criterion. Define report depth through coverage, evidence, comparison, implications, and uncertainty.
 - Do not generate a references section. Keep observed source URLs inline in expert reports for later citation processing.
 
