@@ -4,6 +4,7 @@ export const RESEARCH_RETRIEVERS = [
   "duckduckgo",
   "searx",
   "tavily",
+  "bocha",
   "arxiv",
   "openalex",
   "semantic_scholar",

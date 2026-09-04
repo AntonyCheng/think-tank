@@ -1,6 +1,8 @@
 use_default_settings:
   engines:
     keep_only:
+      - 360search
+      - quark
       - bing
 
 general:
@@ -22,7 +24,17 @@ server:
   public_instance: false
   image_proxy: false
 
+# 面向中国大陆部署：只保留在境内可直连的搜索引擎。
+# Google / DuckDuckGo / Startpage / Brave 在境内不可用，一律不启用。
+# baidu / sogou 对 SearXNG 请求会返回验证码，已剔除；bing 保留（HTML 解析偶发失败）。
+# 这几个引擎会被搜索引擎方限流，SearXNG 仅作兜底，主检索器请配置 bocha（博查）。
 engines:
+  - name: 360search
+    disabled: false
+    timeout: 15.0
+  - name: quark
+    disabled: false
+    timeout: 15.0
   - name: bing
     disabled: false
-    base_url: https://www.bing.com
+    base_url: https://cn.bing.com

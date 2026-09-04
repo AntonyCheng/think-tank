@@ -43,6 +43,11 @@ from .source_access import (
     SourceAccessError,
     default_source_materializer,
 )
+from .source_relevance import (
+    partition_by_relevance,
+    relevance_filtering_enabled,
+    score_sources,
+)
 from .synthesis_compression import (
     CompressionStats,
     SourceEvidenceCompressor,
@@ -150,6 +155,15 @@ async def run_research(
         raise HTTPException(
             status_code=422,
             detail="TAVILY_API_KEY is required when retriever=tavily",
+        )
+    if (
+        requested_web_policy is not None
+        and "bocha" in requested_web_policy.retrievers
+        and not os.getenv("BOCHA_API_KEY")
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="BOCHA_API_KEY is required when retriever=bocha",
         )
 
     report_policy = derive_report_evidence_policy(
@@ -565,18 +579,36 @@ async def run_research(
                     "progressEvents": len(progress_tasks),
                 },
             )
+            await _prune_irrelevant_web_sources(
+                researcher, query, request, collector
+            )
             deep_extra_context = "\n\n".join(
                 context
                 for context in (private_context, specified_context)
                 if context
             )
-            if deep_extra_context:
-                # Deep mode owns the recursive web exploration, but any local
-                # documents or specified URLs still have to reach the report.
+            # Deep mode's own context is a flat list of "learnings" that rarely
+            # keeps a per-claim URL. Rebuild the write-time context from the
+            # on-topic source bodies the recursion actually collected so the
+            # report can carry inline citations, exactly like standard mode.
+            deep_source_records = _research_source_records(researcher)
+            deep_web_context = ""
+            if any(record["text"] for record in deep_source_records):
+                deep_web_context = await _prepare_web_evidence_context(
+                    deep_source_records,
+                    collector,
+                    request,
+                )
+            combined_deep_context = "\n\n".join(
+                context
+                for context in (deep_extra_context, deep_web_context)
+                if context
+            )
+            if combined_deep_context:
                 raw_report = await _write_report_with_context(
                     researcher,
                     _combine_research_context(
-                        deep_extra_context,
+                        combined_deep_context,
                         researcher.get_research_context(),
                     ),
                 )
@@ -632,6 +664,9 @@ async def run_research(
                 )
         else:
             await researcher.conduct_research()
+            await _prune_irrelevant_web_sources(
+                researcher, query, request, collector
+            )
             web_context = researcher.get_research_context()
             source_records = _research_source_records(researcher)
             if (
@@ -955,6 +990,102 @@ def _positive_environment_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _embedding_settings(request: ResearchRequest) -> tuple[str, str, str] | None:
+    base_url = (
+        request.embedding_base_url
+        or os.getenv("GPTR_EMBEDDING_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+    )
+    api_key = request.embedding_api_key or os.getenv("GPTR_EMBEDDING_API_KEY")
+    raw_model = request.embedding or os.getenv("EMBEDDING") or ""
+    model = raw_model.split(":", 1)[1] if ":" in raw_model else raw_model
+    if not base_url or not model:
+        return None
+    return base_url, api_key or "", model
+
+
+async def _prune_irrelevant_web_sources(
+    researcher: Any,
+    topic: str,
+    request: ResearchRequest,
+    collector: Any,
+) -> None:
+    """Drop sources a retriever returned that are not about the topic.
+
+    Mutates ``researcher.research_sources`` / ``researcher.visited_urls`` in
+    place so every later consumer (report context, citation list, captured
+    evidence) sees only the on-topic sources.
+    """
+    if not relevance_filtering_enabled() or not topic.strip():
+        return
+    sources = [
+        value
+        for value in (getattr(researcher, "research_sources", None) or [])
+        if isinstance(value, dict)
+    ]
+    if len(sources) < 4:
+        return
+    embedding = _embedding_settings(request)
+    if embedding is None:
+        return
+    base_url, api_key, model = embedding
+    records = [
+        {
+            "url": value.get("url") or value.get("href") or "",
+            "title": value.get("title") or "",
+            "text": (
+                value.get("raw_content")
+                or value.get("content")
+                or value.get("text")
+                or ""
+            ),
+        }
+        for value in sources
+    ]
+    try:
+        scores = await score_sources(
+            topic,
+            records,
+            embedding_base_url=base_url,
+            embedding_api_key=api_key,
+            embedding_model=model,
+        )
+    except Exception as exc:  # noqa: BLE001 - filtering is best-effort
+        await collector.record(
+            "source.relevance_filter_skipped",
+            {"reason": type(exc).__name__},
+        )
+        return
+    if not scores:
+        return
+    kept_records, dropped_records = partition_by_relevance(records, scores)
+    if not dropped_records or not kept_records:
+        return
+    kept_urls = {record["url"] for record in kept_records}
+    researcher.research_sources = [
+        value
+        for value in sources
+        if (value.get("url") or value.get("href") or "") in kept_urls
+    ]
+    visited = getattr(researcher, "visited_urls", None)
+    if isinstance(visited, (list, set, tuple)):
+        researcher.visited_urls = [url for url in visited if url in kept_urls]
+    await collector.record(
+        "source.relevance_filtered",
+        {
+            "kept": len(kept_records),
+            "dropped": len(dropped_records),
+            "droppedUrls": [record["url"] for record in dropped_records][:20],
+            "minKeptScore": round(
+                min(scores[url] for url in kept_urls if url in scores),
+                3,
+            )
+            if any(url in scores for url in kept_urls)
+            else None,
+        },
+    )
 
 
 def _research_source_records(researcher: Any) -> list[dict[str, str]]:

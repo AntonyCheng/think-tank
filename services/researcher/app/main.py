@@ -93,17 +93,20 @@ async def _editor_search_credentials(
 ) -> AsyncIterator[None]:
     """Apply request-scoped retriever credentials for editor/search probes."""
     async with _editor_search_environment_lock:
-        previous = os.environ.get("TAVILY_API_KEY")
-        tavily_api_key = api_keys.get("tavily", "").strip()
-        if tavily_api_key:
-            os.environ["TAVILY_API_KEY"] = tavily_api_key
+        managed = {"TAVILY_API_KEY": "tavily", "BOCHA_API_KEY": "bocha"}
+        previous = {name: os.environ.get(name) for name in managed}
+        for name, key_id in managed.items():
+            value = api_keys.get(key_id, "").strip()
+            if value:
+                os.environ[name] = value
         try:
             yield
         finally:
-            if previous is None:
-                os.environ.pop("TAVILY_API_KEY", None)
-            else:
-                os.environ["TAVILY_API_KEY"] = previous
+            for name, prior in previous.items():
+                if prior is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = prior
 
 
 async def _search_with_request_credentials(

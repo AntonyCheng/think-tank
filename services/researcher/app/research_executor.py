@@ -33,6 +33,7 @@ MANAGED_ENVIRONMENT = (
     "GPTR_MAX_RETRIEVERS",
     "GPTR_RETRIEVER_TIMEOUT_MS",
     "TAVILY_API_KEY",
+    "BOCHA_API_KEY",
     "OPENALEX_EMAIL",
     "OPENALEX_API_KEY",
     "NCBI_API_KEY",
@@ -424,6 +425,10 @@ def _resolve_managed_environment(
             "TAVILY_API_KEY": (
                 request.retriever_api_keys.get("tavily")
                 or values["TAVILY_API_KEY"]
+            ),
+            "BOCHA_API_KEY": (
+                request.retriever_api_keys.get("bocha")
+                or values["BOCHA_API_KEY"]
             ),
             "MAX_SEARCH_RESULTS_PER_QUERY": str(
                 profile.limits.max_search_results_per_query

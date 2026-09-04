@@ -56,10 +56,22 @@ mcp.env:THINK_TANK_SERVICE_API_KEY
 
 `MCP_PUBLIC_BASE_URL` 必须是远程 Agent 能访问的地址，并使用 MCP 的宿主机映射端口（默认 `7169`）；部署服务器地址变化时需要同步修改。
 
-`runtime.env` 默认启用 `duckduckgo`；如启用 `searxng`，其中 `SEARX_URL` 必须保留为
-`http://thinktank-searxng:8080`。SearXNG 的 `settings.yml` 已启用 JSON
-格式，供 GPT Researcher 调用；默认同时映射宿主机端口 `7170`，应仅在可信网络中暴露。
-`searxng.env` 中的 `SEARXNG_SECRET` 是 SearXNG 的服务密钥，应替换为随机长字符串。
+**检索器（中国大陆部署）**：DuckDuckGo 与 Google 在境内均不可直连。默认配置为
+`GPTR_ENABLED_RETRIEVERS=searx,bocha,tavily`，`RETRIEVER=searx`：
+
+- **博查 bocha**（推荐主检索器）：境内 API（`api.bochaai.com`，阿里云），按次计费。
+  在 `runtime.env` 或设置页填写 `BOCHA_API_KEY` 后，把 `RETRIEVER` 改为
+  `bocha,searx`（博查为主，SearXNG 兜底）。
+- **本地 SearXNG**：`settings.yml` 已改为只启用境内可直连引擎（360search、quark、
+  bing）。这些引擎会被搜索引擎方限流，仅作兜底，不建议单独作为主检索器。
+- `SEARX_URL` 必须保留为 `http://thinktank-searxng:8080`；SearXNG 默认映射宿主机
+  端口 `7170`，应仅在可信网络中暴露。`searxng.env` 中的 `SEARXNG_SECRET` 应替换为
+  随机长字符串。
+- 可出海的环境可把 `duckduckgo` 加回 `GPTR_ENABLED_RETRIEVERS`。
+
+检索回的来源会按与研究主题的向量相似度过滤（用已配置的向量模型），剔除搜索引擎返回
+的无关页面——深度研究会大量递归检索，没有这一层容易混入垃圾来源。
+`GPTR_SOURCE_RELEVANCE_FILTER=0` 关闭，`GPTR_SOURCE_RELEVANCE_MIN_COSINE` 调阈值。
 
 首次启动后，请使用 `api.env` 中的管理员账号登录系统设置页，检查主模型、备用模型、向量模型、检索器和并发参数。四类大模型角色（AO 编排、AO 验证、GPTR 快速、GPTR 深度）分别在主模型和可选备用模型中配置；向量模型始终独立运行，不参与主备切换。
 
