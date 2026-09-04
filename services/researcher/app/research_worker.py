@@ -156,15 +156,6 @@ async def run_research(
             status_code=422,
             detail="TAVILY_API_KEY is required when retriever=tavily",
         )
-    if (
-        requested_web_policy is not None
-        and "bocha" in requested_web_policy.retrievers
-        and not os.getenv("BOCHA_API_KEY")
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="BOCHA_API_KEY is required when retriever=bocha",
-        )
 
     report_policy = derive_report_evidence_policy(
         research_profile,

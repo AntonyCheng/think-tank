@@ -192,12 +192,8 @@ function fallbackProviderFromEnv(
 function retrieverApiKeysFromEnv(
   env: NodeJS.ProcessEnv,
 ): Partial<Record<ResearchRetriever, string>> {
-  const keys: Partial<Record<ResearchRetriever, string>> = {};
   const tavilyApiKey = env.TAVILY_API_KEY?.trim();
-  if (tavilyApiKey) keys.tavily = tavilyApiKey;
-  const bochaApiKey = env.BOCHA_API_KEY?.trim();
-  if (bochaApiKey) keys.bocha = bochaApiKey;
-  return keys;
+  return tavilyApiKey ? { tavily: tavilyApiKey } : {};
 }
 
 function parseRetrievers(value: string): ResearchRetriever[] {

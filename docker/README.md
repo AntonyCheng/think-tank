@@ -57,13 +57,13 @@ mcp.env:THINK_TANK_SERVICE_API_KEY
 `MCP_PUBLIC_BASE_URL` 必须是远程 Agent 能访问的地址，并使用 MCP 的宿主机映射端口（默认 `7169`）；部署服务器地址变化时需要同步修改。
 
 **检索器（中国大陆部署）**：DuckDuckGo 与 Google 在境内均不可直连。默认配置为
-`GPTR_ENABLED_RETRIEVERS=searx,bocha,tavily`，`RETRIEVER=searx`：
+`GPTR_ENABLED_RETRIEVERS=searx,tavily`，`RETRIEVER=searx`：
 
-- **博查 bocha**（推荐主检索器）：境内 API（`api.bochaai.com`，阿里云），按次计费。
-  在 `runtime.env` 或设置页填写 `BOCHA_API_KEY` 后，把 `RETRIEVER` 改为
-  `bocha,searx`（博查为主，SearXNG 兜底）。
-- **本地 SearXNG**：`settings.yml` 已改为只启用境内可直连引擎（360search、quark、
-  bing）。这些引擎会被搜索引擎方限流，仅作兜底，不建议单独作为主检索器。
+- **本地 SearXNG**（主检索器）：`settings.yml` 已改为只启用境内可直连的引擎
+  （`360search` 稳定，`quark` 次之，`bing` 保留但 HTML 解析偶发失败）。baidu /
+  sogou 对 SearXNG 请求会返验证码，已剔除。
+- **Tavily**（可选）：`api.tavily.com`（境外，AWS，非 GFW 黑名单），填写
+  `TAVILY_API_KEY` 后加入 `GPTR_ENABLED_RETRIEVERS`；境内可达性视网络而定。
 - `SEARX_URL` 必须保留为 `http://thinktank-searxng:8080`；SearXNG 默认映射宿主机
   端口 `7170`，应仅在可信网络中暴露。`searxng.env` 中的 `SEARXNG_SECRET` 应替换为
   随机长字符串。

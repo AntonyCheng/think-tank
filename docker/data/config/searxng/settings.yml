@@ -27,7 +27,7 @@ server:
 # 面向中国大陆部署：只保留在境内可直连的搜索引擎。
 # Google / DuckDuckGo / Startpage / Brave 在境内不可用，一律不启用。
 # baidu / sogou 对 SearXNG 请求会返回验证码，已剔除；bing 保留（HTML 解析偶发失败）。
-# 这几个引擎会被搜索引擎方限流，SearXNG 仅作兜底，主检索器请配置 bocha（博查）。
+# 360search 最稳定，quark 次之；高并发（深度研究）下仍可能被限流。
 engines:
   - name: 360search
     disabled: false
