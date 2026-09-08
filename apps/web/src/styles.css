@@ -3049,10 +3049,11 @@ textarea:focus-visible {
   .sidebar { width: 72px; padding-inline: 10px; }
   .sidebar .brand { padding-inline: 8px; }
   .sidebar .brand-copy,
-  .new-research span,
+  .new-research-label,
   .sidebar-recent,
   .profile-card > :not(.avatar) { display: none; }
-  .new-research { width: 43px; align-self: center; }
+  .new-research { width: 43px; align-self: center; gap: 0; }
+  .new-research .anticon { font-size: 16px; }
   .profile-card { display: flex; margin-top: auto; padding-inline: 0; justify-content: center; }
 }
 

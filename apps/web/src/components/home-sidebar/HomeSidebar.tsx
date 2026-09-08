@@ -105,8 +105,9 @@ export function HomeSidebar({
   return (
     <aside className="sidebar">
       <BrandLockup variant="sidebar" onClick={onNewResearch} label="新建研究" />
-      <button className="new-research" type="button" onClick={onNewResearch}>
-        <PlusOutlined /> <span>新建研究</span>
+      <button className="new-research" type="button" onClick={onNewResearch} title="新建研究">
+        <PlusOutlined />
+        <span className="new-research-label">新建研究</span>
       </button>
 
       <div className="sidebar-recent">
