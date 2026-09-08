@@ -12,6 +12,7 @@ import {
 import type { AuthStatus } from "../../services/auth-client";
 import { deleteResearchTask, listResearchHistory } from "../../services/api-client";
 import type { ResearchHistoryItem, TaskStatus } from "../../domain/task";
+import { BrandLockup } from "../brand/BrandLockup";
 
 interface HomeSidebarProps {
   auth: AuthStatus;
@@ -103,13 +104,7 @@ export function HomeSidebar({
 
   return (
     <aside className="sidebar">
-      <button className="brand" type="button" onClick={onNewResearch}>
-        <span aria-hidden="true" className="brand-mark">智</span>
-        <span className="brand-copy">
-          <strong>智研AI助手</strong>
-          <small>Deep Research</small>
-        </span>
-      </button>
+      <BrandLockup variant="sidebar" onClick={onNewResearch} label="新建研究" />
       <button className="new-research" type="button" onClick={onNewResearch}>
         <PlusOutlined /> <span>新建研究</span>
       </button>

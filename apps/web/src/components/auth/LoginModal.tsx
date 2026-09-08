@@ -45,7 +45,7 @@ export function LoginModal({
         </div>
         <div className="login-modal-form-pane">
           <div className="login-modal-heading">
-            <h2>登录智研AI助手</h2>
+            <h2>登录智研<span className="brand-ai">AI</span>顾问</h2>
             <p>登录后开始研究并访问你的研究记录。</p>
           </div>
           {error && <Alert className="login-modal-error" message={error} showIcon type="error" />}

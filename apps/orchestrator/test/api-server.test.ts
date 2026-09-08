@@ -1142,9 +1142,9 @@ test("serves the React build entry and rejects unknown assets", async (t) => {
   await mkdir(join(webRoot, "assets"), { recursive: true });
   await writeFile(
     join(webRoot, "index.html"),
-    "<!doctype html><title>智研AI助手</title><script type=\"module\" src=\"/assets/index-test.js\"></script>",
+    "<!doctype html><title>智研AI顾问</title><script type=\"module\" src=\"/assets/index-test.js\"></script>",
   );
-  await writeFile(join(webRoot, "assets", "index-test.js"), "console.log('智研AI助手');");
+  await writeFile(join(webRoot, "assets", "index-test.js"), "console.log('智研AI顾问');");
   await writeFile(join(webRoot, "assets", "index-test.css"), ".app-shell { color: #20252b; }");
   const server = createApiServer(
     manager,
@@ -1169,14 +1169,14 @@ test("serves the React build entry and rejects unknown assets", async (t) => {
   assert.equal(page.status, 200);
   assert.match(page.headers.get("content-type") ?? "", /text\/html/u);
   const pageText = await page.text();
-  assert.match(pageText, /智研AI助手/u);
+  assert.match(pageText, /智研AI顾问/u);
   assert.match(pageText, /\/assets\/index-test\.js/u);
   assert.doesNotMatch(pageText, /AI 智囊团|markdown-it\.min|app\.js/u);
 
   const script = await fetch(`${baseUrl}/assets/index-test.js`);
   assert.equal(script.status, 200);
   const scriptText = await script.text();
-  assert.match(scriptText, /智研AI助手/u);
+  assert.match(scriptText, /智研AI顾问/u);
 
   const styles = await fetch(`${baseUrl}/assets/index-test.css`);
   assert.equal(styles.status, 200);

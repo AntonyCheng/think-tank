@@ -111,23 +111,12 @@ textarea:focus-visible {
 }
 
 .sidebar .brand-copy {
-  display: flex;
-  flex-direction: column;
   line-height: 1.15;
-  text-align: left;
 }
 
-.sidebar .brand-copy strong {
+.sidebar .brand-copy > strong {
   font-size: 16px;
   letter-spacing: 0.03em;
-}
-
-.sidebar .brand-copy small {
-  margin-top: 4px;
-  color: #99999f;
-  font-size: 12px;
-  letter-spacing: 0.17em;
-  text-transform: uppercase;
 }
 
 .new-research {
@@ -362,26 +351,18 @@ textarea:focus-visible {
 }
 
 .brand-mark {
-  display: grid;
+  display: block;
   width: 35px;
   height: 35px;
   flex: 0 0 auto;
-  place-items: center;
   border-radius: 11px;
-  color: #ffffff;
-  background: var(--union-red);
   box-shadow: 0 6px 16px rgb(230 0 18 / 18%);
-  font-size: 16px;
-  font-weight: 800;
 }
 
 .brand-copy {
+  display: flex;
+  flex-direction: column;
   text-align: left;
-}
-
-.brand-copy > strong,
-.brand-copy > span {
-  display: block;
 }
 
 .brand-copy > strong {
@@ -393,7 +374,7 @@ textarea:focus-visible {
   font-weight: 750;
 }
 
-.brand-copy > span {
+.brand-tagline {
   margin-top: 2px;
   color: #7a8490;
   font-size: 12px;
